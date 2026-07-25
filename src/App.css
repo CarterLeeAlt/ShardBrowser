@@ -1192,12 +1192,20 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 /* ===== bulk-import preview ===== */
 .bulk-preview-head {
   display: flex; align-items: center; gap: 12px;
-  padding-bottom: 6px;
+  /* Match the list's 1px border + 10px row inset. */
+  padding: 0 0 6px 11px;
 }
-.bulk-preview-checkall {
-  display: inline-flex; align-items: center; gap: 8px;
+.dialog-body .bulk-preview-checkall {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
   font-size: 12.5px;
   color: var(--tx-2);
+}
+.bulk-preview-checkall input[type="checkbox"],
+.bulk-row > input[type="checkbox"] {
+  margin: 0;
 }
 .bulk-preview-list {
   max-height: 380px;
