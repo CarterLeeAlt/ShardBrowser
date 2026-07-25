@@ -5,8 +5,6 @@ use std::fs;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
-    /// Absolute path to the ShardX executable.
-    pub browser_path: Option<String>,
     /// Theme: "light" (default) or "dark".
     #[serde(default = "default_theme")]
     pub theme: String,
@@ -55,7 +53,6 @@ pub fn load() -> Result<Settings> {
     let path = store::settings_path()?;
     if !path.exists() {
         return Ok(Settings {
-            browser_path: None,
             theme: default_theme(),
             geo_checker: Some("ip-api.com".into()),
             screen_resolution_mode: Some("fingerprint".into()),
