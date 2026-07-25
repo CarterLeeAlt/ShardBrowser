@@ -176,7 +176,7 @@ jobs:
           else
             src="$rel/shardx-launcher.exe"
           fi
-          cp -v "$src" "staging/ShardX-Launcher-portable-${{ matrix.label }}.exe"
+          cp -v "$src" "staging/ShardX-Launcher-portable-${{ needs.prepare.outputs.version }}-${{ matrix.label }}.exe"
           ls -la staging/
 
       - name: Upload to workflow artifacts (intermediate)
@@ -213,7 +213,7 @@ jobs:
             ## Install
 
             * **macOS** (Apple Silicon — M1/M2/M3/M4) — download the `.dmg` and drag *ShardX Launcher.app* to Applications.  The build isn't notarized (no Apple Developer ID), so macOS blocks it on first launch — clear the quarantine flag in Terminal, then open it normally: `xattr -dr com.apple.quarantine "/Applications/ShardX Launcher.app"`  (alternative: *System Settings → Privacy & Security → Open Anyway*).
-            * **Windows** — `.msi` installer, or the installer-free **portable** `ShardX-Launcher-portable-win-x64.exe` (just run it — needs the Evergreen WebView2 runtime, preinstalled on Windows 10/11).  SmartScreen will warn: *More info* → *Run anyway* (the build isn't signed with Authenticode).
+            * **Windows** — `.msi` installer, or the installer-free **portable** `ShardX-Launcher-portable-${{ needs.prepare.outputs.version }}-win-x64.exe` (just run it — needs the Evergreen WebView2 runtime, preinstalled on Windows 10/11).  SmartScreen will warn: *More info* → *Run anyway* (the build isn't signed with Authenticode).
             * **Linux** — `.AppImage` (`chmod +x` and run) or `.deb` (`sudo apt install ./...deb`).
 
             On first launch the launcher downloads the patched ShardX browser, Widevine CDM and a starter library of 170 device profiles from our CDN.  After that it boots straight to the workspace.
