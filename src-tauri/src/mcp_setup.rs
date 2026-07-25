@@ -1,5 +1,5 @@
-// Download the MCP server source from our R2 CDN into a user-chosen
-// folder.  The app does NOT run or manage it — the user installs deps
+// Download the MCP server source from our R2 CDN into the launcher's
+// portable data directory. The app does NOT run or manage it — the user installs deps
 // + registers it with their MCP client themselves (see
 // rust/shardx-launcher/mcp/README.md).
 //
@@ -8,7 +8,7 @@
 // node_modules / .gitignore noise.
 
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::{Component, PathBuf};
 
 /// Public R2.dev URL for the MCP server bundle (matches the launcher's
 /// runtime bucket — same CDN as the browser, Widevine and fingerprint
@@ -19,9 +19,9 @@ const MCP_ARCHIVE_URL: &str =
 /// Top-level directory inside the tarball that wraps the actual files.
 const MCP_TOP_DIR: &str = "ShardX-MCP";
 
-/// Download the MCP server into `<dir>/mcp` and return that path.
-pub async fn download_mcp(dir: &Path) -> Result<PathBuf> {
-    let dest = dir.join("mcp");
+/// Download the MCP server into the fixed portable `mcp` directory.
+pub async fn download_mcp() -> Result<PathBuf> {
+    let dest = crate::store::config_root()?.join("mcp");
     let bytes = reqwest::get(MCP_ARCHIVE_URL)
         .await
         .context("download MCP archive")?
@@ -48,15 +48,22 @@ pub async fn download_mcp(dir: &Path) -> Result<PathBuf> {
         if rel.as_os_str().is_empty() {
             continue;
         }
+        // The archive is remote input. Only ordinary relative components are
+        // allowed, so a crafted absolute/parent path can never escape `dest`.
+        if !rel.components().all(|c| matches!(c, Component::Normal(_))) {
+            anyhow::bail!("MCP archive contains an unsafe path: {}", path.display());
+        }
         let out = dest.join(&rel);
         if entry.header().entry_type().is_dir() {
             std::fs::create_dir_all(&out)?;
-        } else {
+        } else if entry.header().entry_type().is_file() {
             if let Some(parent) = out.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             entry.unpack(&out)?;
             extracted += 1;
+        } else {
+            anyhow::bail!("MCP archive contains an unsupported link or special entry");
         }
     }
     if extracted == 0 {

@@ -1,5 +1,6 @@
-// Persistent storage layout under the user's config dir:
-//   $CONFIG/shardx-launcher/
+// Persistent storage layout. On Windows, the local `dirs` wrapper resolves the
+// base to the executable directory, so every entry stays portable:
+//   <launcher-dir>/shardx-launcher/
 //     profiles/                   ← fingerprint profile JSON files
 //     proxies.json                ← saved proxy list
 //     user-data/<profile-id>/     ← per-profile user-data-dir for ShardX
@@ -23,6 +24,12 @@ pub fn profiles_dir() -> Result<PathBuf> {
 
 pub fn fingerprints_dir() -> Result<PathBuf> {
     let p = config_root()?.join("fingerprints");
+    std::fs::create_dir_all(&p)?;
+    Ok(p)
+}
+
+pub fn exports_dir() -> Result<PathBuf> {
+    let p = config_root()?.join("exports");
     std::fs::create_dir_all(&p)?;
     Ok(p)
 }

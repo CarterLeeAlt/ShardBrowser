@@ -14,8 +14,9 @@
     "opener:default",
     {
       "identifier": "opener:allow-open-path",
-      "allow": [{ "path": "$HOME/**" }]
-    },
-    "dialog:default"
+      "allow": [
+        { "path": "$EXE/shardx-launcher/**" }
+      ]
+    }
   ]
 }

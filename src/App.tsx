@@ -4,7 +4,6 @@ import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import "./App.css";
 
@@ -24,7 +23,35 @@ const clip = {
   read: () => invoke<string>("clipboard_read"),
 };
 
-const readTextFile = (path: string) => invoke<string>("read_text_file", { path });
+/// Read a JSON file selected by the user without exposing an arbitrary path to
+/// the Rust backend. The file contents stay in-memory until they are imported.
+const pickJsonText = () => new Promise<string | null>((resolve, reject) => {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = ".json,application/json";
+  input.style.display = "none";
+  input.addEventListener("change", async () => {
+    const file = input.files?.[0];
+    if (!file) {
+      input.remove();
+      resolve(null);
+      return;
+    }
+    try {
+      resolve(await file.text());
+    } catch (e) {
+      reject(e);
+    } finally {
+      input.remove();
+    }
+  }, { once: true });
+  input.addEventListener("cancel", () => {
+    input.remove();
+    resolve(null);
+  }, { once: true });
+  document.body.appendChild(input);
+  input.click();
+});
 
 // Single UTM tag appended to every outbound proxyshard.com link.
 const UTM_QS = "utm_source=shardx&utm_medium=referral&utm_campaign=shardx-launcher";
@@ -221,7 +248,6 @@ type ProxyEntry = {
   notes: string;
 };
 type Settings = {
-  browser_path: string | null;
   theme: string;
   geo_checker?: string | null;
   screen_resolution_mode?: string | null;
@@ -662,11 +688,9 @@ function Sidebar({
       .catch(() => {});
   }, []);
   const downloadMcp = async () => {
-    const dir = await open({ directory: true, title: "Where to download the MCP server" });
-    if (typeof dir !== "string") return;
     setMcpBusy(true);
     try {
-      const p = await invoke<string>("mcp_download", { dir });
+      const p = await invoke<string>("mcp_download");
       toast.ok(`MCP downloaded to ${p}`);
     } catch (e) { toast.err("MCP download failed: " + String(e)); }
     finally { setMcpBusy(false); }
@@ -1167,15 +1191,10 @@ function BrowsersView() {
 
   const exportCookies = async (p: ProfileMeta) => {
     try {
-      const path = await saveDialog({
-        defaultPath: `${(p.name || p.id).replace(/[^\w.-]+/g, "_")}-cookies.json`,
-        filters: [{ name: "JSON", extensions: ["json"] }],
-      });
-      if (typeof path !== "string") return; // cancelled
-      const n = await invoke<number>("cookies_export_to_file", { profileId: p.id, path });
-      toast.ok(`Exported ${n} cookie${n === 1 ? "" : "s"}`);
+      const result = await invoke<{ count: number; path: string }>("cookies_export_portable", { profileId: p.id });
+      toast.ok(`Exported ${result.count} cookie${result.count === 1 ? "" : "s"}`);
       // Open the containing folder so the user sees exactly where it went.
-      const dir = path.replace(/[/\\][^/\\]*$/, "");
+      const dir = result.path.replace(/[/\\][^/\\]*$/, "");
       try { await openPath(dir); } catch {}
     } catch (e) { toast.err(String(e)); }
   };
@@ -1183,12 +1202,8 @@ function BrowsersView() {
   const importCookies = async (p: ProfileMeta) => {
     if (running[p.id]) { toast.err("Stop the profile before importing cookies"); return; }
     try {
-      const path = await open({
-        multiple: false, directory: false, title: "Select cookies JSON",
-        filters: [{ name: "JSON", extensions: ["json"] }],
-      });
-      if (typeof path !== "string") return;
-      const text = await invoke<string>("read_text_file", { path });
+      const text = await pickJsonText();
+      if (text === null) return;
       const cookies = JSON.parse(text);
       if (!Array.isArray(cookies)) { toast.err("Expected a JSON array of cookies"); return; }
       const n = await invoke<number>("cookies_import", { profileId: p.id, cookies });
@@ -3246,15 +3261,9 @@ function FingerprintsView() {
   };
 
   const importJsonFile = async () => {
-    const path = await open({
-      multiple: false,
-      directory: false,
-      title: "Pick a FingerprintConfig JSON",
-      filters: [{ name: "JSON", extensions: ["json"] }],
-    });
-    if (typeof path !== "string") return;
     try {
-      const txt = await readTextFile(path);
+      const txt = await pickJsonText();
+      if (txt === null) return;
       const e = await invoke<FingerprintEntry>("fingerprint_import", { jsonText: txt, idHint: null });
       toast.ok(`Imported "${e.label}"`);
       reload();
@@ -4717,7 +4726,6 @@ function PsBuyCard({ onPurchased }: { onPurchased: () => void }) {
 
 function SettingsView() {
   const [s, setS] = useState<Settings>({
-    browser_path: null,
     theme: "dark",
     geo_checker: "ip-api.com",
     screen_resolution_mode: "fingerprint",
@@ -4733,13 +4741,11 @@ function SettingsView() {
   };
 
   const [mcpBusy, setMcpBusy] = useState(false);
-  // Download MCP server source; user manages install + client setup.
+  // Download MCP server source into the portable app data directory.
   const downloadMcp = async () => {
-    const dir = await open({ directory: true, title: "Where to download the MCP server" });
-    if (typeof dir !== "string") return;
     setMcpBusy(true);
     try {
-      const path = await invoke<string>("mcp_download", { dir });
+      const path = await invoke<string>("mcp_download");
       toast.ok(`MCP downloaded to ${path}`);
     } catch (e) { toast.err("MCP download failed: " + String(e)); }
     finally { setMcpBusy(false); }
