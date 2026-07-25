@@ -27,7 +27,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["process", "rt-multi-thread", "macros", "fs", "net", "io-util", "time"] }
 anyhow = "1"
-dirs = "5"
+# Single canonical dependency source on every target. The wrapper keeps Windows
+# portable while delegating to the upstream `dirs` crate on macOS/Linux.
+dirs = { package = "shardx-portable-dirs", path = "portable-dirs" }
 uuid = { version = "1", features = ["v4", "serde"] }
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks", "json"] }
@@ -63,4 +65,3 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",            # HLOCAL + LocalFree live here in 0.59
     "Win32_Security_Cryptography", # CryptProtectData / CryptUnprotectData
 ] }
-
