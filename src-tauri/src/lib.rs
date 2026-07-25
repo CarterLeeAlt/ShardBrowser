@@ -1205,7 +1205,6 @@ pub fn run() {
             mcp_download,
             runtime::runtime_status,
             runtime::runtime_install,
-            runtime::launcher_update_check,
         ])
         .setup(|app| {
             use tauri::Manager;

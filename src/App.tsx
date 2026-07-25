@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -3655,51 +3656,25 @@ function FirstRunGate({ children }: { children: ReactNode }) {
   );
 }
 
-/// Sidebar version pill; tints amber when a newer GitHub Release exists.
-type RtUpdate = {
-  current: string;
-  latest: string | null;
-  update_available: boolean;
-  release_url: string | null;
-};
-
+/// Sidebar version pill; reads only the locally installed app version.
 function VersionPill() {
-  const [info, setInfo] = useState<RtUpdate | null>(null);
+  const [version, setVersion] = useState<string | null>(null);
   useEffect(() => {
-    invoke<RtUpdate>("launcher_update_check").then(setInfo).catch(() => {});
+    getVersion().then(setVersion).catch(() => {});
   }, []);
-  const open = () => {
-    if (info?.release_url) openUrl(info.release_url).catch(() => {});
-  };
-  const clickable = !!info?.release_url;
   return (
     <button
       type="button"
-      className={`version-pill ${info?.update_available ? "update-available" : ""}`}
-      onClick={open}
-      disabled={!clickable}
-      title={
-        info?.update_available
-          ? `New release ${info.latest} is available — click to open the Releases page.`
-          : info
-          ? `Running ${info.current}${info.latest ? `, GitHub: ${info.latest}` : ""}`
-          : "Checking for updates…"
-      }
+      className="version-pill"
+      disabled
+      title={version ? `Running ${version}` : "Version unavailable"}
     >
       <ShardMini />
       <div className="version-pill-text">
         <div className="version-pill-current">
-          ShardX Launcher v{info?.current ?? "…"}
+          ShardX Launcher v{version ?? "…"}
         </div>
-        <div className="version-pill-sub">
-          {info === null
-            ? "checking for updates…"
-            : info.update_available
-            ? `Update available → ${info.latest}`
-            : info.latest
-            ? "up to date"
-            : "offline"}
-        </div>
+        <div className="version-pill-sub">update checks disabled</div>
       </div>
     </button>
   );
