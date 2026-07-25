@@ -10,14 +10,29 @@
  * JetBrains Mono upstream source (pinned for reproducibility):
  * https://github.com/JetBrains/JetBrainsMono/tree/19371302b95d218af43299bce79ddbddd0bc364d
  */
+/*
+ * The source is variable, but the application exposes only two discrete
+ * faces. Both declarations share the same cached WOFF2 asset.
+ */
 @font-face {
   font-family: "ShardX UI";
   src: url("./assets/fonts/JetBrainsMono-Variable.woff2") format("woff2");
   font-style: normal;
-  font-weight: 100 800;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "ShardX UI";
+  src: url("./assets/fonts/JetBrainsMono-Variable.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 600;
   font-display: swap;
 }
 
 :root {
   --font-app: "ShardX UI", "JetBrains Mono", ui-monospace, monospace;
+  /* ShardX typography has two semantic levels only. */
+  --font-weight-regular: 400;
+  --font-weight-emphasis: 600;
 }
