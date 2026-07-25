@@ -654,15 +654,12 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 }
 .pill-stop:hover { background: #fb718533; }
 
-/* Prominent Start/Stop button for the row. */
+/* Fixed icon-only Start/Stop control; matches the adjacent 28px action buttons. */
 .btn-launch {
-  display: inline-flex; align-items: center; justify-content: center;
-  gap: 6px;
-  min-width: 84px;
-  padding: 6px 14px;
-  font-size: 12.5px; font-weight: 600;
-  letter-spacing: .2px;
-  border-radius: 999px;
+  width: 28px; height: 28px; min-width: 28px; flex: 0 0 28px;
+  display: inline-grid; place-items: center;
+  padding: 0;
+  border-radius: var(--radius-sm);
   border: 1px solid #4ade8055;
   background: #4ade8014;
   color: var(--ok);
@@ -674,19 +671,21 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   border-color: #4ade80aa;
   box-shadow: 0 0 0 3px #4ade8014, 0 0 16px -4px #4ade8066;
 }
-.btn-launch:active { transform: translateY(1px); }
+.btn-launch:active:not(:disabled) { transform: translateY(1px); }
+.btn-launch:focus-visible {
+  outline: none;
+  border-color: var(--ok);
+  box-shadow: 0 0 0 3px #4ade8033;
+}
 .btn-launch:disabled {
   opacity: 0.45;
   cursor: not-allowed;
-  border-color: var(--bd-2);
-  background: var(--bg-2);
-  color: var(--tx-3);
 }
 .btn-launch .btn-launch-ico {
   display: inline-grid; place-items: center;
-  width: 14px; height: 14px;
-  font-size: 10px;
+  width: 13px; height: 13px;
 }
+.btn-launch .btn-launch-ico svg { display: block; }
 .btn-launch-stop {
   border-color: #fb718555;
   background: #fb71851a;
@@ -727,7 +726,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
     minmax(120px, 1.1fr)  /* notes */
     minmax(70px, 90px)    /* time (cumulative uptime) */
     minmax(110px, 130px)  /* last run */
-    minmax(280px, auto);  /* row actions (Start + 4 icons) */
+    minmax(200px, auto);  /* six fixed 28px row-action buttons */
   gap: 10px;
   padding: 10px 16px 10px 0;
   align-items: center;
@@ -750,7 +749,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
       minmax(240px, 1.5fr)
       minmax(100px, 1fr)
       minmax(60px, 80px)
-      minmax(260px, auto);
+      minmax(190px, auto);
   }
   .t-cols > .cell-lastrun, .t-cols > .head-lastrun { display: none; }
 }
@@ -959,7 +958,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   vertical-align: middle;
 }
 
-.row-actions { display: flex; gap: 4px; justify-content: flex-end; }
+.row-actions { display: flex; align-items: center; gap: 4px; justify-content: flex-end; }
 
 /* ===== inline editor (expand) ===== */
 
