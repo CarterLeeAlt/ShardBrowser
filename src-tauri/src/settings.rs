@@ -7,7 +7,7 @@ use std::fs;
 pub struct Settings {
     /// Absolute path to the ShardX executable.
     pub browser_path: Option<String>,
-    /// Theme: "dark" (default) or "light".
+    /// Theme: "light" (default) or "dark".
     #[serde(default = "default_theme")]
     pub theme: String,
     /// Geo-IP checker provider used by the proxy "Test" button.
@@ -36,7 +36,7 @@ pub struct Settings {
 }
 
 fn default_theme() -> String {
-    "dark".into()
+    "light".into()
 }
 
 fn default_minimize_to_tray() -> bool {
