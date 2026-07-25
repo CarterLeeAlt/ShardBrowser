@@ -1,12 +1,20 @@
 # Bundled application font
 
-`JetBrainsMono-Variable.woff2` is stored directly in this repository and is
-bundled by Vite through the local reference in `src/fonts.css`. Building the
-application does not fetch fonts from the network.
+The application uses Arimo, an open-source, metrically compatible alternative
+to Arial. Arimo v36 variable WOFF2 subsets are committed in this directory and
+bundled by Vite through local references in `src/fonts.css`; building and
+running ShardX never downloads a font.
 
-`src/fonts.css` is the single typography configuration entry point. When the
-application font changes, replace the local font asset, update its `@font-face`
-metadata there, and update the corresponding license under `public/licenses`.
+The files are sourced from the versioned Google Fonts endpoints under:
 
-The current JetBrains Mono file is pinned to upstream commit
-`19371302b95d218af43299bce79ddbddd0bc364d`.
+`https://fonts.gstatic.com/s/arimo/v36/`
+
+Arimo is licensed under the SIL Open Font License 1.1. The license is stored at
+`public/licenses/Arimo-OFL.txt`.
+
+`src/fonts.css` is the single typography configuration entry point. Feature
+styles must reference `--font-app` rather than naming a font directly. The
+application's two semantic font weights remain 400 and 600.
+
+`JetBrainsMono-Variable.woff2` is retained as an unused legacy asset and is not
+bundled by Vite.
