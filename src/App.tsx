@@ -987,6 +987,7 @@ function useStoreChanged(onChange: () => void) {
 function BrowsersView() {
   const [profiles, setProfiles] = useState<ProfileMeta[]>([]);
   const [proxies, setProxies] = useState<ProxyEntry[]>([]);
+  const [proxySnapshots, setProxySnapshots] = useState<Record<string, ProxyTestSnapshot>>({});
   const [search, setSearch] = useState("");
   const [folder, setFolder] = useState("all");
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -1136,6 +1137,37 @@ function BrowsersView() {
     () => visible.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
     [visible, page],
   );
+
+  // Reuse the most recent persisted proxy test for the exit IP and its real
+  // location. Only bound proxies visible on this page are read, and no geo
+  // service is contacted merely by opening the Browsers page.
+  useEffect(() => {
+    const ids = [...new Set(paged.map((p) => p.proxy_id).filter((id): id is string => !!id))];
+    if (ids.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const entries = await Promise.all(
+        ids.map(async (id) => {
+          try {
+            const snap = await invoke<ProxyTestSnapshot | null>("proxy_last_test", { id });
+            return [id, snap] as const;
+          } catch {
+            return [id, null] as const;
+          }
+        }),
+      );
+      if (cancelled) return;
+      setProxySnapshots((current) => {
+        const next = { ...current };
+        for (const [id, snap] of entries) {
+          if (snap) next[id] = snap;
+          else delete next[id];
+        }
+        return next;
+      });
+    })();
+    return () => { cancelled = true; };
+  }, [paged, proxies]);
 
   // Fall back to "all" when the active folder tab becomes empty.
   useEffect(() => {
@@ -1576,6 +1608,19 @@ function BrowsersView() {
         )}
         {paged.map((p) => {
           const px = p.proxy_id ? proxyMap[p.proxy_id] : null;
+          const proxySnapshot = px ? proxySnapshots[px.id] : undefined;
+          const proxyCountry = (proxySnapshot?.country_code || px?.country || "").trim().toUpperCase();
+          const locationParts = [proxySnapshot?.city, proxySnapshot?.region]
+            .map((part) => (part || "").trim())
+            .filter((part, index, all) => !!part && all.findIndex((v) => v.toLowerCase() === part.toLowerCase()) === index);
+          const proxyLocation = locationParts.join(", ")
+            || (proxySnapshot?.country || "").trim();
+          const hostLooksLikeIp = !!px && (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(px.host) || px.host.includes(":"));
+          // Before the first test, an IP-literal endpoint is a useful fallback.
+          // Once a test exists (including a failed one), never relabel the
+          // endpoint as the detected exit IP.
+          const proxyIp = (proxySnapshot?.ip || (!proxySnapshot && hostLooksLikeIp ? px?.host : "") || "").trim();
+          const proxyDetailLocation = proxyLocation || (!proxySnapshot && proxyIp ? proxyCountry : "");
           const isRunning = !!running[p.id];
           const isExpanded = expanded === p.id;
           const isSel = selected.has(p.id);
@@ -1627,19 +1672,24 @@ function BrowsersView() {
                     {isRunning ? "Running" : "Idle"}
                   </span>
                 </div>
-                <div className="cell-click" onClick={() => setQuickEdit({ kind: "proxy", profile: p })} title="Change proxy">
+                <div className="cell-proxy cell-click" onClick={() => setQuickEdit({ kind: "proxy", profile: p })} title="Change proxy">
                   {px ? (
                     <div className="proxy-cell">
-                      <span className={`badge badge-${px.kind}`}>{px.kind}</span>
-                      <span className="proxy-loc">
-                        {px.country && (
+                      <div className="proxy-main">
+                        <span className={`badge badge-${px.kind}`}>{px.kind}</span>
+                        {proxyCountry && (
                           <>
-                            <CountryFlag cc={px.country} />
-                            <span className="flag">{px.country}</span>
+                            <CountryFlag cc={proxyCountry} />
+                            <span className="flag">{proxyCountry}</span>
                           </>
                         )}
-                        <span className="mono small">{px.host}:{px.port}</span>
-                      </span>
+                      </div>
+                      <div className={`proxy-detail ${!proxyDetailLocation && !proxyIp ? "muted" : ""}`}>
+                        {proxyDetailLocation && <span>{proxyDetailLocation}</span>}
+                        {proxyDetailLocation && proxyIp && <span aria-hidden="true">·</span>}
+                        {proxyIp && <span className="mono">{proxyIp}</span>}
+                        {!proxyDetailLocation && !proxyIp && <span>No test data</span>}
+                      </div>
                     </div>
                   ) : <span className="muted small">— direct —</span>}
                 </div>
