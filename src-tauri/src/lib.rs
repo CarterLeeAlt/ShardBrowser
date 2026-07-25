@@ -811,12 +811,52 @@ fn fingerprint_delete(id: String) -> Result<(), String> {
     fingerprints::delete(&id).map_err(|e| e.to_string())
 }
 
-/// Path to fingerprint library dir (UI "Open library folder").
-#[tauri::command]
-fn fingerprint_dir() -> Result<String, String> {
-    store::fingerprints_dir()
-        .map(|p| p.display().to_string())
+/// Open one of the launcher's own portable directories from trusted Rust.
+/// Canonicalizing both paths prevents a junction/symlink inside the portable
+/// tree from redirecting the opener to an external directory.
+fn open_portable_directory(
+    app: &tauri::AppHandle,
+    directory: std::path::PathBuf,
+) -> Result<(), String> {
+    let root = store::config_root().map_err(|e| e.to_string())?;
+    let canonical_root = std::fs::canonicalize(&root).map_err(|e| e.to_string())?;
+    let canonical_directory = std::fs::canonicalize(&directory).map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+        let executable_directory = executable
+            .parent()
+            .ok_or_else(|| "executable directory unavailable".to_string())?;
+        let canonical_executable_directory =
+            std::fs::canonicalize(executable_directory).map_err(|e| e.to_string())?;
+        if !canonical_root.starts_with(&canonical_executable_directory) {
+            return Err("portable root resolves outside the executable directory".into());
+        }
+    }
+
+    if !canonical_directory.starts_with(&canonical_root) {
+        return Err("refusing to open a directory outside the portable root".into());
+    }
+
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_path(&directory, None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+/// Open the fixed portable fingerprint library directory.
+#[tauri::command]
+fn open_fingerprint_dir(app: tauri::AppHandle) -> Result<(), String> {
+    let directory = store::fingerprints_dir().map_err(|e| e.to_string())?;
+    open_portable_directory(&app, directory)
+}
+
+/// Open the fixed portable cookie-export directory.
+#[tauri::command]
+fn open_exports_dir(app: tauri::AppHandle) -> Result<(), String> {
+    let directory = store::exports_dir().map_err(|e| e.to_string())?;
+    open_portable_directory(&app, directory)
 }
 
 // ---- Process tracker ----
@@ -940,7 +980,7 @@ fn cookies_export(profile_id: String) -> Result<Vec<cookies::Cookie>, String> {
 
 /// Export cookies to a generated file under the portable exports directory.
 #[tauri::command]
-fn cookies_export_portable(profile_id: String) -> Result<Value, String> {
+fn cookies_export_portable(profile_id: String) -> Result<usize, String> {
     if profile_id.is_empty()
         || !profile_id
             .chars()
@@ -958,10 +998,7 @@ fn cookies_export_portable(profile_id: String) -> Result<Value, String> {
         .map_err(|e| e.to_string())?
         .join(format!("{profile_id}-cookies-{stamp}.json"));
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({
-        "count": cookies.len(),
-        "path": path.display().to_string(),
-    }))
+    Ok(cookies.len())
 }
 
 #[tauri::command]
@@ -1294,7 +1331,8 @@ pub fn run() {
             fingerprint_get,
             fingerprint_import,
             fingerprint_delete,
-            fingerprint_dir,
+            open_fingerprint_dir,
+            open_exports_dir,
             process_list,
             process_kill,
             proxy_list,

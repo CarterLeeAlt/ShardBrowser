@@ -11,12 +11,7 @@
     "core:window:allow-unmaximize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
-    "opener:default",
-    {
-      "identifier": "opener:allow-open-path",
-      "allow": [
-        { "path": "$EXE/shardx-launcher/**" }
-      ]
-    }
+    "opener:allow-open-url",
+    "opener:allow-default-urls"
   ]
 }

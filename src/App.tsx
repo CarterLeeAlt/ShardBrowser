@@ -4,7 +4,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import "./App.css";
 
 // Host OS of the launcher window (never spoofed) — drives default OS tab + titlebar.
@@ -1223,11 +1223,11 @@ function BrowsersView() {
 
   const exportCookies = async (p: ProfileMeta) => {
     try {
-      const result = await invoke<{ count: number; path: string }>("cookies_export_portable", { profileId: p.id });
-      toast.ok(`Exported ${result.count} cookie${result.count === 1 ? "" : "s"}`);
-      // Open the containing folder so the user sees exactly where it went.
-      const dir = result.path.replace(/[/\\][^/\\]*$/, "");
-      try { await openPath(dir); } catch {}
+      const count = await invoke<number>("cookies_export_portable", { profileId: p.id });
+      toast.ok(`Exported ${count} cookie${count === 1 ? "" : "s"}`);
+      // The backend opens only the fixed portable exports directory; no file
+      // system path crosses the frontend trust boundary.
+      await invoke("open_exports_dir");
     } catch (e) { toast.err(String(e)); }
   };
 
@@ -3330,9 +3330,7 @@ function FingerprintsView() {
             className="btn-ghost"
             onClick={async () => {
               try {
-                const path = await invoke<string>("fingerprint_dir");
-                // Reveal folder via tauri-plugin-opener.
-                await openPath(path);
+                await invoke("open_fingerprint_dir");
               } catch (e) { toast.err(String(e)); }
             }}
             title="Reveal the on-disk library folder; drop JSONs here to add them"
