@@ -1292,6 +1292,33 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+#[derive(Clone, serde::Serialize)]
+struct ExitBlockedPayload {
+    running_count: usize,
+}
+
+/// Refuse normal launcher exit paths while a ShardX browser child is alive.
+/// The backend tracker is authoritative, so this protection does not depend on
+/// the frontend's two-second process poll being current.
+fn block_exit_if_browsers_running(app: &tauri::AppHandle) -> bool {
+    use tauri::Emitter;
+
+    let running_count = process::Tracker::shared().running().len();
+    if running_count == 0 {
+        return false;
+    }
+
+    eprintln!(
+        "[launcher] exit blocked: {running_count} browser process(es) still running"
+    );
+    show_main_window(app);
+    let _ = app.emit(
+        "launcher:exit-blocked",
+        ExitBlockedPayload { running_count },
+    );
+    true
+}
+
 pub fn run() {
     tauri::Builder::default()
         // Must be the first plugin: a second launch focuses the running window.
@@ -1303,10 +1330,18 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let to_tray = settings::load().map(|s| s.minimize_to_tray).unwrap_or(true);
-                if window.label() == "main" && to_tray {
-                    api.prevent_close();
-                    let _ = window.hide();
+                if window.label() == "main" {
+                    let to_tray = settings::load()
+                        .map(|s| s.minimize_to_tray)
+                        .unwrap_or(true);
+                    if to_tray {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    } else if block_exit_if_browsers_running(window.app_handle()) {
+                        // With minimize-to-tray disabled this close request is
+                        // a real process exit, so the browser guard applies.
+                        api.prevent_close();
+                    }
                 }
             }
         })
@@ -1428,7 +1463,11 @@ pub fn run() {
                         .show_menu_on_left_click(false)
                         .on_menu_event(|app, e| match e.id.as_ref() {
                             "tray_show" => show_main_window(app),
-                            "tray_quit" => app.exit(0),
+                            "tray_quit" => {
+                                if !block_exit_if_browsers_running(app) {
+                                    app.exit(0);
+                                }
+                            }
                             _ => {}
                         })
                         .on_tray_icon_event(|tray, e| {
