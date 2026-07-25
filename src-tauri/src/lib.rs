@@ -1208,6 +1208,39 @@ pub fn run() {
             runtime::launcher_update_check,
         ])
         .setup(|app| {
+            use tauri::Manager;
+
+            // The configured main window uses `create: false`, so it must be
+            // created here. On Windows, explicitly use an absolute WebView2
+            // data directory beside the executable; otherwise Tauri defaults
+            // to `%LOCALAPPDATA%\com.shardx.launcher`.
+            let window_config = app
+                .config()
+                .app
+                .windows
+                .first()
+                .cloned()
+                .expect("main window configuration missing");
+            let mut window_builder =
+                tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?;
+
+            #[cfg(target_os = "windows")]
+            {
+                let exe_dir = std::env::current_exe()?
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "executable directory unavailable",
+                        )
+                    })?;
+                let webview_data = exe_dir.join("shardx-launcher").join("webview2");
+                std::fs::create_dir_all(&webview_data)?;
+                window_builder = window_builder.data_directory(webview_data);
+            }
+
+            window_builder.build()?;
             let _ = APP_HANDLE.set(app.handle().clone());
 
             {
