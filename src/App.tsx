@@ -2992,7 +2992,7 @@ function ProxyInfoPopover({
 }
 
 /// Flat 4:3 country flag (flag-icons sprite); empty input renders nothing.
-function CountryFlag({ cc, height = 18 }: { cc: string; height?: number }) {
+function CountryFlag({ cc, height = 16 }: { cc: string; height?: number }) {
   if (!cc || cc.length !== 2 || !/^[a-zA-Z]{2}$/.test(cc)) return null;
   const code = cc.toLowerCase();
   // `fi fi-XX`; omit `fis` to keep 4:3 rectangle.
