@@ -17,6 +17,8 @@ use serde_json::Value;
 
 /// App handle set in `run()` setup; lets the axum API reach a webview window.
 static APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+static HOST_LOGICAL_PROCESSORS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+static HOST_RAM_BUCKET_GB: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
 
 pub fn app_handle() -> Option<&'static tauri::AppHandle> {
     APP_HANDLE.get()
@@ -177,11 +179,20 @@ fn mac_hw_configs(model: &str) -> Option<&'static [(u32, u32)]> {
     })
 }
 
+/// A valid logical-processor / device-memory pairing for one fingerprint.
+#[derive(serde::Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HardwareConfig {
+    pub hardware_concurrency: u32,
+    pub device_memory: u32,
+}
+
 /// Host logical CPU count (counts SMT threads); fallback 8.
 fn host_logical_cores() -> u32 {
-    std::thread::available_parallelism()
-        .map(|n| n.get() as u32)
-        .unwrap_or(8)
+    *HOST_LOGICAL_PROCESSORS.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get() as u32)
+            .unwrap_or(8)
+    })
 }
 
 /// Host physical RAM in GiB, best-effort per OS.
@@ -227,12 +238,124 @@ fn host_ram_gb() -> Option<u32> {
 
 /// Physical RAM rounded to Chrome's {8,16,32} deviceMemory bucket; unknown → 16.
 fn host_ram_bucket_gb() -> u32 {
-    match host_ram_gb() {
+    *HOST_RAM_BUCKET_GB.get_or_init(|| match host_ram_gb() {
         Some(gb) if gb >= 32 => 32,
         Some(gb) if gb >= 16 => 16,
         Some(_) => 8,
         None => 16,
+    })
+}
+
+fn hardware_from_payload(payload: &serde_json::Map<String, Value>) -> Option<HardwareConfig> {
+    let nav = payload.get("navigator")?.as_object()?;
+    let hardware_concurrency = nav.get("hardware_concurrency")?.as_u64()? as u32;
+    let device_memory = nav.get("device_memory")?.as_u64()? as u32;
+    Some(HardwareConfig {
+        hardware_concurrency,
+        device_memory,
+    })
+}
+
+/// The canonical hardware choices shared by generation, validation and the UI.
+fn hardware_configs(
+    model: &str,
+    platform: &str,
+    donor: Option<HardwareConfig>,
+) -> Vec<HardwareConfig> {
+    if let Some(pool) = mac_hw_configs(model) {
+        return pool
+            .iter()
+            .map(|&(hardware_concurrency, device_memory)| HardwareConfig {
+                hardware_concurrency,
+                device_memory,
+            })
+            .collect();
     }
+
+    if platform == "Windows" || platform == "Linux" {
+        let host_cores = host_logical_cores();
+        // Logical-processor counts seen on current x86 CPUs (SMT + hybrid cores).
+        const X86_LOGICAL_PROCESSORS: [u32; 9] = [4, 6, 8, 12, 16, 20, 24, 28, 32];
+        let lo = host_cores.saturating_sub(4);
+        let hi = host_cores.saturating_add(2);
+        let mut core_candidates: Vec<u32> = X86_LOGICAL_PROCESSORS
+            .into_iter()
+            .filter(|&n| n >= lo && n <= hi)
+            .collect();
+        if core_candidates.is_empty() {
+            if let Some(nearest) = X86_LOGICAL_PROCESSORS
+                .into_iter()
+                .min_by_key(|&n| n.abs_diff(host_cores))
+            {
+                core_candidates.push(nearest);
+            }
+        }
+
+        let host_memory = host_ram_bucket_gb();
+        let mut out = Vec::new();
+        for hardware_concurrency in core_candidates {
+            // Keep memory at or below the host, with 16 GiB preferred for
+            // higher-thread-count machines. Low-memory hosts remain usable.
+            let floor = if hardware_concurrency >= 12 { 16 } else { 8 };
+            let mut memory_candidates: Vec<u32> = [8u32, 16, 32]
+                .into_iter()
+                .filter(|&m| m >= floor && m <= host_memory)
+                .collect();
+            if memory_candidates.is_empty() {
+                memory_candidates.push(host_memory);
+            }
+            out.extend(memory_candidates.into_iter().map(|device_memory| HardwareConfig {
+                hardware_concurrency,
+                device_memory,
+            }));
+        }
+        return out;
+    }
+
+    // User-imported fingerprints outside the curated model tables retain
+    // their donor pairing as a single coherent option.
+    donor.into_iter().collect()
+}
+
+fn hardware_configs_for_entry(entry: &fingerprints::LibraryEntry) -> Vec<HardwareConfig> {
+    let platform = entry
+        .payload
+        .get("navigator")
+        .and_then(|n| n.get("platform"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(&entry.platform);
+    let donor = entry.payload.as_object().and_then(hardware_from_payload);
+    hardware_configs(&entry.id, platform, donor)
+}
+
+fn hardware_configs_for_preset(preset_id: &str) -> Result<Vec<HardwareConfig>, String> {
+    let entry = fingerprints::get(preset_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("unknown fingerprint id: {preset_id}"))?;
+    let configs = hardware_configs_for_entry(&entry);
+    if configs.is_empty() {
+        return Err(format!("no hardware configurations available for fingerprint: {preset_id}"));
+    }
+    Ok(configs)
+}
+
+fn validate_hardware_selection(payload: &serde_json::Map<String, Value>) -> Result<(), String> {
+    let preset_id = payload
+        .get("_meta")
+        .and_then(|m| m.get("gpu_preset_id"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or("gpu_preset_id is required for hardware validation")?;
+    let selected = hardware_from_payload(payload)
+        .ok_or("hardware_concurrency and device_memory are required")?;
+    let configs = hardware_configs_for_preset(preset_id)?;
+    if !configs.contains(&selected) {
+        return Err(format!(
+            "invalid hardware combination for {preset_id}: {} logical processors / {} GiB memory",
+            selected.hardware_concurrency, selected.device_memory
+        ));
+    }
+    Ok(())
 }
 
 /// Pick (hardware_concurrency, device_memory): Mac → curated table, Win/Linux → host-bracketed.
@@ -247,48 +370,20 @@ pub(crate) fn randomize_hardware(payload: &mut serde_json::Map<String, Value>) {
         .and_then(|n| n.get("platform"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let pick8 = || uuid::Uuid::new_v4().as_bytes()[0] as usize;
-
-    let (cores, mem): (u32, u32) = if let Some(pool) = mac_hw_configs(model) {
-        pool[pick8() % pool.len()]
-    } else if platform == "Windows" || platform == "Linux" {
-        let c = host_logical_cores();
-        // Real x86 logical-core counts (SMT + Intel hybrid); bracket host within [C-4, C+2].
-        const X86_CORES: [u32; 9] = [4, 6, 8, 12, 16, 20, 24, 28, 32];
-        let lo = c.saturating_sub(4);
-        let hi = c + 2;
-        let cand: Vec<u32> = X86_CORES
-            .into_iter()
-            .filter(|&n| n >= lo && n <= hi)
-            .collect();
-        let cores = if cand.is_empty() {
-            X86_CORES
-                .into_iter()
-                .min_by_key(|&n| (n as i64 - c as i64).abs())
-                .unwrap()
-        } else {
-            cand[pick8() % cand.len()]
-        };
-        // deviceMemory: core-tied floor and host-RAM ceiling.
-        let real = host_ram_bucket_gb();
-        let floor = if cores >= 12 { 16 } else { 8 };
-        let mem_cand: Vec<u32> = [8u32, 16, 32]
-            .into_iter()
-            .filter(|&m| m >= floor && m <= real)
-            .collect();
-        let mem = if mem_cand.is_empty() {
-            real
-        } else {
-            mem_cand[pick8() % mem_cand.len()]
-        };
-        (cores, mem)
-    } else {
+    let donor = hardware_from_payload(payload);
+    let configs = hardware_configs_for_preset(model)
+        .unwrap_or_else(|_| hardware_configs(model, platform, donor));
+    if configs.is_empty() {
         return;
-    };
+    }
+    let pick = configs[(uuid::Uuid::new_v4().as_bytes()[0] as usize) % configs.len()];
 
     if let Some(nav) = payload.get_mut("navigator").and_then(|v| v.as_object_mut()) {
-        nav.insert("hardware_concurrency".into(), Value::from(cores));
-        nav.insert("device_memory".into(), Value::from(mem));
+        nav.insert(
+            "hardware_concurrency".into(),
+            Value::from(pick.hardware_concurrency),
+        );
+        nav.insert("device_memory".into(), Value::from(pick.device_memory));
     }
 }
 
@@ -375,10 +470,24 @@ fn clamp_screen_to_real_display(
 #[tauri::command]
 fn profile_save(
     window: tauri::WebviewWindow,
-    payload: Value,
+    mut payload: Value,
 ) -> Result<profile::ProfileMeta, String> {
-    // UI saves enrich new profiles; the API persists verbatim.
-    save_profile_core(Some(&window), payload, true)
+    let is_new = payload
+        .get("_meta")
+        .and_then(|m| m.get("id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.is_empty())
+        .unwrap_or(true);
+    if is_new {
+        let obj = payload
+            .as_object_mut()
+            .ok_or("profile payload must be an object")?;
+        // The editor already obtained one coherent hardware/platform pick
+        // from Rust. Validate and preserve it instead of randomizing again.
+        validate_hardware_selection(obj)?;
+        clamp_screen_to_real_display(&window, obj);
+    }
+    save_profile_core(Some(&window), payload, false)
 }
 
 /// Enrich a new profile in place: platform_version, hardware, screen clamp.
@@ -616,6 +725,7 @@ pub struct PresetEnrichPicks {
     pub hardware_concurrency: u32,
     pub device_memory: u32,
     pub platform_version: Option<String>,
+    pub hardware_configs: Vec<HardwareConfig>,
 }
 
 /// Editor preview: draw a fresh hw + platform_version triple from the same tables save uses.
@@ -624,6 +734,10 @@ fn enrich_picks_for_preset(preset_id: String) -> Result<PresetEnrichPicks, Strin
     let entry = fingerprints::get(&preset_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("unknown fingerprint id: {preset_id}"))?;
+    let hardware_configs = hardware_configs_for_entry(&entry);
+    if hardware_configs.is_empty() {
+        return Err(format!("no hardware configurations available for fingerprint: {preset_id}"));
+    }
     let platform = entry
         .payload
         .get("navigator")
@@ -640,9 +754,17 @@ fn enrich_picks_for_preset(preset_id: String) -> Result<PresetEnrichPicks, Strin
         "navigator".into(),
         serde_json::json!({ "platform": platform }),
     );
-    // Mirror enrich_new_config order: platform_version first, then hardware.
+    // Generate the editor's platform version and hardware exactly once.
     randomize_platform_version(&mut payload);
-    randomize_hardware(&mut payload);
+    let selected = hardware_configs
+        [(uuid::Uuid::new_v4().as_bytes()[0] as usize) % hardware_configs.len()];
+    if let Some(nav) = payload.get_mut("navigator").and_then(|v| v.as_object_mut()) {
+        nav.insert(
+            "hardware_concurrency".into(),
+            Value::from(selected.hardware_concurrency),
+        );
+        nav.insert("device_memory".into(), Value::from(selected.device_memory));
+    }
     let nav = payload
         .get("navigator")
         .and_then(|v| v.as_object())
@@ -663,6 +785,7 @@ fn enrich_picks_for_preset(preset_id: String) -> Result<PresetEnrichPicks, Strin
         hardware_concurrency: cores,
         device_memory: mem,
         platform_version: pv,
+        hardware_configs,
     })
 }
 
