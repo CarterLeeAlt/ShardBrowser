@@ -456,7 +456,7 @@ const defaultForm = (): ProfileForm => ({
   timezone: AUTO_TZ,
   language: AUTO_LANG,
 
-  webrtc: "auto",
+  webrtc: "block",
   do_not_track: false,
 
   noise_canvas: "real",
@@ -491,7 +491,7 @@ function fromStored(stored: any): ProfileForm {
   f.device_memory = stored?.navigator?.device_memory ?? 16;
   f.timezone = stored?.timezone ?? AUTO_TZ;
   f.language = stored?.navigator?.language ?? AUTO_LANG;
-  f.webrtc = (stored?.webrtc === "replace" ? "tcp_only" : stored?.webrtc) ?? "auto";
+  f.webrtc = (stored?.webrtc === "replace" ? "tcp_only" : stored?.webrtc) ?? "block";
   f.do_not_track = !!stored?.navigator?.do_not_track;
 
   const noise = stored?.noise ?? {};
