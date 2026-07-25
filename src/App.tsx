@@ -585,6 +585,26 @@ export default function App() {
     () => (localStorage.getItem("shardx-theme") as Theme) || "dark",
   );
   useEffect(() => {
+    let disposed = false;
+    let unlisten: undefined | (() => void);
+    listen<{ running_count: number }>("launcher:exit-blocked", ({ payload }) => {
+      const count = Math.max(1, payload.running_count);
+      const plural = count === 1 ? "browser is" : "browsers are";
+      void confirmModal({
+        title: "Close running browsers first",
+        message: `ShardX cannot exit while ${count} launched ${plural} still running. Close ${count === 1 ? "it" : "them"} first, then try again.`,
+        buttons: [{ label: "OK", value: true, primary: true }],
+      });
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+  useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("shardx-theme", theme);
   }, [theme]);
