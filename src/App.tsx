@@ -347,9 +347,16 @@ type ProfileForm = {
   media_video_in: number;
 };
 
-// Constrained options: stay within values Chrome actually reports.
-const MEMORY_OPTIONS = [4, 8, 16, 32];
-const CPU_OPTIONS = [2, 4, 6, 8, 10, 12, 14, 16, 20, 24];
+type HardwareConfig = {
+  hardware_concurrency: number;
+  device_memory: number;
+};
+
+type PresetEnrichPicks = HardwareConfig & {
+  platform_version?: string;
+  hardware_configs: HardwareConfig[];
+};
+
 const MEDIA_COUNT_OPTIONS = [0, 1, 2, 3];
 
 /// Common remote-control/proxy ports to block from outgoing browser connects.
@@ -1863,6 +1870,13 @@ function InlineEditor({
 }) {
   const f = draft;
   const u = <K extends keyof ProfileForm>(k: K, v: ProfileForm[K]) => setDraft({ ...f, [k]: v });
+  const draftRef = useRef(f);
+  draftRef.current = f;
+  const gpuPickRequest = useRef(0);
+  const [hardwareSource, setHardwareSource] = useState<{
+    presetId: string;
+    configs: HardwareConfig[];
+  } | null>(null);
 
   // OS filter init from bound fingerprint's platform; new profile uses host OS.
   const currentFp = fingerprints.find((x) => x.id === f.gpu_preset_id);
@@ -1879,25 +1893,54 @@ function InlineEditor({
     const fp = fingerprints.find((x) => x.id === id);
     if (!fp) return;
     const nav = fp.payload?.navigator ?? {};
-    // Ask Rust for the same hw + platform_version triplet save uses.
-    let picks: { hardware_concurrency?: number; device_memory?: number; platform_version?: string } = {};
+    const request = ++gpuPickRequest.current;
+    let picks: PresetEnrichPicks;
     try {
-      picks = await invoke<{ hardware_concurrency?: number; device_memory?: number; platform_version?: string }>(
-        "enrich_picks_for_preset",
-        { presetId: id }
-      );
-    } catch {
-      // Fall back to preset's nav defaults if Rust enrich fails.
+      picks = await invoke<PresetEnrichPicks>("enrich_picks_for_preset", { presetId: id });
+    } catch (e) {
+      toast.err(`Unable to load hardware configurations: ${String(e)}`);
+      return;
     }
+    if (request !== gpuPickRequest.current) return;
+    const configs = picks.hardware_configs ?? [];
+    const selectedIsValid = configs.some(
+      (c) =>
+        c.hardware_concurrency === picks.hardware_concurrency &&
+        c.device_memory === picks.device_memory,
+    );
+    if (!selectedIsValid) {
+      toast.err("Backend returned an invalid hardware configuration");
+      return;
+    }
+    setHardwareSource({ presetId: id, configs });
+    const current = draftRef.current;
     setDraft({
-      ...f,
+      ...current,
       gpu_preset_id: id,
-      hardware_concurrency: picks.hardware_concurrency ?? nav.hardware_concurrency ?? f.hardware_concurrency,
-      device_memory: picks.device_memory ?? nav.device_memory ?? f.device_memory,
-      platform_version: picks.platform_version ?? f.platform_version,
-      user_agent: nav.user_agent ?? f.user_agent,
+      hardware_concurrency: picks.hardware_concurrency,
+      device_memory: picks.device_memory,
+      platform_version: picks.platform_version ?? nav.platform_version ?? current.platform_version,
+      user_agent: nav.user_agent ?? current.user_agent,
     });
   };
+
+  // Existing profiles did not pass through setGpu in this editor session.
+  // Load the same backend-owned combinations without changing their values.
+  useEffect(() => {
+    const presetId = f.gpu_preset_id;
+    if (!presetId || hardwareSource?.presetId === presetId) return;
+    let disposed = false;
+    invoke<PresetEnrichPicks>("enrich_picks_for_preset", { presetId })
+      .then((picks) => {
+        if (!disposed) {
+          setHardwareSource({ presetId, configs: picks.hardware_configs ?? [] });
+        }
+      })
+      .catch((e) => {
+        if (!disposed) console.warn("hardware configuration load failed:", e);
+      });
+    return () => { disposed = true; };
+  }, [f.gpu_preset_id, hardwareSource?.presetId]);
 
   // Snap unknown / empty gpu_preset_id to a random GPU of the active OS.
   useEffect(() => {
@@ -1918,6 +1961,41 @@ function InlineEditor({
       const first = fingerprints.find((g) => g.platform === os);
       if (first) setGpu(first.id);
     }
+  };
+
+  const hardwareConfigs =
+    hardwareSource?.presetId === f.gpu_preset_id ? hardwareSource.configs : [];
+  const cpuOptions = [...new Set(hardwareConfigs.map((c) => c.hardware_concurrency))]
+    .sort((a, b) => a - b);
+  if (!cpuOptions.includes(f.hardware_concurrency)) cpuOptions.push(f.hardware_concurrency);
+  const memoryOptions = [...new Set(
+    hardwareConfigs
+      .filter((c) => c.hardware_concurrency === f.hardware_concurrency)
+      .map((c) => c.device_memory),
+  )].sort((a, b) => a - b);
+  if (!memoryOptions.includes(f.device_memory)) memoryOptions.push(f.device_memory);
+
+  const setCpu = (hardwareConcurrency: number) => {
+    const allowedMemory = hardwareConfigs
+      .filter((c) => c.hardware_concurrency === hardwareConcurrency)
+      .map((c) => c.device_memory);
+    const deviceMemory = allowedMemory.includes(f.device_memory)
+      ? f.device_memory
+      : allowedMemory[0] ?? f.device_memory;
+    setDraft({
+      ...f,
+      hardware_concurrency: hardwareConcurrency,
+      device_memory: deviceMemory,
+    });
+  };
+
+  const setMemory = (deviceMemory: number) => {
+    const valid = hardwareConfigs.length === 0 || hardwareConfigs.some(
+      (c) =>
+        c.hardware_concurrency === f.hardware_concurrency &&
+        c.device_memory === deviceMemory,
+    );
+    if (valid) u("device_memory", deviceMemory);
   };
 
   return (
@@ -1959,16 +2037,16 @@ function InlineEditor({
 
           <div className="form-row">
             <SelectField
-              label="CPU cores"
+              label="CPU logical processors"
               value={f.hardware_concurrency}
-              onChange={(v) => u("hardware_concurrency", v)}
-              options={CPU_OPTIONS}
+              onChange={setCpu}
+              options={cpuOptions}
             />
             <SelectField
               label="Memory (GB)"
               value={f.device_memory}
-              onChange={(v) => u("device_memory", v)}
-              options={MEMORY_OPTIONS}
+              onChange={setMemory}
+              options={memoryOptions}
             />
           </div>
 
