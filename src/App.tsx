@@ -1223,6 +1223,10 @@ function BrowsersView() {
   };
 
   const exportCookies = async (p: ProfileMeta) => {
+    if (running[p.id]) {
+      toast.err("This profile is still running. Close the browser manually before exporting cookies.");
+      return;
+    }
     try {
       const count = await invoke<number>("cookies_export_portable", { profileId: p.id });
       toast.ok(`Exported ${count} cookie${count === 1 ? "" : "s"}`);
