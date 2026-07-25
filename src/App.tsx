@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import "./fonts.css";
 import "./App.css";
 
 // Host OS of the launcher window (never spoofed) — drives default OS tab + titlebar.
