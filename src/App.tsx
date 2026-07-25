@@ -1720,15 +1720,19 @@ function BrowsersView() {
                     className={`btn-launch ${isRunning ? "btn-launch-stop" : ""}`}
                     onClick={() => startStop(p)}
                     disabled={!isRunning && startBusy.has(p.id)}
-                    title={!isRunning && startBusy.has(p.id) ? "Starting (UDP probe + geo + spawn)…" : undefined}
+                    title={
+                      isRunning
+                        ? "Stop browser"
+                        : startBusy.has(p.id)
+                          ? "Starting browser (UDP probe + geo + spawn)…"
+                          : "Start browser"
+                    }
+                    aria-label={isRunning ? "Stop browser" : "Start browser"}
+                    aria-busy={!isRunning && startBusy.has(p.id)}
                   >
-                    {isRunning ? (
-                      <><span className="btn-launch-ico"><Icon.Stop size={10} /></span><span>Stop</span></>
-                    ) : startBusy.has(p.id) ? (
-                      <><span className="btn-launch-ico spin"><Icon.Play size={10} /></span><span>Starting…</span></>
-                    ) : (
-                      <><span className="btn-launch-ico"><Icon.Play size={10} /></span><span>Start</span></>
-                    )}
+                    <span className={`btn-launch-ico ${!isRunning && startBusy.has(p.id) ? "spin" : ""}`}>
+                      {isRunning ? <Icon.Stop /> : <Icon.Play />}
+                    </span>
                   </button>
                   <button
                     className={`icon-btn ${p.pinned ? "icon-btn-on" : ""}`}
