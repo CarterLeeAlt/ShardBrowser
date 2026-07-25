@@ -328,18 +328,32 @@ fn cookies_db_path(udd: &Path) -> PathBuf {
 
 /// Export decrypted cookies.
 pub fn export(profile_id: &str) -> Result<Vec<Cookie>> {
+    // Never read a live Chromium cookie store. Windows holds this file without
+    // read sharing, and every platform needs a clean browser shutdown to flush
+    // the latest WAL state. Stopping the browser remains an explicit user action.
+    if crate::is_profile_running(profile_id) {
+        anyhow::bail!(
+            "this profile is still running; close the browser manually before exporting cookies"
+        );
+    }
+
     let udd = profile::user_data_dir(profile_id)?;
     let path = cookies_db_path(&udd);
     if !path.exists() {
         return Ok(Vec::new());
     }
     let crypt = Crypt::open(&udd)?;
-    // Read-only to avoid WAL write-lock fights with a running browser.
+    // Read-only keeps stopped-profile exports from mutating the database.
     let conn = rusqlite::Connection::open_with_flags(
         &path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
-    .with_context(|| format!("open {}", path.display()))?;
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "cannot read Cookie database {}: {e}; stop the browser profile and try again",
+            path.display()
+        )
+    })?;
 
     let mut stmt = conn.prepare(
         "SELECT host_key, name, value, encrypted_value, path, expires_utc, \
