@@ -2653,17 +2653,6 @@ function ProxiesView() {
               <button className="btn-ghost btn-sm" onClick={() => setProxySel(new Set())}>Clear</button>
             </div>
           )}
-          {/* Promo: routes to ProxyShard's UDP / p0f-spoofed residential
-              pool — the proxies that actually make ShardX's QUIC +
-              WebRTC stack work end-to-end.  Sits next to Import / New
-              proxy so it's discoverable without opening any dialog. */}
-          <button
-            className="proxy-buy-cta"
-            onClick={() => { openUrl(withUtm("https://proxyshard.com")).catch(() => {}); }}
-            title="Open proxyshard.com — residential SOCKS5 with UDP_ASSOCIATE + p0f-spoofed exit"
-          >
-            <ShardMini /> Buy proxies <span className="muted">— UDP + p0f</span>
-          </button>
           <button className="btn-ghost" onClick={bulkImportClipboard} title="Import proxies from the clipboard"><Icon.Download /> Import</button>
           <button className="btn-primary" onClick={() => setBulkOpen(true)}>+ New proxy</button>
         </div>
@@ -2764,7 +2753,6 @@ function ProxiesView() {
                     <span className="proxy-country">
                       <CountryFlag cc={cc} />
                       <span className="flag">{cc}</span>
-                      {r?.city && <span className="muted small">{r.city}</span>}
                     </span>
                   ) : <span className="muted small">—</span>}
                 </div>
