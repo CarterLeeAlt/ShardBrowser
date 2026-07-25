@@ -1192,14 +1192,14 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 /* ===== bulk-import preview ===== */
 .bulk-preview-head {
   display: flex; align-items: center; gap: 12px;
-  /* Match the list's 1px border + 10px row inset. */
-  padding: 0 0 6px 11px;
+  /* Match the checkbox glyph centered inside the list's 20px first column. */
+  padding: 0 0 6px 15px;
 }
 .dialog-body .bulk-preview-checkall {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 4px;
+  gap: 7px;
   font-size: 12.5px;
   color: var(--tx-2);
 }
