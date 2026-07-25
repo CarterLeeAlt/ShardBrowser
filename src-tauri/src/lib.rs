@@ -841,7 +841,7 @@ fn open_portable_directory(
 
     use tauri_plugin_opener::OpenerExt;
     app.opener()
-        .open_path(&directory, None::<&str>)
+        .open_path(directory.to_string_lossy().into_owned(), None::<&str>)
         .map_err(|e| e.to_string())
 }
 
