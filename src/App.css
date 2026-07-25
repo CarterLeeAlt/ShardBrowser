@@ -1394,18 +1394,6 @@ button.status-pill.status-link:active { transform: translateY(1px); }
 .proxy-country {
   display: inline-flex; align-items: center; gap: 6px;
   min-width: 0;
-  /* Long city names ("Frankfurt am Main", "Recklinghausen") used to
-     overflow the column and slide under the Profiles count badge.
-     Allow the inner spans to wrap onto a second line and let long
-     unbroken words break at any char as a last resort, so the row
-     grows downward instead of leaking sideways. */
-  flex-wrap: wrap;
-  row-gap: 2px;
-  overflow-wrap: anywhere;
-}
-.proxy-country .muted.small {
-  white-space: normal;
-  line-height: 1.25;
 }
 
 /* Flat square country flags from `flag-icons` (.fis variant).  The
