@@ -312,9 +312,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   box-shadow: 0 1px 4px #8b5cf660;
 }
 
-/* Sidebar footer: app version + GitHub update-check.  Amber-tinted
-   variant when a newer release is published; whole pill is clickable
-   in that state and opens the Release URL in the default browser. */
+/* Sidebar footer: locally installed app version. */
 .version-pill {
   display: flex; align-items: center; gap: 10px;
   width: 100%;
@@ -333,15 +331,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .version-pill-text                  { display: flex; flex-direction: column; min-width: 0; }
 .version-pill-current               { font-size: 12px; font-weight: 500; }
 .version-pill-sub                   { font-size: 10.5px; color: var(--tx-4); }
-
-.version-pill.update-available {
-  background: #f59e0b14;
-  border-color: #f59e0b55;
-  cursor: pointer;
-}
-.version-pill.update-available:hover           { background: #f59e0b26; border-color: #f59e0b88; }
-.version-pill.update-available .shard-mini     { color: #fbbf24; }
-.version-pill.update-available .version-pill-sub { color: #fbbf24; font-weight: 500; }
 
 /* ===== main ===== */
 
