@@ -1,0 +1,23 @@
+/*
+ * Application typography entry point.
+ *
+ * To replace the UI font later, update the @font-face source/metadata and
+ * this single variable. Feature styles must use --font-app instead of naming
+ * a font directly.
+ *
+ * The WOFF2 file is committed under src/assets/fonts and Vite reads it from
+ * disk. Builds never download the font; the URL below is provenance only.
+ * JetBrains Mono upstream source (pinned for reproducibility):
+ * https://github.com/JetBrains/JetBrainsMono/tree/19371302b95d218af43299bce79ddbddd0bc364d
+ */
+@font-face {
+  font-family: "ShardX UI";
+  src: url("./assets/fonts/JetBrainsMono-Variable.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+}
+
+:root {
+  --font-app: "ShardX UI", "JetBrains Mono", ui-monospace, monospace;
+}
