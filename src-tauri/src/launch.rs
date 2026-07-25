@@ -79,9 +79,12 @@ pub async fn launch_profile(
         false
     };
 
-    // Strip `_meta` wrapper and resolve "auto" sentinels before serialising.
+    // Strip launcher-only fields and resolve "auto" sentinels before serialising.
     let mut raw = stored.config.clone();
     raw.remove("_meta");
+    // Keep the profile name in Launcher storage, but do not pass it to the
+    // Chromium engine, which renders it as a coloured address-bar chip.
+    raw.remove("name");
     resolve_auto_fields(&mut raw, bound_proxy.as_ref()).await?;
     let json = serde_json::to_string(&raw).context("serialize profile")?;
 
