@@ -1657,7 +1657,7 @@ function BrowsersView() {
                 setTimeout(() => chip.remove(), 0);
               }}
             >
-              <div className="row t-cols">
+              <div className="row t-cols browser-data-row">
                 <div className="cell-strip">
                   <span className={`shard ${isRunning ? "shard-on" : "shard-off"}`} />
                 </div>
@@ -2725,7 +2725,7 @@ function ProxiesView() {
                 ])
               }
             >
-              <div className="row p-cols">
+              <div className="row p-cols proxy-data-row">
                 <div>
                   <input
                     type="checkbox"
