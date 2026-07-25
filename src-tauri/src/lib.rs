@@ -1329,6 +1329,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .on_window_event(|window, event| {
+            use tauri::Manager;
+
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     let to_tray = settings::load()
@@ -1414,8 +1416,6 @@ pub fn run() {
             runtime::runtime_install,
         ])
         .setup(|app| {
-            use tauri::Manager;
-
             // The configured main window uses `create: false`, so it must be
             // created here. On Windows, explicitly use an absolute WebView2
             // data directory beside the executable; otherwise Tauri defaults
