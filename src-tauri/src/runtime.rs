@@ -13,6 +13,7 @@ const PUB_BASE: &str = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev";
 /// etag, so install/status checks never poll R2/S3 per-archive.
 const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/ProxyShard/ShardBrowser/main/runtime.json";
+const BUNDLED_MANIFEST_JSON: &str = include_str!("../../runtime.json");
 /// Chromium version baked into the current bundle (used for Mac Framework path).
 const CHROMIUM_VERSION: &str = "149.0.7827.103";
 
@@ -226,7 +227,8 @@ pub struct RuntimeStatus {
     pub fingerprints_installed: bool,
 }
 
-#[derive(Default)]
+#[derive(Default, Deserialize)]
+#[serde(default)]
 struct RemoteManifest {
     archives: std::collections::HashMap<String, String>,
     chromium_version: Option<String>,
@@ -237,12 +239,21 @@ struct RemoteManifest {
     grease_version: Option<String>,
 }
 
+fn bundled_manifest() -> RemoteManifest {
+    serde_json::from_str(BUNDLED_MANIFEST_JSON).unwrap_or_default()
+}
+
 /// Fetch the version manifest (GitHub raw) — one request yielding every
 /// archive's current etag + the chromium version, so install/status never poll
 /// R2/S3 per-archive. Empty/None when unreachable.
 async fn fetch_manifest() -> RemoteManifest {
     async fn inner() -> Option<RemoteManifest> {
-        let resp = reqwest::Client::new().get(MANIFEST_URL).send().await.ok()?;
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(4))
+            .timeout(std::time::Duration::from_secs(8))
+            .build()
+            .ok()?;
+        let resp = client.get(MANIFEST_URL).send().await.ok()?;
         if !resp.status().is_success() {
             return None;
         }
@@ -264,7 +275,13 @@ async fn fetch_manifest() -> RemoteManifest {
             grease_version: str_field("grease_version"),
         })
     }
-    inner().await.unwrap_or_default()
+    match inner().await {
+        Some(manifest) => manifest,
+        None => {
+            eprintln!("[runtime] remote manifest unavailable; using bundled metadata");
+            bundled_manifest()
+        }
+    }
 }
 
 /// Migrate every `*.json` in `dir` to a new engine descriptor: bump
@@ -400,7 +417,14 @@ pub async fn runtime_status() -> Result<RuntimeStatus, String> {
     let spec = host_spec();
     let installed = binary_path().map(|p| p.exists()).unwrap_or(false);
     let m = load_manifest();
-    let manifest = fetch_manifest().await;
+    // A clean install does not need a network round-trip merely to discover
+    // that the browser is absent. The install command fetches fresh metadata
+    // next, with a bounded bundled fallback.
+    let manifest = if installed {
+        fetch_manifest().await
+    } else {
+        bundled_manifest()
+    };
     let remote = spec
         .as_ref()
         .and_then(|s| manifest.archives.get(&s.browser.key).cloned());
@@ -591,7 +615,21 @@ async fn install_fingerprints(
 /// Stream archive → temp file → extract; emits `runtime:progress` events.
 async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) -> Result<String> {
     let url = format!("{PUB_BASE}/{}", spec.key);
-    let mut resp = reqwest::Client::new().get(&url).send().await?.error_for_status()?;
+    let _ = window.emit(
+        "runtime:progress",
+        serde_json::json!({
+            "label": spec.label,
+            "phase": "download",
+            "received": 0,
+            "total": 0,
+            "percent": 0,
+        }),
+    );
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(60))
+        .build()?;
+    let mut resp = client.get(&url).send().await?.error_for_status()?;
     let total = resp.content_length().unwrap_or(0);
     let etag = resp
         .headers()

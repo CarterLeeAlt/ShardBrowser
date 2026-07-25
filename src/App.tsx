@@ -3665,9 +3665,6 @@ function FirstRunGate({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  if (installed === null) {
-    return null;
-  }
   if (installed) {
     return <>{children}</>;
   }
@@ -3722,7 +3719,9 @@ function FirstRunGate({ children }: { children: ReactNode }) {
           </>
         )}
         {!prog && !err && (
-          <div className="muted small">Contacting CDN…</div>
+          <div className="muted small">
+            {installed === null ? "Checking browser runtime…" : "Contacting CDN…"}
+          </div>
         )}
         {err && (
           <div style={{ color: "var(--err, #fb7185)", marginTop: 12, fontSize: 13 }}>
