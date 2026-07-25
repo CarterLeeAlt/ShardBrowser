@@ -82,7 +82,7 @@ pub async fn launch_profile(
     // Strip `_meta` wrapper and resolve "auto" sentinels before serialising.
     let mut raw = stored.config.clone();
     raw.remove("_meta");
-    resolve_auto_fields(&mut raw, bound_proxy.as_ref()).await;
+    resolve_auto_fields(&mut raw, bound_proxy.as_ref()).await?;
     let json = serde_json::to_string(&raw).context("serialize profile")?;
 
     // Pass fingerprint by file path — inline JSON overflows Windows' 32767-char CreateProcess limit.
@@ -253,11 +253,13 @@ async fn read_devtools_endpoint(udd: &Path) -> Option<process::CdpInfo> {
     None
 }
 
-/// Resolve "auto" sentinels in profile JSON; with proxy: live → cached → country tag → host warn.
+/// Resolve "auto" sentinels in profile JSON. Automatic timezone always uses a
+/// fresh Geo-IP lookup on the current launch path and never falls back to cached,
+/// tagged, or host timezone data.
 async fn resolve_auto_fields(
     cfg: &mut serde_json::Map<String, serde_json::Value>,
     proxy_opt: Option<&proxy::ProxyEntry>,
-) {
+) -> Result<()> {
     let want_tz_auto = cfg.get("timezone").and_then(|v| v.as_str()) == Some("auto");
     let want_lang_auto = cfg
         .get("navigator")
@@ -270,7 +272,7 @@ async fn resolve_auto_fields(
     );
 
     if !(want_tz_auto || want_lang_auto || want_geo_auto) {
-        return;
+        return Ok(());
     }
 
     eprintln!(
@@ -281,17 +283,54 @@ async fn resolve_auto_fields(
         proxy_opt.map(|p| format!("{}:{}", p.host, p.port)).unwrap_or_else(|| "(direct)".into()),
     );
 
-    // ---- geo source ----
-    let mut source = "";
-    let geo: Option<proxy::GeoInfo> = match proxy_opt {
-        Some(p) => {
-            match proxy::geo_check_via(Some(p), None).await {
-                Ok(g) => { source = "proxy-live"; Some(g) }
+    // Auto timezone is strict: every launch must obtain a fresh result through
+    // the bound proxy (or directly when no proxy is bound). No previous test,
+    // country tag, static country mapping, or launcher-host timezone is allowed.
+    let (geo, source): (Option<proxy::GeoInfo>, String) = if want_tz_auto {
+        let route = proxy_opt
+            .map(|p| format!("proxy {}:{}", p.host, p.port))
+            .unwrap_or_else(|| "the direct network connection".to_string());
+        let live = proxy::geo_check_via(proxy_opt, None)
+            .await
+            .with_context(|| {
+                format!(
+                    "automatic timezone detection failed through {route}; browser launch cancelled"
+                )
+            })?;
+
+        if live.ip.trim().is_empty() {
+            anyhow::bail!(
+                "automatic timezone detection returned no public IP through {route}; browser launch cancelled"
+            );
+        }
+        if live.timezone.trim().is_empty() {
+            anyhow::bail!(
+                "automatic timezone detection returned no IANA timezone for exit IP {} through {route}; browser launch cancelled",
+                live.ip
+            );
+        }
+
+        let source = if proxy_opt.is_some() {
+            format!("proxy-live:{}", live.provider)
+        } else {
+            format!("direct-live:{}", live.provider)
+        };
+        (Some(live), source)
+    } else {
+        // Preserve the existing fallback behaviour for language/geolocation-only
+        // Auto fields. The strict no-cache rule above applies to Auto timezone.
+        let mut source = String::new();
+        let geo = match proxy_opt {
+            Some(p) => match proxy::geo_check_via(Some(p), None).await {
+                Ok(g) => {
+                    source = "proxy-live".into();
+                    Some(g)
+                }
                 Err(e) => {
                     eprintln!("[launcher] proxy geo failed: {e} — falling back to cached snapshot");
                     if let Some(snap) = proxy::latest_test(&p.id) {
                         if !snap.country_code.is_empty() || !snap.timezone.is_empty() {
-                            source = "cached-snapshot";
+                            source = "cached-snapshot".into();
                             Some(proxy::GeoInfo {
                                 ip: snap.ip,
                                 country: snap.country,
@@ -304,11 +343,15 @@ async fn resolve_auto_fields(
                                 longitude: snap.longitude,
                                 provider: snap.provider,
                             })
-                        } else { None }
-                    } else { None }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
                     .or_else(|| {
                         if !p.country.is_empty() {
-                            source = "country-tag";
+                            source = "country-tag".into();
                             Some(proxy::GeoInfo {
                                 ip: String::new(),
                                 country: String::new(),
@@ -321,20 +364,24 @@ async fn resolve_auto_fields(
                                 longitude: 0.0,
                                 provider: String::new(),
                             })
-                        } else { None }
+                        } else {
+                            None
+                        }
                     })
                 }
-            }
-        }
-        None => {
-            match proxy::geo_check_via(None, None).await {
-                Ok(g) => { source = "direct-live"; Some(g) }
+            },
+            None => match proxy::geo_check_via(None, None).await {
+                Ok(g) => {
+                    source = "direct-live".into();
+                    Some(g)
+                }
                 Err(e) => {
                     eprintln!("[launcher] direct geo failed: {e} — falling back to host TZ/locale");
                     None
                 }
-            }
-        }
+            },
+        };
+        (geo, source)
     };
 
     let host_warn = || {
@@ -423,6 +470,8 @@ async fn resolve_auto_fields(
             cfg.remove("geolocation");
         }
     }
+
+    Ok(())
 }
 
 /// Copy cached Widevine CDM into `<udd>/WidevineCdm/<version>/` (versioned layout
