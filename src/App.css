@@ -22,6 +22,8 @@
   --ok: #4ade80;
   --warn: #fbbf24;
   --err: #fb7185;
+  --info: #38bdf8;
+  --info-dim: #0ea5e91f;
 
   --grad-shard: linear-gradient(135deg, #a78bfa 0%, #7c3aed 100%);
 
@@ -68,6 +70,8 @@
   --ok: #16a34a;
   --warn: #d97706;
   --err: #e11d48;
+  --info: #0369a1;
+  --info-dim: #0ea5e916;
 
   color-scheme: light;
 }
@@ -774,6 +778,21 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   padding: 10px 16px;
   align-items: center;
 }
+
+/* Proxy data rows use the tested exit IP as the typography baseline.
+   All row text is deliberately 12px regular; colour, spacing, and chip
+   treatments continue to communicate status and hierarchy. */
+.proxy-data-row,
+.proxy-data-row .inline-rename,
+.proxy-data-row .badge,
+.proxy-data-row .flag,
+.proxy-data-row .profile-count,
+.proxy-data-row .proxy-test,
+.proxy-data-row .status-pill,
+.proxy-data-row .small {
+  font-size: 12px;
+  font-weight: var(--font-weight-regular);
+}
 /* At narrow widths the sum of minimums (~1146px content + sidebar
    240px) overflows the 1280px min-window, pushing the action column
    off-screen.  Shrink the widest cells just enough to fit — the
@@ -962,6 +981,26 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   text-overflow: ellipsis;
   white-space: nowrap;
   vertical-align: middle;
+}
+
+/* Browser data rows use one regular 12px baseline for primary information.
+   The profile ID and proxy location/IP remain compact secondary metadata at
+   their existing 10.5px size, but use the same regular weight. */
+.browser-data-row {
+  font-size: 12px;
+  font-weight: var(--font-weight-regular);
+}
+.browser-data-row .cell-name .name-main,
+.browser-data-row .pill-status,
+.browser-data-row .proxy-main .badge,
+.browser-data-row .proxy-main .flag,
+.browser-data-row .small {
+  font-size: 12px;
+  font-weight: var(--font-weight-regular);
+}
+.browser-data-row .cell-name .name-sub,
+.browser-data-row .proxy-detail {
+  font-weight: var(--font-weight-regular);
 }
 
 .row-actions { display: flex; align-items: center; gap: 4px; justify-content: flex-end; }
@@ -1333,8 +1372,8 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   width: 100%;
   max-width: 100%;
   box-sizing: border-box;
-  color: var(--accent-hi);
-  background: var(--accent-dim);
+  color: var(--info);
+  background: var(--info-dim);
   padding: 1px 6px;
   border-radius: 4px;
   text-align: center;
@@ -1356,7 +1395,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   font-size: 11.5px;
   font-weight: var(--font-weight-emphasis);
   letter-spacing: .2px;
-  border-radius: 999px;
+  border-radius: 4px;
   border: 1px solid transparent;
   background: var(--bg-3);
   color: var(--tx-3);
