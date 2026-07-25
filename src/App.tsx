@@ -3683,7 +3683,7 @@ function FirstRunGate({ children }: { children: ReactNode }) {
       }}
     >
       <div style={{ width: 460, padding: "32px 36px", textAlign: "center" }}>
-        <div style={{ fontSize: 20, fontWeight: 600, marginBottom: 8 }}>
+        <div style={{ fontSize: 20, fontWeight: "var(--font-weight-emphasis)", marginBottom: 8 }}>
           Setting up ShardX browser
         </div>
         <div className="muted small" style={{ marginBottom: 24 }}>
