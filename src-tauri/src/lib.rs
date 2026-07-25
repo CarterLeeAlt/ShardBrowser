@@ -47,10 +47,10 @@ pub fn notify_store_changed(kind: &str) {
 
 // ---- MCP server download ----
 
-/// Download MCP server source into `<dir>/mcp`; user manages registration.
+/// Download MCP server source into the portable app data directory.
 #[tauri::command]
-async fn mcp_download(dir: String) -> Result<String, String> {
-    mcp_setup::download_mcp(std::path::Path::new(&dir))
+async fn mcp_download() -> Result<String, String> {
+    mcp_setup::download_mcp()
         .await
         .map(|p| p.display().to_string())
         .map_err(|e| e.to_string())
@@ -819,11 +819,6 @@ fn fingerprint_dir() -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-fn read_text_file(path: String) -> Result<String, String> {
-    std::fs::read_to_string(&path).map_err(|e| e.to_string())
-}
-
 // ---- Process tracker ----
 
 #[tauri::command]
@@ -943,13 +938,30 @@ fn cookies_export(profile_id: String) -> Result<Vec<cookies::Cookie>, String> {
     cookies::export(&profile_id).map_err(|e| e.to_string())
 }
 
-/// Export cookies to a user-picked path; returns count written.
+/// Export cookies to a generated file under the portable exports directory.
 #[tauri::command]
-fn cookies_export_to_file(profile_id: String, path: String) -> Result<usize, String> {
+fn cookies_export_portable(profile_id: String) -> Result<Value, String> {
+    if profile_id.is_empty()
+        || !profile_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("invalid profile id".into());
+    }
     let cookies = cookies::export(&profile_id).map_err(|e| e.to_string())?;
     let json = serde_json::to_string_pretty(&cookies).map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis();
+    let path = store::exports_dir()
+        .map_err(|e| e.to_string())?
+        .join(format!("{profile_id}-cookies-{stamp}.json"));
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
-    Ok(cookies.len())
+    Ok(serde_json::json!({
+        "count": cookies.len(),
+        "path": path.display().to_string(),
+    }))
 }
 
 #[tauri::command]
@@ -1283,7 +1295,6 @@ pub fn run() {
             fingerprint_import,
             fingerprint_delete,
             fingerprint_dir,
-            read_text_file,
             process_list,
             process_kill,
             proxy_list,
@@ -1323,7 +1334,7 @@ pub fn run() {
             ps_cities,
             ps_signature_set,
             cookies_export,
-            cookies_export_to_file,
+            cookies_export_portable,
             cookies_import,
             mcp_download,
             runtime::runtime_status,

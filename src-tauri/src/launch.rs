@@ -12,30 +12,14 @@ pub struct LaunchOutcome {
     pub cdp: Option<process::CdpInfo>,
 }
 
-/// Resolve the ShardX executable from settings, runtime cache, or dev guess.
+/// Resolve the ShardX executable from the portable runtime cache.
 pub fn resolve_binary() -> Result<PathBuf> {
-    if let Some(p) = settings::load()?.browser_path {
-        let pb = PathBuf::from(p);
-        if pb.exists() {
-            return Ok(pb);
-        }
-    }
     if let Ok(pb) = crate::runtime::binary_path() {
         if pb.exists() {
             return Ok(pb);
         }
     }
-    #[cfg(target_os = "macos")]
-    let guess = "/Users/kritos/Documents/GitHub/ShardXBrowser/build/src/out/Release_GN_arm64/ShardX.app/Contents/MacOS/ShardX";
-    #[cfg(target_os = "windows")]
-    let guess = "C:\\Program Files\\ShardX\\ShardX.exe";
-    #[cfg(target_os = "linux")]
-    let guess = "/opt/shardx/shardx";
-    let pb = PathBuf::from(guess);
-    if pb.exists() {
-        return Ok(pb);
-    }
-    anyhow::bail!("ShardX browser not installed yet — open Settings to download, or configure Browser path manually")
+    anyhow::bail!("ShardX browser is missing from the portable runtime — restart the launcher to download it")
 }
 
 pub async fn launch_profile(

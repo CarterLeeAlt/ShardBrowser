@@ -68,7 +68,8 @@ pub fn host_spec() -> Option<PlatformSpec> {
     None
 }
 
-/// Runtime dir under the platform data dir; kept outside the launcher bundle.
+/// Runtime directory. On Windows, the local `dirs` wrapper resolves the data
+/// directory to the executable directory so the runtime remains portable.
 pub fn runtime_dir() -> Result<PathBuf> {
     Ok(dirs::data_dir()
         .context("platform data dir not available")?
