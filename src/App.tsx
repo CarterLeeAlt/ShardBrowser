@@ -2991,14 +2991,14 @@ function ProxyInfoPopover({
   );
 }
 
-/// Flat rectangular country flag (flag-icons sprite); empty input renders nothing.
-function CountryFlag({ cc, height = 17 }: { cc: string; height?: number }) {
+/// Flat 4:3 country flag (flag-icons sprite); empty input renders nothing.
+function CountryFlag({ cc, height = 18 }: { cc: string; height?: number }) {
   if (!cc || cc.length !== 2 || !/^[a-zA-Z]{2}$/.test(cc)) return null;
   const code = cc.toLowerCase();
   // `fi fi-XX`; omit `fis` to keep 4:3 rectangle.
   return (
     <span
-      className={`fi fi-${code} flag-sq`}
+      className={`fi fi-${code} flag-rect`}
       style={{ height, width: Math.round(height * 4 / 3) }}
       aria-hidden
     />

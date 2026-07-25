@@ -1465,15 +1465,15 @@ button.status-pill.status-link:active { transform: translateY(1px); }
   min-width: 0;
 }
 
-/* Flat square country flags from `flag-icons` (.fis variant).  The
-   library defaults to 4x3 rectangles; `.fis` makes them square.  We
-   add a soft rounded corner + 1px inner border for the same chip-y
-   feel as the rest of the row. */
-.flag-sq {
-  border-radius: 3px;
-  box-shadow: inset 0 0 0 1px #00000033;
+/* Flat 4:3 country flags from `flag-icons`. The 18px default matches the
+   proxy type and country-code labels in browser rows; explicit compact
+   heights (for example, popovers) continue to override it inline. */
+.flag-rect {
+  border-radius: 0;
+  box-shadow: none;
   flex: 0 0 auto;
   display: inline-block;
+  aspect-ratio: 4 / 3;
   background-size: cover;
   background-position: center;
 }
