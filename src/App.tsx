@@ -135,59 +135,6 @@ function ConfirmHost() {
   );
 }
 
-// ---- first-run "star us" prompt ----
-
-const GH_REPO_URL = "https://github.com/ProxyShard/ShardBrowser";
-
-function GithubMark({ size = 18 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor" aria-hidden>
-      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
-    </svg>
-  );
-}
-
-/// One-time GitHub-star prompt shown after the app first loads. Dismissal is
-/// remembered in localStorage so it never nags again.
-function StarModal() {
-  const [show, setShow] = useState(false);
-  useEffect(() => {
-    if (localStorage.getItem("shardx-star-prompt") === "done") return;
-    // Let the UI settle before surfacing the prompt.
-    const t = setTimeout(() => setShow(true), 700);
-    return () => clearTimeout(t);
-  }, []);
-  const close = () => {
-    localStorage.setItem("shardx-star-prompt", "done");
-    setShow(false);
-  };
-  const star = () => {
-    openUrl(GH_REPO_URL).catch(() => {});
-    close();
-  };
-  if (!show) return null;
-  return (
-    <div className="dialog-bg" onClick={close}>
-      <div className="dialog star-dialog" onClick={(e) => e.stopPropagation()}>
-        <button className="icon-btn star-close" onClick={close} aria-label="Close">✕</button>
-        <div className="star-body">
-          <div className="star-badge"><GithubMark size={26} /><span className="star-spark">★</span></div>
-          <h2>Enjoying ShardX?</h2>
-          <p className="star-text">
-            ShardX is provided and supported <strong>completely free</strong>. If it's
-            useful to you, dropping a <strong>star on GitHub</strong> is the easiest way to
-            support us — and it helps other people find the project.
-          </p>
-          <div className="star-actions">
-            <button className="btn-ghost" onClick={close}>Maybe later</button>
-            <button className="btn-primary star-btn" onClick={star}><GithubMark /> Star on GitHub</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ---- context menu ----
 
 type ContextItem = { label: string; onClick: () => void; danger?: boolean; sep?: boolean };
@@ -673,7 +620,6 @@ export default function App() {
           </main>
           <ToastHost />
           <ConfirmHost />
-          <StarModal />
         </div>
       </FirstRunGate>
     </>
