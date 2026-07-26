@@ -1926,49 +1926,68 @@ button.status-pill.status-link:active { transform: translateY(1px); }
 
 .toast-host {
   position: fixed;
-  bottom: 24px; right: 24px;
-  display: flex; flex-direction: column-reverse; gap: 12px;
+  bottom: 16px; right: 16px;
+  display: flex; flex-direction: column-reverse; align-items: flex-end; gap: 8px;
   z-index: 300;
   pointer-events: none;
 }
 .toast {
+  --toast-tone: var(--accent);
   pointer-events: auto;
-  display: flex; align-items: center; gap: 14px;
-  background: var(--bg-2);
-  border: 1px solid var(--bd-2);
-  border-left: 4px solid var(--accent);
-  padding: 16px 22px;
-  font-size: 14.5px;
-  font-weight: var(--font-weight-emphasis);
-  line-height: 1.35;
-  border-radius: 10px;
+  display: flex; align-items: center; gap: 10px;
+  width: fit-content;
+  min-width: 220px;
+  max-width: min(380px, calc(100vw - 32px));
+  background: var(--bg-1);
+  border: 1px solid var(--bd-1);
+  border-left: 2px solid var(--toast-tone);
+  padding: 9px 12px;
+  font-size: 12px;
+  font-weight: var(--font-weight-regular);
+  line-height: 1.4;
+  border-radius: var(--radius);
   box-shadow:
-    0 18px 42px #000c,
-    0 0 0 1px #ffffff08;
-  min-width: 280px;
-  max-width: 520px;
-  animation: toastIn .2s cubic-bezier(.2, .9, .3, 1);
+    0 8px 24px #00000024,
+    0 1px 2px #00000012;
+  animation: toastIn .16s cubic-bezier(.2, .8, .3, 1);
 }
 .toast-icon {
   flex: 0 0 auto;
   display: inline-grid; place-items: center;
-  width: 26px; height: 26px;
+  width: 20px; height: 20px;
   border-radius: 50%;
-  font-size: 14px;
-  font-weight: var(--font-weight-emphasis);
-  background: var(--accent);
-  color: #fff;
-  box-shadow: 0 0 12px #8b5cf640;
+  color: var(--toast-tone);
+  background: color-mix(in srgb, var(--toast-tone) 12%, transparent);
+  box-shadow: none;
 }
-.toast-ok  { border-left-color: var(--ok); }
-.toast-ok .toast-icon { background: var(--ok); box-shadow: 0 0 14px #4ade8066; }
-.toast-err { border-left-color: var(--err); }
-.toast-err .toast-icon { background: var(--err); box-shadow: 0 0 14px #fb718566; }
-.toast-info { border-left-color: var(--accent); }
+.toast-icon svg {
+  width: 13px; height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.toast-icon circle { fill: currentColor; stroke: none; }
+.toast-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.toast-ok { --toast-tone: var(--ok); }
+.toast-err { --toast-tone: var(--err); }
+.toast-info { --toast-tone: var(--accent); }
+.toast-closing {
+  pointer-events: none;
+  animation: toastOut .14s ease-in forwards;
+}
 
 @keyframes toastIn {
-  from { transform: translateX(40px) scale(0.96); opacity: 0; }
-  to   { transform: translateX(0) scale(1);       opacity: 1; }
+  from { transform: translateX(12px); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+@keyframes toastOut {
+  from { transform: translateX(0);    opacity: 1; }
+  to   { transform: translateX(10px); opacity: 0; }
 }
 
 /* ---- ProxyShard billing integration ---- */
