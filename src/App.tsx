@@ -1517,7 +1517,13 @@ function BrowsersView() {
       const n = await invoke<number>("profile_import", { payloads: arr });
       reload();
       toast.ok(`Imported ${n} profile${n === 1 ? "" : "s"}`);
-    } catch (e) { toast.err("Import failed: " + String(e)); }
+    } catch (e) {
+      toast.err(
+        e instanceof SyntaxError
+          ? "Import failed: Clipboard does not contain valid ShardX profile JSON"
+          : "Import failed: " + String(e),
+      );
+    }
   };
 
   const expand = async (id: string) => {
