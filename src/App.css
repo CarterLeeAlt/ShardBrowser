@@ -755,10 +755,10 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
    off-screen.  Force every direct child to shrink. */
 .t-cols > *,
 .p-cols > * { min-width: 0; }
-/* On narrow windows drop "Last run" so the action buttons stay
-   intact — losing the timestamp column is less painful than having
-   the Start button crushed off-screen. */
-@media (max-width: 1280px) {
+/* The table receives the viewport width minus the 240px sidebar, main padding,
+   borders, and scrollbar. Hide "Last run" before that actual content width
+   falls below the grid minimum, preserving the complete action group. */
+@media (max-width: 1440px) {
   .t-cols {
     grid-template-columns:
       4px
@@ -768,7 +768,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
       minmax(240px, 1.5fr)
       minmax(100px, 1fr)
       minmax(60px, 80px)
-      minmax(190px, auto);
+      188px;
   }
   .t-cols > .cell-lastrun, .t-cols > .head-lastrun { display: none; }
 }
@@ -1013,6 +1013,13 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 }
 
 .row-actions { display: flex; align-items: center; gap: 4px; justify-content: flex-end; }
+.t-cols > .row-actions {
+  min-width: 188px;
+  flex-wrap: nowrap;
+}
+.t-cols > .row-actions > .icon-btn {
+  flex: 0 0 28px;
+}
 
 /* ===== inline editor (expand) ===== */
 
