@@ -1474,10 +1474,13 @@ button.status-pill.status-link:active { transform: translateY(1px); }
 }
 
 /* Flat 4:3 country flags from `flag-icons`. The 15px default is optically
-   balanced with the 18px proxy labels: unlike their soft rounded backgrounds,
-   a high-contrast flag visually fills every pixel of its box. Explicit compact
-   heights (for example, popovers) continue to override it inline. */
+   balanced with the 18px proxy labels. A 1px theme border keeps pale flags
+   (for example, Japan) distinct from the surrounding card; border-box keeps
+   the complete outside height at 15px. Explicit compact heights continue to
+   override it inline. */
 .flag-rect {
+  box-sizing: border-box;
+  border: 1px solid var(--bd-2);
   border-radius: 0;
   box-shadow: none;
   flex: 0 0 auto;
