@@ -55,12 +55,12 @@ mod windows {
     const CASCADIA_MONO_REGULAR_TTF: &[u8] =
         include_bytes!("../fonts/CascadiaMono-Regular.ttf");
     const ICON_SIZE: i32 = 256;
-    const ICON_SIZES: [u32; 9] = [16, 20, 24, 32, 40, 48, 64, 128, 256];
-    const TASKBAR_ICON_SIZES: [i32; 5] = [24, 32, 40, 48, 64];
+    const ICON_SIZES: [u32; 10] = [16, 20, 24, 30, 32, 40, 48, 64, 128, 256];
+    const TASKBAR_ICON_SIZES: [i32; 6] = [24, 30, 32, 40, 48, 64];
     const BADGE_FONT_HEIGHT_AT_256: i32 = 104;
     const BADGE_FONT_WIDTH_AT_256: i32 = 48;
     const BADGE_LAYOUT_REVISION: &[u8] =
-        b"taskbar-badge-layout-v14-three-char-cascadia-mono-regular-large";
+        b"taskbar-badge-layout-v16-fixed-pixel-baseline-small-cascadia-large";
     const RT_ICON: *const u16 = 3usize as *const u16;
     const RT_GROUP_ICON: *const u16 = 14usize as *const u16;
     const DIB_RGB_COLORS: u32 = 0;
@@ -450,7 +450,7 @@ mod windows {
             unsafe {
                 // Load every taskbar-sized native frame now. An HICON contains
                 // only the frame selected by LoadImageW, so Windows cannot go
-                // back to the ICO and pick 24px after receiving a 32px handle.
+                // back to the ICO and pick another DPI-specific native frame.
                 let mut taskbar = [0; TASKBAR_ICON_SIZES.len()];
                 for (index, size) in TASKBAR_ICON_SIZES.iter().copied().enumerate() {
                     taskbar[index] =
@@ -772,50 +772,158 @@ mod windows {
     }
 
     fn render_badge(rgba: &mut [u8], label: &str, icon_size: i32) -> Result<()> {
+        if label.is_empty() {
+            return Ok(());
+        }
+        let badge_height = scaled(132, icon_size);
+        let radius = scaled(20, icon_size).max(1);
+        let left = 0;
+        let top = icon_size - badge_height;
+        let right = icon_size;
+        let bottom = icon_size;
+        fill_rounded_rect(
+            rgba,
+            icon_size,
+            left,
+            top,
+            right,
+            bottom,
+            radius,
+            [3, 8, 15, 252],
+        );
+
+        // Native bitmap strikes are used only through 32px. Their fixed cells
+        // are written directly into the RGBA frame: no GDI, antialiasing, or
+        // resize step can introduce grey edge pixels. Unsupported legacy text
+        // falls through to the existing Cascadia renderer instead of breaking
+        // browser launch.
+        if render_pixel_badge_text(rgba, label, icon_size, top, badge_height, radius) {
+            force_rounded_alpha(rgba, icon_size, left, top, right, bottom, radius);
+            return Ok(());
+        }
+
+        render_cascadia_badge_text(
+            rgba,
+            label,
+            icon_size,
+            top,
+            badge_height,
+            left,
+            right,
+            bottom,
+            radius,
+        )
+    }
+
+    fn render_pixel_badge_text(
+        rgba: &mut [u8],
+        label: &str,
+        icon_size: i32,
+        top: i32,
+        badge_height: i32,
+        radius: i32,
+    ) -> bool {
+        let Some(font) = crate::pixel_font_data::for_icon_size(icon_size) else {
+            return false;
+        };
+        let characters: Vec<char> = label.chars().collect();
+        if characters.is_empty()
+            || characters
+                .iter()
+                .any(|character| font.glyph(*character).is_none())
+        {
+            return false;
+        }
+        let Some((text_x, text_y)) = pixel_text_origin(
+            font,
+            &characters,
+            icon_size,
+            top,
+            badge_height,
+        ) else {
+            return false;
+        };
+
+        for (character_index, character) in characters.into_iter().enumerate() {
+            let glyph = font
+                .glyph(character)
+                .expect("printable ASCII glyph checked above");
+            let glyph_x = text_x + character_index as i32 * font.cell_width;
+            for row in 0..font.cell_height {
+                let row_bits = glyph[row as usize];
+                for column in 0..font.cell_width {
+                    let bit = 1u16 << (font.cell_width - column - 1);
+                    if row_bits & bit == 0 {
+                        continue;
+                    }
+                    let x = glyph_x + column;
+                    let y = text_y + row;
+                    if !inside_rounded_rect(x, y, 0, top, icon_size, icon_size, radius) {
+                        continue;
+                    }
+                    let offset = ((y * icon_size + x) * 4) as usize;
+                    rgba[offset..offset + 4].copy_from_slice(&[255, 255, 255, 255]);
+                }
+            }
+        }
+        true
+    }
+
+    fn pixel_text_origin(
+        font: crate::pixel_font_data::PixelFont,
+        characters: &[char],
+        icon_size: i32,
+        top: i32,
+        badge_height: i32,
+    ) -> Option<(i32, i32)> {
+        let character_count = i32::try_from(characters.len()).ok()?;
+        let text_width = font.cell_width.checked_mul(character_count)?;
+        if text_width > icon_size || font.cell_height > badge_height {
+            return None;
+        }
+
+        // The vertical anchor is a property of the native strike, never of the
+        // characters being drawn. This keeps every NAME on the exact same
+        // baseline; the fixed integer offset is centered or one pixel low so
+        // the label can never appear optically high.
+        let text_y = top + (badge_height - font.cell_height) / 2 + font.fixed_y_offset;
+
+        Some(((icon_size - text_width) / 2, text_y))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_cascadia_badge_text(
+        rgba: &mut [u8],
+        label: &str,
+        icon_size: i32,
+        top: i32,
+        badge_height: i32,
+        left: i32,
+        right: i32,
+        bottom: i32,
+        radius: i32,
+    ) -> Result<()> {
         let text: Vec<u16> = label.encode_utf16().collect();
         if text.is_empty() {
             return Ok(());
         }
         ensure_cascadia_mono_font()?;
-        // The taskbar badge uses a repository-bundled static monospace face,
-        // so narrow labels such as `111` keep the same cell spacing as wide
-        // labels such as `XYZ` on every Windows installation.
+        // Frames above 32px retain the existing bundled Cascadia Mono Regular
+        // renderer and antialiasing parameters unchanged.
         let face_name = wide_null(OsStr::new("Cascadia Mono"));
+        let font_height = scaled(BADGE_FONT_HEIGHT_AT_256, icon_size).max(5);
+        let font_width = scaled(BADGE_FONT_WIDTH_AT_256, icon_size).max(1);
+        let character_spacing = if label.chars().count() > 1 {
+            scaled(8, icon_size)
+        } else {
+            0
+        };
 
         unsafe {
             let dc = CreateCompatibleDC(0);
             if dc == 0 {
                 return Err(std::io::Error::last_os_error()).context("create badge drawing context");
             }
-
-            // Full-width, borderless label: use every available taskbar pixel
-            // for NAME instead of spending space on side margins and a white
-            // outline. The explicit width keeps three larger monospaced cells
-            // inside the badge. Eight 256px-reference units equal one pixel at
-            // the taskbar's 32px big-icon frame.
-            let badge_height = scaled(132, icon_size);
-            let font_height = scaled(BADGE_FONT_HEIGHT_AT_256, icon_size).max(5);
-            let font_width = scaled(BADGE_FONT_WIDTH_AT_256, icon_size).max(1);
-            let character_spacing = if label.chars().count() > 1 {
-                scaled(8, icon_size)
-            } else {
-                0
-            };
-            let radius = scaled(20, icon_size).max(1);
-            let left = 0;
-            let top = icon_size - badge_height;
-            let right = icon_size;
-            let bottom = icon_size;
-            fill_rounded_rect(
-                rgba,
-                icon_size,
-                left,
-                top,
-                right,
-                bottom,
-                radius,
-                [3, 8, 15, 252],
-            );
 
             let mut info: BitmapInfo = zeroed();
             info.header.size = size_of::<BitmapInfoHeader>() as u32;
@@ -1172,9 +1280,10 @@ mod windows {
     #[cfg(test)]
     mod tests {
         use super::{
-            build_badged_icon, nearest_taskbar_icon_index, parse_ico, scaled, BASE_ICON_ICO,
-            BADGE_FONT_HEIGHT_AT_256, BADGE_FONT_WIDTH_AT_256, CASCADIA_MONO_REGULAR_TTF,
-            ICON_SIZES, LAUNCHER_ICON_ICO, TASKBAR_ICON_SIZES,
+            build_badged_icon, nearest_taskbar_icon_index, parse_ico, pixel_text_origin,
+            render_badge, scaled, BASE_ICON_ICO, BADGE_FONT_HEIGHT_AT_256,
+            BADGE_FONT_WIDTH_AT_256, CASCADIA_MONO_REGULAR_TTF, ICON_SIZES,
+            LAUNCHER_ICON_ICO, TASKBAR_ICON_SIZES, inside_rounded_rect,
         };
         use ico::IconDir;
         use std::io::Cursor;
@@ -1239,6 +1348,10 @@ mod windows {
         fn taskbar_icon_selects_the_closest_native_frame_for_scaled_dpi() {
             assert_eq!(
                 TASKBAR_ICON_SIZES[nearest_taskbar_icon_index(120)],
+                30
+            );
+            assert_eq!(
+                TASKBAR_ICON_SIZES[nearest_taskbar_icon_index(128)],
                 32
             );
             assert_eq!(
@@ -1257,16 +1370,178 @@ mod windows {
         }
 
         #[test]
-        fn badge_tracking_is_one_source_pixel_at_32px() {
-            assert_eq!(scaled(8, 32), 1);
+        fn large_cascadia_layout_parameters_are_unchanged() {
+            assert_eq!(BADGE_FONT_HEIGHT_AT_256, 104);
+            assert_eq!(BADGE_FONT_WIDTH_AT_256, 48);
+            assert_eq!(scaled(8, 40), 1);
         }
 
         #[test]
-        fn three_character_layout_uses_larger_native_taskbar_text() {
-            assert_eq!(scaled(BADGE_FONT_HEIGHT_AT_256, 24), 10);
-            assert_eq!(scaled(BADGE_FONT_WIDTH_AT_256, 24), 5);
-            assert_eq!(scaled(BADGE_FONT_HEIGHT_AT_256, 32), 13);
-            assert_eq!(scaled(BADGE_FONT_WIDTH_AT_256, 32), 6);
+        fn small_icons_use_the_expected_native_monospaced_strikes() {
+            let expected = [
+                (16, 4, 6, 1),
+                (20, 5, 8, 0),
+                (24, 6, 10, 1),
+                (30, 7, 13, 0),
+                (32, 9, 15, 1),
+            ];
+            assert_eq!(
+                crate::pixel_font_data::PIXEL_ICON_SIZES.len(),
+                expected.len()
+            );
+            for (icon_size, cell_width, cell_height, fixed_y_offset) in expected {
+                let font = crate::pixel_font_data::for_icon_size(icon_size)
+                    .expect("native pixel strike");
+                assert_eq!((font.cell_width, font.cell_height), (cell_width, cell_height));
+                assert_eq!(font.fixed_y_offset, fixed_y_offset);
+                for character in
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-?".chars()
+                {
+                    assert!(font.glyph(character).is_some(), "missing {character:?}");
+                }
+            }
+            assert!(crate::pixel_font_data::for_icon_size(40).is_none());
+        }
+
+        #[test]
+        fn native_24px_three_character_layout_is_exact() {
+            let font = crate::pixel_font_data::for_icon_size(24).expect("24px pixel strike");
+            let badge_height = scaled(132, 24);
+            let top = 24 - badge_height;
+            assert_eq!(badge_height, 12);
+            assert_eq!(
+                pixel_text_origin(font, &['E'], 24, top, badge_height),
+                Some((9, 14))
+            );
+            assert_eq!(
+                pixel_text_origin(font, &['E', 'A'], 24, top, badge_height),
+                Some((6, 14))
+            );
+            assert_eq!(
+                pixel_text_origin(font, &['E', 'A', 'M'], 24, top, badge_height),
+                Some((3, 14))
+            );
+            assert_eq!(
+                pixel_text_origin(font, &['g', 'j', 'y'], 24, top, badge_height),
+                Some((3, 14))
+            );
+            assert_eq!(
+                pixel_text_origin(font, &['_', '9', '-'], 24, top, badge_height),
+                Some((3, 14))
+            );
+        }
+
+        #[test]
+        fn native_pixel_strikes_use_one_fixed_vertical_anchor() {
+            let characters: Vec<char> =
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-?"
+                    .chars()
+                    .collect();
+            for icon_size in crate::pixel_font_data::PIXEL_ICON_SIZES {
+                let font = crate::pixel_font_data::for_icon_size(icon_size)
+                    .expect("native pixel strike");
+                let badge_height = scaled(132, icon_size);
+                let top = icon_size - badge_height;
+                let expected_y = pixel_text_origin(font, &['A'], icon_size, top, badge_height)
+                    .expect("single-character origin")
+                    .1;
+
+                for character in &characters {
+                    for label in [
+                        vec![*character],
+                        vec![*character, 'A'],
+                        vec!['A', *character],
+                        vec![*character, 'A', 'A'],
+                        vec!['A', *character, 'A'],
+                        vec!['A', 'A', *character],
+                    ] {
+                        let actual_y = pixel_text_origin(
+                            font,
+                            &label,
+                            icon_size,
+                            top,
+                            badge_height,
+                        )
+                        .expect("supported fixed-anchor label")
+                        .1;
+                        assert_eq!(
+                            actual_y, expected_y,
+                            "{icon_size}px vertical anchor changed for {label:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn small_pixel_badges_are_hard_edged_and_never_cross_the_badge() {
+            let characters: Vec<char> =
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-?"
+                    .chars()
+                    .collect();
+            for icon_size in crate::pixel_font_data::PIXEL_ICON_SIZES {
+                let font = crate::pixel_font_data::for_icon_size(icon_size)
+                    .expect("native pixel strike");
+                let badge_height = scaled(132, icon_size);
+                let top = icon_size - badge_height;
+                let radius = scaled(20, icon_size).max(1);
+                for character in &characters {
+                    for label_characters in [
+                        vec![*character],
+                        vec![*character, 'A'],
+                        vec!['A', *character],
+                        vec![*character, 'A', 'A'],
+                        vec!['A', *character, 'A'],
+                        vec!['A', 'A', *character],
+                    ] {
+                        let label: String = label_characters.iter().collect();
+                        let expected_white_pixels: usize = label_characters
+                            .iter()
+                            .map(|character| {
+                                font.glyph(*character)
+                                    .expect("covered ASCII glyph")
+                                    .iter()
+                                    .take(font.cell_height as usize)
+                                    .map(|row| row.count_ones() as usize)
+                                    .sum::<usize>()
+                            })
+                            .sum();
+                        let mut rgba = vec![0u8; (icon_size * icon_size * 4) as usize];
+                        render_badge(&mut rgba, &label, icon_size)
+                            .expect("render native pixel badge");
+                        let mut white_pixels = 0usize;
+                        for (pixel_index, pixel) in rgba.chunks_exact(4).enumerate() {
+                            match pixel {
+                                [0, 0, 0, 0] | [3, 8, 15, 255] => {}
+                                [255, 255, 255, 255] => {
+                                    white_pixels += 1;
+                                    let x = pixel_index as i32 % icon_size;
+                                    let y = pixel_index as i32 / icon_size;
+                                    assert!(
+                                        inside_rounded_rect(
+                                            x,
+                                            y,
+                                            0,
+                                            top,
+                                            icon_size,
+                                            icon_size,
+                                            radius,
+                                        ),
+                                        "{icon_size}px {label:?} escaped the badge at ({x}, {y})"
+                                    );
+                                }
+                                other => panic!(
+                                    "{icon_size}px pixel badge contains antialias color {other:?}"
+                                ),
+                            }
+                        }
+                        assert_eq!(
+                            white_pixels, expected_white_pixels,
+                            "{icon_size}px {label:?} clipped a glyph pixel"
+                        );
+                    }
+                }
+            }
         }
     }
 }
