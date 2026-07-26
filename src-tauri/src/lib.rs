@@ -1476,7 +1476,7 @@ pub fn run() {
                 tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?;
 
             #[cfg(target_os = "windows")]
-            {
+            let launcher_root = {
                 let exe_dir = std::env::current_exe()?
                     .parent()
                     .map(std::path::Path::to_path_buf)
@@ -1486,12 +1486,19 @@ pub fn run() {
                             "executable directory unavailable",
                         )
                     })?;
-                let webview_data = exe_dir.join("shardx-launcher").join("webview2");
+                let launcher_root = exe_dir.join("shardx-launcher");
+                let webview_data = launcher_root.join("webview2");
                 std::fs::create_dir_all(&webview_data)?;
                 window_builder = window_builder.data_directory(webview_data);
-            }
+                launcher_root
+            };
 
-            window_builder.build()?;
+            let main_window = window_builder.build()?;
+            #[cfg(target_os = "windows")]
+            taskbar_icon::apply_launcher_taskbar_icon(
+                main_window.hwnd()?.0 as isize,
+                &launcher_root.join("icons"),
+            )?;
             let _ = APP_HANDLE.set(app.handle().clone());
 
             {

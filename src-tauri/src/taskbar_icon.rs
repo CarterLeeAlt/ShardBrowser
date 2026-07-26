@@ -46,11 +46,15 @@ pub(crate) fn watch_profile_taskbar(pid: u32, profile_id: String, executable: Pa
 }
 
 #[cfg(target_os = "windows")]
+pub(crate) fn apply_launcher_taskbar_icon(window: isize, icon_dir: &Path) -> Result<()> {
+    windows::apply_launcher_taskbar_icon(window, icon_dir)
+}
+
+#[cfg(target_os = "windows")]
 mod windows {
     use super::badge_label;
     use anyhow::{Context, Result};
     use ico::{IconDir, IconDirEntry, IconImage, ResourceType};
-    use image::{imageops::FilterType, RgbaImage};
     use std::ffi::{c_void, OsStr, OsString};
     use std::fs;
     use std::io::Cursor;
@@ -62,7 +66,8 @@ mod windows {
     use std::sync::OnceLock;
     use std::time::{Instant, UNIX_EPOCH};
 
-    const BASE_ICON_PNG: &[u8] = include_bytes!("../icons/shardx-browser-taskbar-base.png");
+    const BASE_ICON_ICO: &[u8] = include_bytes!("../icons/shardx-browser-taskbar-base.ico");
+    const LAUNCHER_ICON_ICO: &[u8] = include_bytes!("../icons/icon.ico");
     const INTER_GDI_FONT_TTF: &[u8] = include_bytes!("../fonts/Inter-Variable-GDI.ttf");
     const ICON_SIZE: i32 = 256;
     const ICON_SIZES: [u32; 9] = [16, 20, 24, 32, 40, 48, 64, 128, 256];
@@ -90,6 +95,7 @@ mod windows {
     // never depends on Inter being installed in Windows.
     static INTER_GDI_FONT_REGISTRATION: OnceLock<std::result::Result<isize, String>> =
         OnceLock::new();
+    static LAUNCHER_ICONS: OnceLock<std::result::Result<LoadedIcons, String>> = OnceLock::new();
 
     #[repr(C)]
     struct BitmapInfoHeader {
@@ -318,8 +324,8 @@ mod windows {
             .unwrap_or_default();
         let fingerprint = stable_hash(&[
             label.as_bytes(),
-            BASE_ICON_PNG,
-            b"taskbar-badge-layout-v10-inter-gdi-antialiased",
+            BASE_ICON_ICO,
+            b"taskbar-badge-layout-v11-shared-native-base-frames",
             &metadata.len().to_le_bytes(),
             &modified.to_le_bytes(),
         ]);
@@ -468,6 +474,31 @@ mod windows {
                 Ok(Self { large, small })
             }
         }
+    }
+
+    pub(super) fn apply_launcher_taskbar_icon(window: isize, icon_dir: &Path) -> Result<()> {
+        fs::create_dir_all(icon_dir).context("create portable launcher icon directory")?;
+        let icon_path = icon_dir.join("launcher.ico");
+        let current = fs::read(&icon_path).ok();
+        if current.as_deref() != Some(LAUNCHER_ICON_ICO) {
+            fs::write(&icon_path, LAUNCHER_ICON_ICO)
+                .context("write portable launcher taskbar icon")?;
+        }
+
+        let icons = LAUNCHER_ICONS.get_or_init(|| {
+            LoadedIcons::from_icon_file(&icon_path).map_err(|error| format!("{error:#}"))
+        });
+        let icons = match icons {
+            Ok(icons) => icons,
+            Err(message) => anyhow::bail!(message.clone()),
+        };
+        unsafe {
+            // Mirror the Chromium profile path: Windows receives a 32px big
+            // icon and a 16px small icon instead of Tauri's single ICO entry.
+            SendMessageW(window, WM_SETICON, 1, icons.large);
+            SendMessageW(window, WM_SETICON, 0, icons.small);
+        }
+        Ok(())
     }
 
     impl Drop for LoadedIcons {
@@ -685,27 +716,24 @@ mod windows {
     }
 
     fn build_badged_icon(label: &str) -> Result<Vec<u8>> {
-        let base = IconImage::read_png(Cursor::new(BASE_ICON_PNG))
-            .context("decode bundled ShardX browser icon")?;
-        if base.width() != ICON_SIZE as u32 || base.height() != ICON_SIZE as u32 {
-            anyhow::bail!("bundled ShardX browser icon must be 256x256");
-        }
-        let base = RgbaImage::from_raw(
-            ICON_SIZE as u32,
-            ICON_SIZE as u32,
-            base.into_rgba_data(),
-        )
-        .context("construct bundled ShardX browser image")?;
+        let base = IconDir::read(Cursor::new(BASE_ICON_ICO))
+            .context("decode bundled ShardX browser base frames")?;
         let mut directory = IconDir::new(ResourceType::Icon);
         for size in ICON_SIZES {
-            // Render each Windows icon size independently. In particular, the
-            // 16/20/24/32px entries get native text pixels instead of a second
-            // shell downscale from the 256px source.
-            let mut rgba = if size == ICON_SIZE as u32 {
-                base.clone().into_raw()
-            } else {
-                image::imageops::resize(&base, size, size, FilterType::Lanczos3).into_raw()
-            };
+            // The launcher generator owns the resize step for both products.
+            // Decoding the same native base frame here makes the outer artwork
+            // byte-identical before either center diamond or NAME badge is
+            // applied.
+            let entry = base
+                .entries()
+                .iter()
+                .find(|entry| entry.width() == size && entry.height() == size)
+                .with_context(|| format!("browser base ICO is missing its {size}px frame"))?;
+            let mut rgba = entry
+                .decode()
+                .with_context(|| format!("decode browser base {size}px frame"))?
+                .rgba_data()
+                .to_vec();
             if !label.is_empty() {
                 render_badge(&mut rgba, label, size as i32)?;
             }
@@ -1100,7 +1128,12 @@ mod windows {
 
     #[cfg(test)]
     mod tests {
-        use super::{build_badged_icon, parse_ico, ICON_SIZES, INTER_GDI_FONT_TTF};
+        use super::{
+            build_badged_icon, parse_ico, BASE_ICON_ICO, ICON_SIZES, INTER_GDI_FONT_TTF,
+            LAUNCHER_ICON_ICO,
+        };
+        use ico::IconDir;
+        use std::io::Cursor;
 
         #[test]
         fn generated_icon_contains_every_native_windows_size() {
@@ -1118,6 +1151,36 @@ mod windows {
                 })
                 .collect();
             assert_eq!(sizes.as_slice(), ICON_SIZES.as_slice());
+        }
+
+        #[test]
+        fn unbadged_browser_frames_match_the_canonical_base_exactly() {
+            let generated = build_badged_icon("").expect("generate unbadged browser icon");
+            let generated =
+                IconDir::read(Cursor::new(generated)).expect("decode generated browser icon");
+            let base = IconDir::read(Cursor::new(BASE_ICON_ICO))
+                .expect("decode canonical browser base icon");
+            assert_eq!(generated.entries().len(), base.entries().len());
+            for (generated, base) in generated.entries().iter().zip(base.entries()) {
+                assert_eq!(
+                    (generated.width(), generated.height()),
+                    (base.width(), base.height())
+                );
+                let generated = generated.decode().expect("decode generated frame");
+                let base = base.decode().expect("decode base frame");
+                assert_eq!(
+                    generated.rgba_data(),
+                    base.rgba_data(),
+                    "shared browser base frame changed before badge rendering"
+                );
+            }
+        }
+
+        #[test]
+        fn launcher_ico_starts_with_32px_for_tauri_default_window_icon() {
+            let entries = parse_ico(LAUNCHER_ICON_ICO).expect("parse launcher ICO");
+            let first = entries.first().expect("launcher ICO has entries");
+            assert_eq!((first.width, first.height), (32, 32));
         }
 
         #[test]

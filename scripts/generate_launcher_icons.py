@@ -1,10 +1,12 @@
-"""Generate all ShardX launcher icons from the canonical browser base.
+"""Generate shared Windows base frames and all ShardX launcher icons.
 
 The outer artwork has exactly one source of truth:
 src-tauri/icons/shardx-browser-taskbar-base.png.
 
-The launcher is distinguished only by the compact E-style diamond rendered by
-this script.  Install Pillow and run this file from any working directory.
+The generated browser-base ICO supplies the exact native outer frame consumed
+by Rust before it adds a NAME badge.  The launcher is distinguished only by
+the compact E-style diamond rendered by this script.  Install Pillow and run
+this file from any working directory.
 """
 
 from __future__ import annotations
@@ -19,7 +21,12 @@ from PIL import Image, ImageDraw, ImageFilter
 ROOT = Path(__file__).resolve().parents[1]
 ICON_DIR = ROOT / "src-tauri" / "icons"
 BASE_PATH = ICON_DIR / "shardx-browser-taskbar-base.png"
+BASE_ICO_PATH = ICON_DIR / "shardx-browser-taskbar-base.ico"
 WINDOWS_ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
+# Tauri 2.11 decodes only the first entry of a configured Windows ICO when it
+# constructs the default window icon.  Put 32px first so a 100%-scale taskbar
+# downsamples it to 24px instead of enlarging the 16px frame.
+TAURI_LAUNCHER_ICON_ORDER = (32, 16, 20, 24, 40, 48, 64, 128, 256)
 SUPERSAMPLING = 4
 
 
@@ -151,12 +158,11 @@ def launcher_overlay(size: int) -> Image.Image:
     return overlay.resize((size, size), Image.Resampling.LANCZOS)
 
 
-def render_launcher(base: Image.Image, size: int) -> Image.Image:
-    if size == 256:
-        background = base.copy()
-    else:
-        background = base.resize((size, size), Image.Resampling.LANCZOS)
-    return Image.alpha_composite(background, launcher_overlay(size))
+def render_launcher(base_frame: Image.Image) -> Image.Image:
+    size = base_frame.width
+    if base_frame.size != (size, size):
+        raise ValueError("launcher base frame must be square")
+    return Image.alpha_composite(base_frame.copy(), launcher_overlay(size))
 
 
 def png_bytes(image: Image.Image) -> bytes:
@@ -165,15 +171,17 @@ def png_bytes(image: Image.Image) -> bytes:
     return output.getvalue()
 
 
-def write_windows_ico(base: Image.Image, path: Path) -> None:
-    # Each entry is rendered independently so Windows never has to derive a
-    # taskbar-sized image from the 256px frame.
-    frames = [(size, png_bytes(render_launcher(base, size))) for size in WINDOWS_ICON_SIZES]
-    header_size = 6 + 16 * len(frames)
+def write_windows_ico(
+    path: Path,
+    frames: dict[int, Image.Image],
+    order: tuple[int, ...],
+) -> None:
+    encoded_frames = [(size, png_bytes(frames[size])) for size in order]
+    header_size = 6 + 16 * len(encoded_frames)
     offset = header_size
     directory = []
     payload = []
-    for size, data in frames:
+    for size, data in encoded_frames:
         encoded_size = 0 if size == 256 else size
         directory.append(
             struct.pack(
@@ -192,7 +200,7 @@ def write_windows_ico(base: Image.Image, path: Path) -> None:
         offset += len(data)
 
     path.write_bytes(
-        struct.pack("<HHH", 0, 1, len(frames))
+        struct.pack("<HHH", 0, 1, len(encoded_frames))
         + b"".join(directory)
         + b"".join(payload)
     )
@@ -202,13 +210,31 @@ def main() -> None:
     base = Image.open(BASE_PATH).convert("RGBA")
     assert_canonical_base(base)
 
-    render_launcher(base, 1024).save(ICON_DIR / "icon-source.png", optimize=True)
-    render_launcher(base, 32).save(ICON_DIR / "32x32.png", optimize=True)
-    render_launcher(base, 128).save(ICON_DIR / "128x128.png", optimize=True)
-    render_launcher(base, 256).save(ICON_DIR / "128x128@2x.png", optimize=True)
-    write_windows_ico(base, ICON_DIR / "icon.ico")
+    # These are the canonical per-size outer frames shared byte-for-byte by
+    # the launcher and browser icon pipelines.
+    base_frames = {
+        size: base.copy()
+        if size == 256
+        else base.resize((size, size), Image.Resampling.LANCZOS)
+        for size in WINDOWS_ICON_SIZES
+    }
+    write_windows_ico(BASE_ICO_PATH, base_frames, WINDOWS_ICON_SIZES)
 
-    render_launcher(base, 1024).save(
+    launcher_frames = {
+        size: render_launcher(base_frames[size]) for size in WINDOWS_ICON_SIZES
+    }
+    source = render_launcher(base.resize((1024, 1024), Image.Resampling.LANCZOS))
+    source.save(ICON_DIR / "icon-source.png", optimize=True)
+    launcher_frames[32].save(ICON_DIR / "32x32.png", optimize=True)
+    launcher_frames[128].save(ICON_DIR / "128x128.png", optimize=True)
+    launcher_frames[256].save(ICON_DIR / "128x128@2x.png", optimize=True)
+    write_windows_ico(
+        ICON_DIR / "icon.ico",
+        launcher_frames,
+        TAURI_LAUNCHER_ICON_ORDER,
+    )
+
+    source.save(
         ICON_DIR / "icon.icns",
         format="ICNS",
         sizes=[
