@@ -2556,6 +2556,12 @@ type ProxyTestSnapshot = {
   provider: string;
 };
 
+type ProxyBatchTestResult = {
+  index: number;
+  snapshot: ProxyTestSnapshot | null;
+  error: string | null;
+};
+
 function ProxiesView() {
   const [proxies, setProxies] = useState<ProxyEntry[]>([]);
   const [editing, setEditing] = useState<ProxyEntry | null>(null);
@@ -2683,24 +2689,49 @@ function ProxiesView() {
     catch (e) { toast.err(String(e)); }
   };
 
-  // Capped-parallel bulk TCP/UDP/geo to avoid socket fan-out.
+  // The backend keeps at most five tests in flight. Every queued proxy receives
+  // its own complete five-second test window once a worker becomes available.
   const bulkTest = async () => {
     const ids = [...proxySel];
     if (ids.length === 0) return;
-    toast.info(`Testing ${ids.length} prox${ids.length === 1 ? "y" : "ies"}…`);
     const targets = proxies.filter((p) => proxySel.has(p.id));
-    const CONCURRENCY = 5;
-    let i = 0;
-    await Promise.all(
-      Array.from({ length: Math.min(CONCURRENCY, targets.length) }, async () => {
-        while (i < targets.length) {
-          const p = targets[i++];
-          if (!p) break;
-          await fullTest(p);
+    toast.info(`Testing ${ids.length} prox${ids.length === 1 ? "y" : "ies"}…`);
+    setBusy((state) => {
+      const next = { ...state };
+      for (const target of targets) next[target.id] = true;
+      return next;
+    });
+    try {
+      const results = await invoke<ProxyBatchTestResult[]>("proxy_full_test_batch", { entries: targets });
+      const tested: Record<string, ProxyTestSnapshot> = {};
+      let passed = 0;
+      let failed = 0;
+      let incomplete = 0;
+      for (const result of results) {
+        const target = targets[result.index];
+        if (!target) continue;
+        if (!result.snapshot) {
+          incomplete += 1;
+          continue;
         }
-      }),
-    );
-    toast.ok("Bulk test done");
+        tested[target.id] = result.snapshot;
+        if (result.snapshot.tcp_ms != null) passed += 1;
+        else failed += 1;
+      }
+      setSnapshots((state) => ({ ...state, ...tested }));
+      await reload();
+      const summary = `Bulk test done: ${passed} passed, ${failed} failed${incomplete > 0 ? `, ${incomplete} incomplete` : ""}`;
+      if (failed === 0 && incomplete === 0) toast.ok(summary);
+      else toast.info(summary);
+    } catch (e) {
+      toast.err(`Bulk test failed: ${e}`);
+    } finally {
+      setBusy((state) => {
+        const next = { ...state };
+        for (const target of targets) next[target.id] = false;
+        return next;
+      });
+    }
   };
 
   const bulkDelete = async () => {
@@ -3093,7 +3124,7 @@ function fmtUptime(ms: number): string {
 type BulkRowState = {
   entry: ProxyEntry;
   selected: boolean;
-  status: "idle" | "testing" | "ok" | "fail";
+  status: "idle" | "testing" | "ok" | "fail" | "incomplete";
   tcp_ms?: number | null;
   udp_ms?: number | null;
   country?: string;
@@ -3135,25 +3166,50 @@ function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
           : r,
       ));
     } catch (e) {
-      setRows((rs) => rs.map((r, i) => i === idx ? { ...r, status: "fail", error: String(e) } : r));
+      setRows((rs) => rs.map((r, i) => i === idx ? { ...r, status: "incomplete", error: String(e) } : r));
     }
   };
 
   const testAll = async () => {
+    if (rows.length === 0) return;
     setBusy(true);
-    const CONCURRENCY = 5;
-    const queue = rows.map((_, i) => i);
-    let cursor = 0;
-    await Promise.all(
-      Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
-        while (cursor < queue.length) {
-          const i = queue[cursor++];
-          if (i == null) break;
-          await testOne(i);
+    setRows((current) => current.map((row) => ({ ...row, status: "testing", error: undefined })));
+    try {
+      const results = await invoke<ProxyBatchTestResult[]>("proxy_full_test_batch", {
+        entries: rows.map((row) => row.entry),
+      });
+      const byIndex = new Map(results.map((result) => [result.index, result]));
+      setRows((current) => current.map((row, index) => {
+        const result = byIndex.get(index);
+        const snap = result?.snapshot;
+        if (!snap) {
+          return {
+            ...row,
+            status: "incomplete",
+            error: result?.error ?? "Proxy test failed",
+          };
         }
-      }),
-    );
-    setBusy(false);
+        return {
+          ...row,
+          status: snap.tcp_ms != null ? "ok" : "fail",
+          tcp_ms: snap.tcp_ms,
+          udp_ms: snap.udp_ms,
+          country: snap.country_code || row.country,
+          error: snap.tcp_ms == null
+            ? (result?.error ?? "Proxy latency test failed")
+            : undefined,
+          entry: { ...row.entry, country: snap.country_code || row.entry.country },
+        };
+      }));
+    } catch (e) {
+      setRows((current) => current.map((row) => ({
+        ...row,
+        status: "incomplete",
+        error: String(e),
+      })));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const saveSelected = async () => {
@@ -3270,6 +3326,9 @@ host:8080               # no auth
                       )}
                       {r.status === "fail" && (
                         <span className="status-pill status-failed" title={r.error}>Failed</span>
+                      )}
+                      {r.status === "incomplete" && (
+                        <span className="status-pill" title={r.error}>Incomplete</span>
                       )}
                     </div>
                     <button className="btn-sm btn-ghost icon-only" onClick={() => testOne(i)} disabled={r.status === "testing"} title="Test this row"><Icon.Refresh /></button>
