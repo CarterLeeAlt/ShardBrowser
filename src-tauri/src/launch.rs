@@ -6,6 +6,8 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+const BROWSER_CHROME_LABEL: &str = "X";
+
 /// Launch result: OS pid plus CDP endpoint when remote-debugging is on.
 pub struct LaunchOutcome {
     pub pid: u32,
@@ -67,6 +69,14 @@ pub async fn launch_profile(
     let mut raw = stored.config.clone();
     raw.remove("_meta");
     resolve_auto_fields(&mut raw, bound_proxy.as_ref()).await?;
+    // ShardX Browser renders `name` as the blue label in its chrome. Override
+    // only this launch-time clone: the launcher-visible NAME remains stored,
+    // while profile id, user-data directory, noise seeds, and every actual
+    // fingerprint setting stay untouched and isolated per browser.
+    raw.insert(
+        "name".into(),
+        serde_json::Value::String(BROWSER_CHROME_LABEL.into()),
+    );
     let json = serde_json::to_string(&raw).context("serialize profile")?;
 
     // Pass fingerprint by file path — inline JSON overflows Windows' 32767-char CreateProcess limit.
