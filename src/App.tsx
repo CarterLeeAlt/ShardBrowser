@@ -64,29 +64,90 @@ const UDP_DOCS_URL = withUtm("https://docs.proxyshard.com/eng/our-products/about
 
 // ---- toasts (global queue, auto-expiry; push via toast.ok / toast.err) ----
 
-type ToastItem = { id: number; kind: "ok" | "err" | "info"; text: string };
+type ToastItem = { id: number; kind: "ok" | "err" | "info"; text: string; closing: boolean };
 const MAX_VISIBLE_TOASTS = 5;
+const TOAST_DURATION_MS = 3000;
+const TOAST_EXIT_MS = 140;
 let toastSeq = 0;
 const toastSubs = new Set<(items: ToastItem[]) => void>();
 let toastList: ToastItem[] = [];
+let pendingToastList: ToastItem[] = [];
+let toastOverflowTransition = false;
 const publishToasts = () => toastSubs.forEach((cb) => cb(toastList));
-const pushToast = (kind: ToastItem["kind"], text: string) => {
-  const id = ++toastSeq;
-  toastList = [...toastList, { id, kind, text }].slice(-MAX_VISIBLE_TOASTS);
+
+const closeToast = (id: number, onRemoved?: () => void) => {
+  const target = toastList.find((item) => item.id === id);
+  if (!target || target.closing) return;
+  toastList = toastList.map((item) => item.id === id ? { ...item, closing: true } : item);
   publishToasts();
   setTimeout(() => {
-    const next = toastList.filter((t) => t.id !== id);
-    // The toast may already have been evicted by the five-item cap.
+    const next = toastList.filter((item) => item.id !== id);
     if (next.length === toastList.length) return;
     toastList = next;
     publishToasts();
-  }, 3000);
+    onRemoved?.();
+    pumpPendingToasts();
+  }, TOAST_EXIT_MS);
+};
+
+const mountToast = (item: ToastItem) => {
+  toastList = [...toastList, item];
+  publishToasts();
+  setTimeout(() => closeToast(item.id), TOAST_DURATION_MS - TOAST_EXIT_MS);
+};
+
+function pumpPendingToasts() {
+  if (toastOverflowTransition) return;
+
+  while (pendingToastList.length > 0 && toastList.length < MAX_VISIBLE_TOASTS) {
+    const next = pendingToastList.shift();
+    if (!next) break;
+    mountToast(next);
+  }
+
+  if (pendingToastList.length === 0 || toastList.length < MAX_VISIBLE_TOASTS) return;
+  // A naturally expiring toast will create the next slot; do not start a
+  // competing removal animation while any item is already leaving.
+  if (toastList.some((item) => item.closing)) return;
+
+  toastOverflowTransition = true;
+  closeToast(toastList[0].id, () => {
+    toastOverflowTransition = false;
+    pumpPendingToasts();
+  });
+}
+
+const pushToast = (kind: ToastItem["kind"], text: string) => {
+  pendingToastList = [...pendingToastList, {
+    id: ++toastSeq,
+    kind,
+    text,
+    closing: false,
+  }];
+  pumpPendingToasts();
 };
 const toast = {
   ok: (t: string) => pushToast("ok", t),
   err: (t: string) => pushToast("err", t),
   info: (t: string) => pushToast("info", t),
 };
+
+function ToastGlyph({ kind }: { kind: ToastItem["kind"] }) {
+  return (
+    <svg viewBox="0 0 14 14" aria-hidden="true">
+      {kind === "ok" ? (
+        <path d="M2.8 7.2 5.6 10 11.2 4.4" />
+      ) : kind === "err" ? (
+        <path d="m4 4 6 6m0-6-6 6" />
+      ) : (
+        <>
+          <circle cx="7" cy="4.1" r="0.8" />
+          <path d="M7 6.4v3.7" />
+        </>
+      )}
+    </svg>
+  );
+}
 
 function ToastHost() {
   const [items, setItems] = useState<ToastItem[]>(toastList);
@@ -98,9 +159,14 @@ function ToastHost() {
   return (
     <div className="toast-host">
       {items.map((t) => (
-        <div key={t.id} className={`toast toast-${t.kind}`}>
-          <span className="toast-icon">{t.kind === "ok" ? "✓" : t.kind === "err" ? "✕" : "ℹ"}</span>
-          <span>{t.text}</span>
+        <div
+          key={t.id}
+          className={`toast toast-${t.kind}${t.closing ? " toast-closing" : ""}`}
+          role={t.kind === "err" ? "alert" : "status"}
+          aria-atomic="true"
+        >
+          <span className="toast-icon"><ToastGlyph kind={t.kind} /></span>
+          <span className="toast-message">{t.text}</span>
         </div>
       ))}
     </div>
