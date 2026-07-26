@@ -1,26 +1,13 @@
 // Cookie import/export for ShardX profiles (Chromium Cookies sqlite v24).
 // v10 blob = "v10" + cipher; plaintext = SHA256(host) + value.
-//   macOS: AES-128-CBC,  key = PBKDF2(mock_password, saltysalt, 1003)
-//   Linux: AES-128-CBC,  key = PBKDF2(peanuts,       saltysalt, 1)
-//   Win:   AES-256-GCM,  key = DPAPI-unwrapped Local State os_crypt.encrypted_key
+// Windows uses AES-256-GCM with the DPAPI-unwrapped Local State
+// os_crypt.encrypted_key.
 
 use crate::profile;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-
-// ---- AES-128-CBC cipher (macOS + Linux) ----
-#[cfg(not(target_os = "windows"))]
-use aes::Aes128;
-#[cfg(not(target_os = "windows"))]
-use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
-#[cfg(not(target_os = "windows"))]
-type Aes128CbcDec = cbc::Decryptor<Aes128>;
-#[cfg(not(target_os = "windows"))]
-type Aes128CbcEnc = cbc::Encryptor<Aes128>;
-#[cfg(not(target_os = "windows"))]
-const IV: [u8; 16] = [0x20; 16];
 
 /// Tool-friendly cookie shape (httpOnly / sameSite camelCase aliases accepted).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,15 +50,15 @@ fn now_chromium() -> i64 {
     unix_to_chromium(now)
 }
 
-// ---- OSCrypt key + cipher (per OS) ----
+// ---- Windows OSCrypt key + cipher ----
 
-/// Resolved OSCrypt key; cipher chosen per-OS at compile time.
+/// Resolved Windows OSCrypt key.
 struct Crypt {
     key: Vec<u8>,
 }
 
 impl Crypt {
-    /// POSIX: fixed derivation; Windows: read/mint os_crypt.encrypted_key.
+    /// Read or mint the profile's DPAPI-protected os_crypt.encrypted_key.
     fn open(udd: &Path) -> Result<Self> {
         Ok(Self {
             key: os_crypt_key(udd)?,
@@ -109,49 +96,17 @@ fn strip_host_prefix(mut pt: Vec<u8>) -> Vec<u8> {
     pt
 }
 
-// ---- macOS: mock_password ----
-#[cfg(target_os = "macos")]
-fn os_crypt_key(_udd: &Path) -> Result<Vec<u8>> {
-    let mut key = [0u8; 16];
-    pbkdf2::pbkdf2_hmac::<sha1::Sha1>(b"mock_password", b"saltysalt", 1003, &mut key);
-    Ok(key.to_vec())
-}
-
-// ---- Linux: peanuts ----
-#[cfg(target_os = "linux")]
-fn os_crypt_key(_udd: &Path) -> Result<Vec<u8>> {
-    let mut key = [0u8; 16];
-    pbkdf2::pbkdf2_hmac::<sha1::Sha1>(b"peanuts", b"saltysalt", 1, &mut key);
-    Ok(key.to_vec())
-}
-
-// ---- POSIX CBC ----
-#[cfg(not(target_os = "windows"))]
-fn cipher_decrypt(key: &[u8], body: &[u8]) -> Option<Vec<u8>> {
-    let dec = Aes128CbcDec::new_from_slices(key, &IV).ok()?;
-    dec.decrypt_padded_vec_mut::<Pkcs7>(body).ok()
-}
-#[cfg(not(target_os = "windows"))]
-fn cipher_encrypt(key: &[u8], plaintext: &[u8]) -> Vec<u8> {
-    let enc = Aes128CbcEnc::new_from_slices(key, &IV).expect("16-byte key/iv");
-    enc.encrypt_padded_vec_mut::<Pkcs7>(plaintext)
-}
-
-// ---- Windows: DPAPI key + AES-256-GCM ----
-#[cfg(target_os = "windows")]
+// ---- DPAPI key + AES-256-GCM ----
 fn os_crypt_key(udd: &Path) -> Result<Vec<u8>> {
     win::os_crypt_key(udd)
 }
-#[cfg(target_os = "windows")]
 fn cipher_decrypt(key: &[u8], body: &[u8]) -> Option<Vec<u8>> {
     win::gcm_decrypt(key, body)
 }
-#[cfg(target_os = "windows")]
 fn cipher_encrypt(key: &[u8], plaintext: &[u8]) -> Vec<u8> {
     win::gcm_encrypt(key, plaintext)
 }
 
-#[cfg(target_os = "windows")]
 mod win {
     use aes_gcm::{
         aead::{Aead, KeyInit},
@@ -329,8 +284,8 @@ fn cookies_db_path(udd: &Path) -> PathBuf {
 /// Export decrypted cookies.
 pub fn export(profile_id: &str) -> Result<Vec<Cookie>> {
     // Never read a live Chromium cookie store. Windows holds this file without
-    // read sharing, and every platform needs a clean browser shutdown to flush
-    // the latest WAL state. Stopping the browser remains an explicit user action.
+    // read sharing, and a clean browser shutdown is required to flush the latest
+    // WAL state. Stopping the browser remains an explicit user action.
     if crate::is_profile_running(profile_id) {
         anyhow::bail!(
             "this profile is still running; close the browser manually before exporting cookies"

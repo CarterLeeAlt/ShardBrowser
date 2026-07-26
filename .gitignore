@@ -30,9 +30,12 @@ src-tauri/target/
 src-tauri/Cargo.lock.bak
 src-tauri/.cargo-lock
 src-tauri/gen/
-# Per-platform release bundles — built by the release workflow,
-# uploaded to GitHub Releases, never committed.
+# Windows release bundles built by the release workflow and uploaded to GitHub
+# Releases; never committed.
 src-tauri/target/release/bundle/
+
+# Locally unpacked Windows Chromium runtime used for manual testing.
+ShardX-Windows/
 
 # ===== Editor / OS junk =====
 .vscode/*

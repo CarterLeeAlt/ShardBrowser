@@ -160,7 +160,7 @@ across iframes, web workers, devtools and headless inspection.
   / locale / geolocation from the proxy's exit country.
 * **Auto-runtime** — first launch pulls the patched ShardX Chromium
   build, Widevine CDM and the fingerprint library from CDN, places
-  Widevine inside the framework, persists an etag so subsequent
+  Widevine beside the Windows browser runtime, persists an etag so subsequent
   launches are zero-network.
 * **Local automation API** — axum HTTP server on `127.0.0.1`,
   JWT-Bearer auth. Full reference at
@@ -170,9 +170,10 @@ across iframes, web workers, devtools and headless inspection.
 * **MCP server bundled** — drop into Claude Desktop / IDE for
   natural-language profile orchestration.
 * **Cookie I/O** — import / export the profile's Chromium Cookies
-  SQLite with v10 (mac / linux) and AES-GCM + DPAPI (win) decryption.
-* **Cross-platform** — macOS arm64, Windows x64, Linux x64; native
-  traffic lights on mac, custom titlebar elsewhere.
+  SQLite using Windows AES-256-GCM + DPAPI decryption.
+* **Windows x64 portable launcher** — launcher, browser runtime, profiles,
+  cookies, MCP downloads and exports all stay beside the executable. Profiles
+  may still emulate Windows, macOS or Linux fingerprints inside Chromium.
 
 ---
 
@@ -270,66 +271,32 @@ immediately:
 
 ### Option A — grab a pre-built release
 
-Download the build for your OS from
-[GitHub Releases](../../releases) — `.dmg` for macOS, `.msi` (or the
-installer-free **portable** `.exe`) for Windows, `.AppImage` / `.deb`
-for Linux — and run it.
+Download the Windows x64 build from [GitHub Releases](../../releases). Use the
+`.msi` installer or the installer-free portable `.exe`.
 
-The release isn't code-signed (no Apple Developer ID, no Authenticode
-cert), so the first launch is gated by the OS:
-
-* **macOS** — Gatekeeper sees an unsigned bundle that the browser
-  just downloaded and refuses to open it. Depending on macOS version
-  you get either *"can't be opened because Apple cannot check it for
-  malicious software"* (mild) or *"ShardX Launcher is damaged and
-  can't be opened. Move it to the Trash."* (loud, since macOS 14+).
-  **Both are fixed by stripping the quarantine attribute** the
-  browser stamped on the .dmg — run once in Terminal:
-  ```bash
-  xattr -dr com.apple.quarantine "/Applications/ShardX Launcher.app"
-  ```
-  After that the .app opens normally with a double-click. If you only
-  see the mild "developer cannot be verified" warning, right-click on
-  the .app → *Open* → *Open* in the confirmation also works.
-* **Windows** — SmartScreen shows *"Windows protected your PC"*.
-  Click **More info** → **Run anyway**. Repeated launches don't
-  re-prompt.
-* **Linux** — `.AppImage`: `chmod +x ShardX-Launcher.AppImage && ./ShardX-Launcher.AppImage`. `.deb`: `sudo apt install ./ShardX-Launcher.deb`.
-
-### Linux system dependencies
-
-The bundled Chromium engine needs `unzip` + the standard set of shared
-libraries any Chromium fork links against. On a fresh Debian / Ubuntu:
-
-```bash
-sudo apt install -y \
-  unzip ca-certificates fonts-liberation \
-  libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
-  libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
-  libgbm1 libpango-1.0-0 libcairo2 libasound2 libxshmfence1
-```
+The release is not Authenticode-signed. If SmartScreen shows *"Windows
+protected your PC"*, click **More info** → **Run anyway**. Repeated launches
+do not re-prompt.
 
 ### Option B — build from source
 
-```bash
-cd rust/shardx-launcher
-npm install
-npm run tauri dev      # dev (hot reload)
-# or
-npm run tauri build    # release .app / .msi / .AppImage in src-tauri/target/release/bundle/
+```powershell
+npm ci
+npm run tauri dev
+# Windows x64 release MSI + portable EXE
+npm run tauri:build:windows-x64
 ```
+
+The Windows MSI is written under
+`src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/`. The standalone
+portable executable is one level above `bundle/`.
 
 ### First launch
 
-The app downloads the patched browser (~150 MB), Widevine (~16 MB) and
-the fingerprint library (~470 KB) from our CDN, places everything
-under
-
-* `~/Library/Application Support/shardx-launcher/` (mac)
-* `%APPDATA%\shardx-launcher\` (win)
-* `~/.config/shardx-launcher/` (linux)
-
-and you're ready to bind a proxy and launch your first profile.
+The app downloads the Windows x64 patched browser (~150 MB), Widevine (~16 MB)
+and the fingerprint library (~470 KB) from the CDN. All persistent data is
+placed under `<launcher executable directory>\shardx-launcher\`, preserving the
+strict portable layout. Then you can bind a proxy and launch the first profile.
 
 ---
 

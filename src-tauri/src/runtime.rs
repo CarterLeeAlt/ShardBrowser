@@ -14,7 +14,7 @@ const PUB_BASE: &str = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev";
 const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/ProxyShard/ShardBrowser/main/runtime.json";
 const BUNDLED_MANIFEST_JSON: &str = include_str!("../../runtime.json");
-/// Chromium version baked into the current bundle (used for Mac Framework path).
+/// Chromium version baked into the current Windows runtime bundle.
 const CHROMIUM_VERSION: &str = "149.0.7827.103";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -26,71 +26,31 @@ pub struct ArchiveSpec {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PlatformSpec {
     pub browser: ArchiveSpec,
-    pub widevine: Option<ArchiveSpec>,
+    pub widevine: ArchiveSpec,
 }
 
-/// Archives required for this host; None on unsupported platforms.
-pub fn host_spec() -> Option<PlatformSpec> {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    return Some(PlatformSpec {
-        browser: ArchiveSpec {
-            key: "ShardX-Mac-arm64.zip".into(),
-            label: "ShardX browser (macOS arm64)".into(),
-        },
-        widevine: Some(ArchiveSpec {
-            key: "ShardX-Widevine-Mac-arm64.zip".into(),
-            label: "Widevine CDM".into(),
-        }),
-    });
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    return Some(PlatformSpec {
+/// Archives required by the Windows x64 runtime.
+pub fn host_spec() -> PlatformSpec {
+    PlatformSpec {
         browser: ArchiveSpec {
             key: "ShardX-Windows.zip".into(),
             label: "ShardX browser (Windows x64)".into(),
         },
-        widevine: Some(ArchiveSpec {
+        widevine: ArchiveSpec {
             key: "ShardX-Widevine-Win.zip".into(),
             label: "Widevine CDM".into(),
-        }),
-    });
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    return Some(PlatformSpec {
-        browser: ArchiveSpec {
-            key: "ShardX-Linux.zip".into(),
-            label: "ShardX browser (Linux x64)".into(),
         },
-        widevine: Some(ArchiveSpec {
-            key: "ShardX-Widevine-Linux.zip".into(),
-            label: "Widevine CDM".into(),
-        }),
-    });
-    #[allow(unreachable_code)]
-    None
+    }
 }
 
-/// Runtime directory. On Windows, the local `dirs` wrapper resolves the data
-/// directory to the executable directory so the runtime remains portable.
+/// Portable runtime directory beside the launcher executable.
 pub fn runtime_dir() -> Result<PathBuf> {
-    Ok(dirs::data_dir()
-        .context("platform data dir not available")?
-        .join("shardx-launcher")
-        .join("runtime"))
+    Ok(crate::store::config_root()?.join("runtime"))
 }
 
 /// Path to the chrome binary inside the extracted runtime.
 pub fn binary_path() -> Result<PathBuf> {
-    let base = runtime_dir()?;
-    #[cfg(target_os = "macos")]
-    return Ok(base
-        .join("ShardX-Mac-arm64")
-        .join("ShardX.app")
-        .join("Contents")
-        .join("MacOS")
-        .join("ShardX"));
-    #[cfg(target_os = "windows")]
-    return Ok(base.join("ShardX-Windows").join("chrome.exe"));
-    #[cfg(target_os = "linux")]
-    return Ok(base.join("ShardX-Linux").join("chrome"));
+    Ok(runtime_dir()?.join("ShardX-Windows").join("chrome.exe"))
 }
 
 fn manifest_path() -> Result<PathBuf> {
@@ -100,17 +60,10 @@ fn manifest_path() -> Result<PathBuf> {
 /// Top-level dir (under runtime_dir) the engine archive extracts into. Wiped
 /// before a re-extract so stale files from the previous version can't linger.
 fn engine_root_dir() -> &'static str {
-    #[cfg(target_os = "macos")]
-    return "ShardX-Mac-arm64";
-    #[cfg(target_os = "windows")]
-    return "ShardX-Windows";
-    #[cfg(target_os = "linux")]
-    return "ShardX-Linux";
-    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-    return "ShardX-Engine";
+    "ShardX-Windows"
 }
 
-// Bundled fingerprint library (cross-platform); seeds fingerprints dir on first run.
+// Bundled multi-OS fingerprint library; seeds fingerprints dir on first run.
 const FINGERPRINTS_ARCHIVE_KEY: &str = "ShardX-Fingerprints.zip";
 const FINGERPRINTS_TOP_DIR: &str = "shardx-fingerprints";
 
@@ -139,62 +92,32 @@ struct Manifest {
     installed_chromium_version: Option<String>,
 }
 
-/// Chromium version of the engine actually on disk (ground truth), read from
-/// the bundle layout: the macOS Framework `Versions/<ver>/` dir, the Windows
-/// `<ver>.manifest` file. Returns `None` on Linux (no on-disk marker) — callers
-/// fall back to the stored `installed_chromium_version`.
+/// Chromium version of the engine actually on disk, read from the Windows
+/// `<version>.manifest` sidecar beside chrome.exe.
 fn installed_engine_version() -> Option<String> {
     let base = runtime_dir().ok()?;
-    #[cfg(target_os = "macos")]
-    {
-        let versions = base
-            .join("ShardX-Mac-arm64")
-            .join("ShardX.app")
-            .join("Contents")
-            .join("Frameworks")
-            .join("ShardX Framework.framework")
-            .join("Versions");
-        for ent in fs::read_dir(&versions).ok()?.flatten() {
-            let name = ent.file_name().to_string_lossy().to_string();
-            if name != "Current" && name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-                return Some(name);
-            }
-        }
-        None
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let dir = base.join("ShardX-Windows");
-        // Marker is the `<version>.manifest` sidecar next to chrome.exe. Require
-        // the stem to parse as a dotted version so a stray/leftover file can't
-        // feed a bogus version into the update check.
-        let looks_like_version =
-            |s: &str| s.split('.').count() >= 2 && s.starts_with(|c: char| c.is_ascii_digit());
-        for ent in fs::read_dir(&dir).ok()?.flatten() {
-            let p = ent.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("manifest") {
-                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                    if looks_like_version(stem) {
-                        return Some(stem.to_string());
-                    }
+    let dir = base.join("ShardX-Windows");
+    // Require a dotted numeric version so a stray manifest cannot feed a bogus
+    // value into the update check.
+    let looks_like_version =
+        |s: &str| s.split('.').count() >= 2 && s.starts_with(|c: char| c.is_ascii_digit());
+    for ent in fs::read_dir(&dir).ok()?.flatten() {
+        let p = ent.path();
+        if p.extension().and_then(|s| s.to_str()) == Some("manifest") {
+            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                if looks_like_version(stem) {
+                    return Some(stem.to_string());
                 }
             }
         }
-        None
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = base;
-        None
-    }
+    None
 }
 
 /// Effective installed engine version. Trusts the version recorded at install
 /// time (authoritative — written only after a successful download+extract) over
-/// re-reading it off disk, whose layout varies per-OS and can carry stale files
-/// from a previous version (a leftover `<old>.manifest` made Windows re-download
-/// forever). On-disk detection is the fallback for legacy installs that predate
-/// `installed_chromium_version`.
+/// re-reading it from a possibly stale `<old>.manifest`. On-disk detection is
+/// the fallback for legacy installs that predate `installed_chromium_version`.
 fn effective_installed_version(local: &Manifest) -> Option<String> {
     local
         .installed_chromium_version
@@ -223,7 +146,7 @@ pub struct RuntimeStatus {
     pub installed_browser_etag: Option<String>,
     pub remote_browser_etag: Option<String>,
     pub update_available: bool,
-    pub spec: Option<PlatformSpec>,
+    pub spec: PlatformSpec,
     /// True once the fingerprint library bundle has been extracted.
     pub fingerprints_installed: bool,
 }
@@ -426,9 +349,7 @@ pub async fn runtime_status() -> Result<RuntimeStatus, String> {
     } else {
         bundled_manifest()
     };
-    let remote = spec
-        .as_ref()
-        .and_then(|s| manifest.archives.get(&s.browser.key).cloned());
+    let remote = manifest.archives.get(&spec.browser.key).cloned();
     // Update is detected by VERSION (engine on disk vs manifest's
     // chromium_version), not by etag — robust for users whose stored etag
     // already matched but whose binary never actually updated. Manifest
@@ -465,7 +386,7 @@ pub async fn runtime_status() -> Result<RuntimeStatus, String> {
 
 #[tauri::command]
 pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatus, String> {
-    let spec = host_spec().ok_or("Host platform has no published ShardX archive")?;
+    let spec = host_spec();
     let base = runtime_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
 
@@ -489,8 +410,8 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
         // Wipe the old engine tree first. The archive extracts *over* the
         // existing dir but never deletes files the new version dropped — most
         // critically the previous `<version>.manifest`, which lingers beside the
-        // new one and poisons version detection into an endless re-download (and
-        // stale DLLs/.so could be loaded). Applies to win + linux + mac alike.
+        // new one and poisons version detection into an endless re-download;
+        // stale DLLs could also be loaded.
         let _ = fs::remove_dir_all(base.join(engine_root_dir()));
         download_and_extract(&window, &spec.browser, &base)
             .await
@@ -499,19 +420,16 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
         local.browser_etag.clone().unwrap_or_default()
     };
 
-    let widevine_etag = if let Some(wv) = &spec.widevine {
-        // Re-download Widevine only when browser changed or manifest lacks a stamp.
-        if need_browser || local.widevine_etag.is_none() {
-            let etag = download_and_extract(&window, wv, &base)
-                .await
-                .map_err(|e| e.to_string())?;
-            place_widevine(&base).map_err(|e| e.to_string())?;
-            Some(etag)
-        } else {
-            local.widevine_etag.clone()
-        }
+    // Re-download Widevine only when the browser changed or the manifest lacks
+    // a stamp. Windows x64 always ships the CDM archive.
+    let widevine_etag = if need_browser || local.widevine_etag.is_none() {
+        let etag = download_and_extract(&window, &spec.widevine, &base)
+            .await
+            .map_err(|e| e.to_string())?;
+        place_widevine(&base).map_err(|e| e.to_string())?;
+        Some(etag)
     } else {
-        None
+        local.widevine_etag.clone()
     };
 
     // Fingerprint seed: overwrites bundled templates, leaves user-added files;
@@ -680,130 +598,19 @@ async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) 
     let zip_path = tmp.clone();
     let dest = base.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<()> {
-        // On macOS / Linux shell out to the system `unzip`: the Rust `zip`
-        // crate's `extract()` does not restore symlinks (rewrites them as
-        // text files) or +x bits, and Linux archives that store entries
-        // out-of-order vs. their parent dirs trip its file-create with
-        // ENOENT ("os error 2") before the parent dir entry is processed.
-        // `unzip` handles all three correctly.
-        #[cfg(unix)]
-        {
-            use std::process::Command;
-            fs::create_dir_all(&dest)?;
-            let out = Command::new("unzip")
-                .arg("-q")
-                .arg("-o")
-                .arg(&zip_path)
-                .arg("-d")
-                .arg(&dest)
-                .output()
-                .map_err(|e| anyhow::anyhow!(
-                    "system `unzip` not found ({e}); install with `apt install unzip` / `brew install unzip`"
-                ))?;
-            // unzip exit codes: 0 = clean, 1 = warnings (e.g. archives
-            // zipped on Windows have backslashes; extraction still
-            // completes correctly), 2+ = real fatal errors per unzip(1).
-            let code = out.status.code().unwrap_or(-1);
-            if code > 1 {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                anyhow::bail!(
-                    "unzip failed for {} (exit {}): {}",
-                    zip_path.display(),
-                    code,
-                    stderr.trim()
-                );
-            }
-            return Ok(());
-        }
-        #[cfg(not(unix))]
-        {
-            let f = fs::File::open(&zip_path)?;
-            let mut archive = zip::ZipArchive::new(f)?;
-            archive.extract(&dest)?;
-            Ok(())
-        }
+        let f = fs::File::open(&zip_path)?;
+        let mut archive = zip::ZipArchive::new(f)?;
+        archive.extract(&dest)?;
+        Ok(())
     })
     .await??;
 
     let _ = fs::remove_file(&tmp);
 
-    // Linux/mac archives produced on Windows lose every Unix exec bit;
-    // restore +x on every ELF/Mach-O file under the runtime tree (not
-    // just the main binary — chrome spawns chrome_crashpad_handler,
-    // chrome_sandbox, etc., and they all need the exec bit).
-    #[cfg(unix)]
-    {
-        if let Ok(root) = runtime_dir() {
-            fix_unix_exec_bits(&root);
-        }
-    }
-
     Ok(etag)
 }
 
-/// First-4-bytes magic check; matches ELF + every Mach-O flavour.
-#[cfg(unix)]
-fn fix_unix_exec_bits(root: &Path) {
-    use std::io::Read;
-    use std::os::unix::fs::PermissionsExt;
-    const MAGIC: &[[u8; 4]] = &[
-        [0x7f, b'E', b'L', b'F'],                              // ELF
-        [0xfe, 0xed, 0xfa, 0xcf], [0xcf, 0xfa, 0xed, 0xfe],   // Mach-O 64 BE/LE
-        [0xfe, 0xed, 0xfa, 0xce], [0xce, 0xfa, 0xed, 0xfe],   // Mach-O 32 BE/LE
-        [0xca, 0xfe, 0xba, 0xbe], [0xbe, 0xba, 0xfe, 0xca],   // Mach-O universal
-    ];
-    fn walk(dir: &Path, magic: &[[u8; 4]]) {
-        let Ok(entries) = fs::read_dir(dir) else { return };
-        for ent in entries.flatten() {
-            let p = ent.path();
-            let Ok(ft) = ent.file_type() else { continue };
-            if ft.is_symlink() { continue; }
-            if ft.is_dir() { walk(&p, magic); continue; }
-            if !ft.is_file() { continue; }
-            let mut head = [0u8; 4];
-            let Ok(mut f) = fs::File::open(&p) else { continue };
-            if f.read_exact(&mut head).is_err() { continue; }
-            if !magic.iter().any(|m| *m == head) { continue; }
-            if let Ok(meta) = fs::metadata(&p) {
-                let mut perm = meta.permissions();
-                perm.set_mode(perm.mode() | 0o111);
-                let _ = fs::set_permissions(&p, perm);
-            }
-        }
-    }
-    walk(root, MAGIC);
-}
-
-/// Move Widevine to `<Framework>.framework/Versions/<ver>/Libraries/WidevineCdm/`.
-#[cfg(target_os = "macos")]
-fn place_widevine(base: &Path) -> Result<()> {
-    let src = base
-        .join("ShardX-Widevine-Mac-arm64")
-        .join("WidevineCdm");
-    if !src.exists() {
-        return Ok(());
-    }
-    let dst = base
-        .join("ShardX-Mac-arm64")
-        .join("ShardX.app")
-        .join("Contents")
-        .join("Frameworks")
-        .join("ShardX Framework.framework")
-        .join("Versions")
-        .join(CHROMIUM_VERSION)
-        .join("Libraries")
-        .join("WidevineCdm");
-    if dst.exists() {
-        let _ = fs::remove_dir_all(&dst);
-    }
-    fs::create_dir_all(dst.parent().context("widevine parent")?)?;
-    fs::rename(&src, &dst)?;
-    let _ = fs::remove_dir(base.join("ShardX-Widevine-Mac-arm64"));
-    Ok(())
-}
-
 /// Windows flat layout: WidevineCdm/ sits beside chrome.exe.
-#[cfg(target_os = "windows")]
 fn place_widevine(base: &Path) -> Result<()> {
     let src = base.join("ShardX-Widevine-Win").join("WidevineCdm");
     if !src.exists() {
@@ -815,22 +622,6 @@ fn place_widevine(base: &Path) -> Result<()> {
     }
     fs::rename(&src, &dst)?;
     let _ = fs::remove_dir(base.join("ShardX-Widevine-Win"));
-    Ok(())
-}
-
-/// Linux: WidevineCdm/ next to chrome binary (flat layout).
-#[cfg(target_os = "linux")]
-fn place_widevine(base: &Path) -> Result<()> {
-    let src = base.join("ShardX-Widevine-Linux").join("WidevineCdm");
-    if !src.exists() {
-        return Ok(());
-    }
-    let dst = base.join("ShardX-Linux").join("WidevineCdm");
-    if dst.exists() {
-        let _ = fs::remove_dir_all(&dst);
-    }
-    fs::rename(&src, &dst)?;
-    let _ = fs::remove_dir(base.join("ShardX-Widevine-Linux"));
     Ok(())
 }
 

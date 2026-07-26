@@ -38,9 +38,8 @@ pub async fn launch_profile(
         .get("name")
         .and_then(|value| value.as_str())
         .unwrap_or("(unnamed)");
-    // Windows groups Chromium taskbar buttons by executable identity.  Launch
-    // a portable, per-profile copy whose icon contains the trailing NAME badge;
-    // other platforms keep using the original engine binary unchanged.
+    // Windows groups Chromium taskbar buttons by executable identity. Launch a
+    // portable per-profile copy whose icon contains the trailing NAME badge.
     let launch_bin = if headless {
         bin.clone()
     } else {
@@ -271,16 +270,14 @@ pub async fn launch_profile(
 }
 
 fn browser_command(binary: &Path, args: &[OsString]) -> tokio::process::Command {
+    use std::os::windows::process::CommandExt;
+
     let mut command = tokio::process::Command::new(binary);
     command.args(args);
     command.stdout(Stdio::null()).stderr(Stdio::null());
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        // 0x08000000 = CREATE_NO_WINDOW — suppress the brief console flash
-        // when a Tauri GUI app spawns the engine binary.
-        command.creation_flags(0x08000000);
-    }
+    // 0x08000000 = CREATE_NO_WINDOW — suppress the brief console flash when a
+    // Tauri GUI app spawns the engine binary.
+    command.creation_flags(0x08000000);
     command
 }
 

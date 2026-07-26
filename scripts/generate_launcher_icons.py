@@ -224,29 +224,10 @@ def main() -> None:
     launcher_frames = {
         size: render_launcher(base_frames[size]) for size in WINDOWS_ICON_SIZES
     }
-    source = render_launcher(base.resize((1024, 1024), Image.Resampling.LANCZOS))
-    source.save(ICON_DIR / "icon-source.png", optimize=True)
-    launcher_frames[32].save(ICON_DIR / "32x32.png", optimize=True)
-    launcher_frames[128].save(ICON_DIR / "128x128.png", optimize=True)
-    launcher_frames[256].save(ICON_DIR / "128x128@2x.png", optimize=True)
     write_windows_ico(
         ICON_DIR / "icon.ico",
         launcher_frames,
         TAURI_LAUNCHER_ICON_ORDER,
-    )
-
-    source.save(
-        ICON_DIR / "icon.icns",
-        format="ICNS",
-        sizes=[
-            (16, 16),
-            (32, 32),
-            (64, 64),
-            (128, 128),
-            (256, 256),
-            (512, 512),
-            (1024, 1024),
-        ],
     )
 
 

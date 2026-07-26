@@ -1,5 +1,5 @@
-// Persistent storage layout. On Windows, the local `dirs` wrapper resolves the
-// base to the executable directory, so every entry stays portable:
+// Persistent Windows storage layout. The base is derived directly from the
+// launcher executable directory, so every entry stays portable:
 //   <launcher-dir>/shardx-launcher/
 //     profiles/                   ← fingerprint profile JSON files
 //     proxies.json                ← saved proxy list
@@ -10,7 +10,10 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 pub fn config_root() -> Result<PathBuf> {
-    let base = dirs::config_dir().context("OS config dir unavailable")?;
+    let executable = std::env::current_exe().context("launcher executable path unavailable")?;
+    let base = executable
+        .parent()
+        .context("launcher executable directory unavailable")?;
     let root = base.join("shardx-launcher");
     std::fs::create_dir_all(&root)?;
     Ok(root)

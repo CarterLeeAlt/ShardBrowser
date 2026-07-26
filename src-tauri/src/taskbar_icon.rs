@@ -13,16 +13,6 @@ pub(crate) fn badge_label(name: &str) -> String {
     graphemes.concat()
 }
 
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn prepare_profile_binary(
-    original: &Path,
-    _profile_id: &str,
-    _profile_name: &str,
-) -> Result<PathBuf> {
-    Ok(original.to_path_buf())
-}
-
-#[cfg(target_os = "windows")]
 pub(crate) fn prepare_profile_binary(
     original: &Path,
     profile_id: &str,
@@ -32,25 +22,17 @@ pub(crate) fn prepare_profile_binary(
 }
 
 pub(crate) fn remove_profile_launchers(profile_id: &str) {
-    #[cfg(target_os = "windows")]
     windows::remove_profile_launchers(profile_id);
-    #[cfg(not(target_os = "windows"))]
-    let _ = profile_id;
 }
 
 pub(crate) fn watch_profile_taskbar(pid: u32, profile_id: String, executable: PathBuf) {
-    #[cfg(target_os = "windows")]
     windows::watch_profile_taskbar(pid, profile_id, executable);
-    #[cfg(not(target_os = "windows"))]
-    let _ = (pid, profile_id, executable);
 }
 
-#[cfg(target_os = "windows")]
 pub(crate) fn apply_launcher_taskbar_icon(window: isize, icon_dir: &Path) -> Result<()> {
     windows::apply_launcher_taskbar_icon(window, icon_dir)
 }
 
-#[cfg(target_os = "windows")]
 mod windows {
     use super::badge_label;
     use anyhow::{Context, Result};
