@@ -1370,6 +1370,9 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .proxy-test > .status-pill {
   width: 100%;
   box-sizing: border-box;
+  /* Match the country-code chip: its 2px vertical padding has no border,
+     while these pills use 1px padding plus a 1px border on each side. */
+  padding-block: 1px;
 }
 .proxy-test .test-ip {
   display: inline-flex;
