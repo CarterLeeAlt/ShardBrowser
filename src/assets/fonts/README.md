@@ -16,5 +16,5 @@ styles must reference `--font-app` rather than naming a font directly. The
 application's two semantic font weights remain 400 and 600.
 
 The Windows taskbar badge uses the separately named and packaged
-`src-tauri/fonts/Inter-Variable-GDI.ttf`. It is a native TrueType font embedded
-by Rust; these WOFF2 files remain frontend-only.
+`src-tauri/fonts/CascadiaMono-Regular.ttf`. It is a static native TrueType font
+embedded by Rust; these Inter WOFF2 files remain frontend-only.

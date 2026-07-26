@@ -1,16 +1,20 @@
 # Windows taskbar font
 
-`Inter-Variable-GDI.ttf` is the TrueType build of Inter used by the Windows
-taskbar badge renderer. Rust embeds it with `include_bytes!` and registers it
-for the current process with `AddFontMemResourceEx`; it is never installed into
-Windows and does not write to the system font directory.
+`CascadiaMono-Regular.ttf` is the static TrueType build used exclusively by
+the Windows taskbar badge renderer. Rust embeds it with `include_bytes!` and
+registers it for the current process with `AddFontMemResourceEx`; it is never
+installed into Windows and never writes to the system font directory.
 
-This native GDI font is intentionally kept separate from the WebView WOFF2
-subsets in `src/assets/fonts/Inter-Variable-*.woff2`:
+The repository file is `ttf/static/CascadiaMono-Regular.ttf` from Microsoft's
+official Cascadia Code v2407.24 release. Its SHA-256 is:
 
-- `src-tauri/fonts/Inter-Variable-GDI.ttf` — native Windows taskbar rendering
-- `src/assets/fonts/Inter-Variable-*.woff2` — bundled frontend typography
+`06520d032ec274fa5040b22c6f4a1d829081b24ba40b2da56dae89bf10c7b481`
 
-The font comes from the Google Fonts Inter v20 distribution and is licensed
-under the SIL Open Font License 1.1. The repository copy of that license is at
-`public/licenses/Inter-OFL.txt`.
+This native GDI font is intentionally separate from the WebView Inter WOFF2
+subsets:
+
+- `src-tauri/fonts/CascadiaMono-Regular.ttf` - native Windows taskbar labels
+- `src/assets/fonts/Inter-Variable-*.woff2` - bundled frontend typography
+
+Cascadia Code is licensed under the SIL Open Font License 1.1. The repository
+copy of the license is at `public/licenses/Cascadia-Code-OFL.txt`.

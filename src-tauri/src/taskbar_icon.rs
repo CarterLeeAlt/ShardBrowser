@@ -68,15 +68,17 @@ mod windows {
 
     const BASE_ICON_ICO: &[u8] = include_bytes!("../icons/shardx-browser-taskbar-base.ico");
     const LAUNCHER_ICON_ICO: &[u8] = include_bytes!("../icons/icon.ico");
-    const INTER_GDI_FONT_TTF: &[u8] = include_bytes!("../fonts/Inter-Variable-GDI.ttf");
+    const CASCADIA_MONO_REGULAR_TTF: &[u8] =
+        include_bytes!("../fonts/CascadiaMono-Regular.ttf");
     const ICON_SIZE: i32 = 256;
     const ICON_SIZES: [u32; 9] = [16, 20, 24, 32, 40, 48, 64, 128, 256];
+    const TASKBAR_ICON_SIZES: [i32; 5] = [24, 32, 40, 48, 64];
     const RT_ICON: *const u16 = 3usize as *const u16;
     const RT_GROUP_ICON: *const u16 = 14usize as *const u16;
     const DIB_RGB_COLORS: u32 = 0;
     const BI_RGB: u32 = 0;
     const TRANSPARENT: i32 = 1;
-    const FW_BOLD: i32 = 700;
+    const FW_NORMAL: i32 = 400;
     const DEFAULT_CHARSET: u32 = 1;
     const OUT_TT_PRECIS: u32 = 4;
     const CLIP_DEFAULT_PRECIS: u32 = 0;
@@ -92,8 +94,8 @@ mod windows {
     // AddFontMemResourceEx keeps the memory font available until it is
     // explicitly removed. The bytes are compiled into the executable and the
     // process-lifetime handle is intentionally retained, so taskbar rendering
-    // never depends on Inter being installed in Windows.
-    static INTER_GDI_FONT_REGISTRATION: OnceLock<std::result::Result<isize, String>> =
+    // never depends on Cascadia Mono being installed in Windows.
+    static CASCADIA_MONO_FONT_REGISTRATION: OnceLock<std::result::Result<isize, String>> =
         OnceLock::new();
     static LAUNCHER_ICONS: OnceLock<std::result::Result<LoadedIcons, String>> = OnceLock::new();
 
@@ -262,6 +264,7 @@ mod windows {
         fn DeleteObject(object: isize) -> i32;
         fn SetBkMode(dc: isize, mode: i32) -> i32;
         fn SetTextColor(dc: isize, color: u32) -> u32;
+        fn SetTextCharacterExtra(dc: isize, extra: i32) -> i32;
         fn GetTextExtentPoint32W(dc: isize, text: *const u16, len: i32, size: *mut Size) -> i32;
         fn TextOutW(dc: isize, x: i32, y: i32, text: *const u16, len: i32) -> i32;
     }
@@ -281,6 +284,7 @@ mod windows {
             flags: u32,
         ) -> isize;
         fn SendMessageW(window: isize, message: u32, wparam: usize, lparam: isize) -> isize;
+        fn GetDpiForWindow(window: isize) -> u32;
         fn DestroyIcon(icon: isize) -> i32;
     }
 
@@ -325,7 +329,7 @@ mod windows {
         let fingerprint = stable_hash(&[
             label.as_bytes(),
             BASE_ICON_ICO,
-            b"taskbar-badge-layout-v11-shared-native-base-frames",
+            b"taskbar-badge-layout-v13-cascadia-mono-regular-tracking",
             &metadata.len().to_le_bytes(),
             &modified.to_le_bytes(),
         ]);
@@ -448,7 +452,7 @@ mod windows {
     }
 
     struct LoadedIcons {
-        large: isize,
+        taskbar: [isize; TASKBAR_ICON_SIZES.len()],
         small: isize,
     }
 
@@ -456,24 +460,57 @@ mod windows {
         fn from_icon_file(icon_file: &Path) -> Result<Self> {
             let path = wide_null(icon_file.as_os_str());
             unsafe {
-                // Load native taskbar/window sizes from the multi-resolution
-                // ICO. Loading 256px and letting Windows shrink it made both
-                // the logo and the tiny NAME label visibly soft.
-                let large = LoadImageW(0, path.as_ptr(), IMAGE_ICON, 32, 32, LR_LOADFROMFILE);
-                let small = LoadImageW(0, path.as_ptr(), IMAGE_ICON, 16, 16, LR_LOADFROMFILE);
-                if large == 0 || small == 0 {
-                    if large != 0 {
-                        DestroyIcon(large);
+                // Load every taskbar-sized native frame now. An HICON contains
+                // only the frame selected by LoadImageW, so Windows cannot go
+                // back to the ICO and pick 24px after receiving a 32px handle.
+                let mut taskbar = [0; TASKBAR_ICON_SIZES.len()];
+                for (index, size) in TASKBAR_ICON_SIZES.iter().copied().enumerate() {
+                    taskbar[index] =
+                        LoadImageW(0, path.as_ptr(), IMAGE_ICON, size, size, LR_LOADFROMFILE);
+                    if taskbar[index] == 0 {
+                        for icon in taskbar.iter().copied().filter(|icon| *icon != 0) {
+                            DestroyIcon(icon);
+                        }
+                        return Err(std::io::Error::last_os_error())
+                            .context("load generated profile taskbar icon frame");
                     }
-                    if small != 0 {
-                        DestroyIcon(small);
+                }
+                let small = LoadImageW(0, path.as_ptr(), IMAGE_ICON, 16, 16, LR_LOADFROMFILE);
+                if small == 0 {
+                    for icon in taskbar.iter().copied() {
+                        DestroyIcon(icon);
                     }
                     return Err(std::io::Error::last_os_error())
-                        .context("load generated profile taskbar icon");
+                        .context("load generated profile small icon");
                 }
-                Ok(Self { large, small })
+                Ok(Self { taskbar, small })
             }
         }
+
+        fn taskbar_for_window(&self, window: isize) -> isize {
+            let dpi = unsafe { GetDpiForWindow(window) };
+            let index = nearest_taskbar_icon_index(if dpi == 0 { 96 } else { dpi });
+            self.taskbar[index]
+        }
+    }
+
+    fn nearest_taskbar_icon_index(dpi: u32) -> usize {
+        // The Windows 11 taskbar displays a 24px icon at 96 DPI. Select the
+        // closest native ICO frame at other scaling levels; on a tie, prefer
+        // the larger frame so Windows downsamples instead of upsampling.
+        let target = ((24 * dpi + 48) / 96) as i32;
+        let mut best = 0;
+        for index in 1..TASKBAR_ICON_SIZES.len() {
+            let distance = (TASKBAR_ICON_SIZES[index] - target).abs();
+            let best_distance = (TASKBAR_ICON_SIZES[best] - target).abs();
+            if distance < best_distance
+                || (distance == best_distance
+                    && TASKBAR_ICON_SIZES[index] > TASKBAR_ICON_SIZES[best])
+            {
+                best = index;
+            }
+        }
+        best
     }
 
     pub(super) fn apply_launcher_taskbar_icon(window: isize, icon_dir: &Path) -> Result<()> {
@@ -493,9 +530,9 @@ mod windows {
             Err(message) => anyhow::bail!(message.clone()),
         };
         unsafe {
-            // Mirror the Chromium profile path: Windows receives a 32px big
-            // icon and a 16px small icon instead of Tauri's single ICO entry.
-            SendMessageW(window, WM_SETICON, 1, icons.large);
+            // Mirror the Chromium profile path: both use a DPI-matched native
+            // taskbar frame and a separate native 16px small-window frame.
+            SendMessageW(window, WM_SETICON, 1, icons.taskbar_for_window(window));
             SendMessageW(window, WM_SETICON, 0, icons.small);
         }
         Ok(())
@@ -504,7 +541,9 @@ mod windows {
     impl Drop for LoadedIcons {
         fn drop(&mut self) {
             unsafe {
-                DestroyIcon(self.large);
+                for icon in self.taskbar.iter().copied() {
+                    DestroyIcon(icon);
+                }
                 DestroyIcon(self.small);
             }
         }
@@ -532,8 +571,7 @@ mod windows {
     struct WindowApplyContext {
         pid: u32,
         executable: *const PathBuf,
-        large_icon: isize,
-        small_icon: isize,
+        icons: *const LoadedIcons,
         app_id: *const u16,
         icon_resource: *const u16,
         matched_windows: usize,
@@ -549,8 +587,7 @@ mod windows {
         let mut context = WindowApplyContext {
             pid,
             executable,
-            large_icon: icons.large,
-            small_icon: icons.small,
+            icons,
             app_id: app_id.as_ptr(),
             icon_resource: icon_resource.as_ptr(),
             matched_windows: 0,
@@ -579,8 +616,9 @@ mod windows {
         }
 
         set_window_taskbar_properties(window, context.app_id, context.icon_resource);
-        SendMessageW(window, WM_SETICON, 1, context.large_icon);
-        SendMessageW(window, WM_SETICON, 0, context.small_icon);
+        let icons = &*context.icons;
+        SendMessageW(window, WM_SETICON, 1, icons.taskbar_for_window(window));
+        SendMessageW(window, WM_SETICON, 0, icons.small);
         (*(param as *mut WindowApplyContext)).matched_windows += 1;
         1
     }
@@ -750,11 +788,11 @@ mod windows {
         if text.is_empty() {
             return Ok(());
         }
-        ensure_inter_gdi_font()?;
-        // Keep the taskbar badge aligned with the launcher's bundled Inter UI
-        // typography. This family comes from INTER_GDI_FONT_TTF above rather
-        // than from the host's system font directory.
-        let face_name = wide_null(OsStr::new("Inter"));
+        ensure_cascadia_mono_font()?;
+        // The taskbar badge uses a repository-bundled static monospace face,
+        // so narrow labels such as `1111` keep the same cell spacing as wide
+        // labels such as `WXYZ` on every Windows installation.
+        let face_name = wide_null(OsStr::new("Cascadia Mono"));
 
         unsafe {
             let dc = CreateCompatibleDC(0);
@@ -764,13 +802,17 @@ mod windows {
 
             // Full-width, borderless label: use every available taskbar pixel
             // for NAME instead of spending space on side margins and a white
-            // outline. Inter has taller/wider metrics than the former font, so
-            // use one fixed aspect ratio at every icon size. This keeps up to
-            // four wide characters inside the badge without per-label spacing
-            // compression.
+            // outline. The explicit width keeps four monospaced cells inside
+            // the badge. Eight 256px-reference units equal one source pixel at
+            // the taskbar's 32px big-icon frame.
             let badge_height = scaled(132, icon_size);
             let font_height = scaled(80, icon_size).max(5);
             let font_width = scaled(36, icon_size).max(1);
+            let character_spacing = if label.chars().count() > 1 {
+                scaled(8, icon_size)
+            } else {
+                0
+            };
             let radius = scaled(20, icon_size).max(1);
             let left = 0;
             let top = icon_size - badge_height;
@@ -820,6 +862,15 @@ mod windows {
                 }
             };
             let old_font = SelectObject(dc, font);
+            if SetTextCharacterExtra(dc, character_spacing) == i32::MIN {
+                SelectObject(dc, old_font);
+                DeleteObject(font);
+                SelectObject(dc, old_bitmap);
+                DeleteObject(bitmap);
+                DeleteDC(dc);
+                return Err(std::io::Error::last_os_error())
+                    .context("set badge character spacing");
+            }
             let mut final_size = Size::default();
             if GetTextExtentPoint32W(dc, text.as_ptr(), text.len() as i32, &mut final_size) == 0 {
                 SelectObject(dc, old_font);
@@ -829,6 +880,10 @@ mod windows {
                 DeleteDC(dc);
                 return Err(std::io::Error::last_os_error()).context("measure final badge text");
             }
+            // GDI includes one trailing character-extra unit in the measured
+            // advance. It is not a visible inter-character gap, so exclude it
+            // when centering the glyph run.
+            final_size.cx = (final_size.cx - character_spacing).max(0);
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, 0x00ff_ffff);
             let text_x = (icon_size - final_size.cx) / 2;
@@ -868,16 +923,16 @@ mod windows {
         Ok(())
     }
 
-    fn ensure_inter_gdi_font() -> Result<()> {
-        let registration = INTER_GDI_FONT_REGISTRATION.get_or_init(|| {
-            let data_size = match u32::try_from(INTER_GDI_FONT_TTF.len()) {
+    fn ensure_cascadia_mono_font() -> Result<()> {
+        let registration = CASCADIA_MONO_FONT_REGISTRATION.get_or_init(|| {
+            let data_size = match u32::try_from(CASCADIA_MONO_REGULAR_TTF.len()) {
                 Ok(size) => size,
-                Err(_) => return Err("bundled Inter GDI font is too large".to_string()),
+                Err(_) => return Err("bundled Cascadia Mono font is too large".to_string()),
             };
             let mut font_count = 0u32;
             let handle = unsafe {
                 AddFontMemResourceEx(
-                    INTER_GDI_FONT_TTF.as_ptr().cast::<c_void>(),
+                    CASCADIA_MONO_REGULAR_TTF.as_ptr().cast::<c_void>(),
                     data_size,
                     null_mut(),
                     &mut font_count,
@@ -885,7 +940,7 @@ mod windows {
             };
             if handle == 0 || font_count == 0 {
                 Err(format!(
-                    "register bundled Inter GDI font: {}",
+                    "register bundled Cascadia Mono font: {}",
                     std::io::Error::last_os_error()
                 ))
             } else {
@@ -905,7 +960,7 @@ mod windows {
             width,
             0,
             0,
-            FW_BOLD,
+            FW_NORMAL,
             0,
             0,
             0,
@@ -1129,8 +1184,8 @@ mod windows {
     #[cfg(test)]
     mod tests {
         use super::{
-            build_badged_icon, parse_ico, BASE_ICON_ICO, ICON_SIZES, INTER_GDI_FONT_TTF,
-            LAUNCHER_ICON_ICO,
+            build_badged_icon, nearest_taskbar_icon_index, parse_ico, scaled, BASE_ICON_ICO,
+            CASCADIA_MONO_REGULAR_TTF, ICON_SIZES, LAUNCHER_ICON_ICO, TASKBAR_ICON_SIZES,
         };
         use ico::IconDir;
         use std::io::Cursor;
@@ -1177,15 +1232,44 @@ mod windows {
         }
 
         #[test]
-        fn launcher_ico_starts_with_32px_for_tauri_default_window_icon() {
+        fn launcher_ico_starts_with_24px_for_tauri_default_window_icon() {
             let entries = parse_ico(LAUNCHER_ICON_ICO).expect("parse launcher ICO");
             let first = entries.first().expect("launcher ICO has entries");
-            assert_eq!((first.width, first.height), (32, 32));
+            assert_eq!((first.width, first.height), (24, 24));
         }
 
         #[test]
-        fn bundled_inter_font_is_true_type() {
-            assert_eq!(&INTER_GDI_FONT_TTF[..4], &[0, 1, 0, 0]);
+        fn taskbar_icon_uses_native_24px_at_96_dpi() {
+            assert_eq!(
+                TASKBAR_ICON_SIZES[nearest_taskbar_icon_index(96)],
+                24
+            );
+        }
+
+        #[test]
+        fn taskbar_icon_selects_the_closest_native_frame_for_scaled_dpi() {
+            assert_eq!(
+                TASKBAR_ICON_SIZES[nearest_taskbar_icon_index(120)],
+                32
+            );
+            assert_eq!(
+                TASKBAR_ICON_SIZES[nearest_taskbar_icon_index(144)],
+                40
+            );
+            assert_eq!(
+                TASKBAR_ICON_SIZES[nearest_taskbar_icon_index(192)],
+                48
+            );
+        }
+
+        #[test]
+        fn bundled_cascadia_mono_regular_is_true_type() {
+            assert_eq!(&CASCADIA_MONO_REGULAR_TTF[..4], &[0, 1, 0, 0]);
+        }
+
+        #[test]
+        fn badge_tracking_is_one_source_pixel_at_32px() {
+            assert_eq!(scaled(8, 32), 1);
         }
     }
 }
