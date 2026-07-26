@@ -910,6 +910,12 @@ const Icon = {
       <path d="M12 7a5 5 0 1 1-1.5-3.5M12 1.5v3h-3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
     </svg>
   ),
+  Loader: ({ size = 13, className }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" className={className}>
+      <circle cx="7" cy="7" r="5" stroke="currentColor" strokeWidth="1.4" opacity="0.25"/>
+      <path d="M7 2a5 5 0 0 1 5 5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+    </svg>
+  ),
   Info: ({ size = 13, className }: IconProps) => (
     <svg width={size} height={size} viewBox="0 0 14 14" fill="none" className={className}>
       <circle cx="7" cy="7" r="5.5" stroke="currentColor" strokeWidth="1.3"/>
@@ -1647,6 +1653,7 @@ function BrowsersView() {
           const proxyIp = (proxySnapshot?.ip || (!proxySnapshot && hostLooksLikeIp ? px?.host : "") || "").trim();
           const proxyDetailLocation = proxyLocation || (!proxySnapshot && proxyIp ? proxyCountry : "");
           const isRunning = !!running[p.id];
+          const isStarting = !isRunning && startBusy.has(p.id);
           const isExpanded = expanded === p.id;
           const isSel = selected.has(p.id);
           return (
@@ -1739,19 +1746,19 @@ function BrowsersView() {
                   <button
                     className={`btn-launch ${isRunning ? "btn-launch-stop" : ""}`}
                     onClick={() => startStop(p)}
-                    disabled={!isRunning && startBusy.has(p.id)}
+                    disabled={isStarting}
                     title={
                       isRunning
                         ? "Stop browser"
-                        : startBusy.has(p.id)
+                        : isStarting
                           ? "Starting browser (UDP probe + geo + spawn)…"
                           : "Start browser"
                     }
-                    aria-label={isRunning ? "Stop browser" : "Start browser"}
-                    aria-busy={!isRunning && startBusy.has(p.id)}
+                    aria-label={isRunning ? "Stop browser" : isStarting ? "Starting browser" : "Start browser"}
+                    aria-busy={isStarting}
                   >
-                    <span className={`btn-launch-ico ${!isRunning && startBusy.has(p.id) ? "spin" : ""}`}>
-                      {isRunning ? <Icon.Stop /> : <Icon.Play />}
+                    <span className={`btn-launch-ico ${isStarting ? "spin" : ""}`}>
+                      {isRunning ? <Icon.Stop /> : isStarting ? <Icon.Loader /> : <Icon.Play />}
                     </span>
                   </button>
                   <button
