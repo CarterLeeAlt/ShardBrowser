@@ -48,33 +48,23 @@ impl Tracker {
             );
         }
 
-        // Graceful shutdown (SIGTERM / taskkill WM_CLOSE) → 5s → hard kill.
+        // Graceful shutdown (taskkill WM_CLOSE) → 5s → hard kill.
         // Graceful path flushes session state so next launch skips the restore prompt.
         let started_at = Instant::now();
         tokio::spawn(async move {
             tokio::select! {
                 _ = child.wait() => {}
                 _ = rx.recv() => {
-                    #[cfg(unix)]
-                    {
-                        if let Some(p) = child.id() {
-                            // SAFETY: libc::kill on a child pid we own.
-                            unsafe { libc::kill(p as libc::pid_t, libc::SIGTERM); }
-                        }
-                    }
-                    #[cfg(windows)]
-                    {
-                        use std::os::windows::process::CommandExt;
-                        if let Some(p) = child.id() {
-                            // taskkill /PID without /F posts WM_CLOSE for clean shutdown.
-                            // 0x08000000 = CREATE_NO_WINDOW — suppress the console flash.
-                            let _ = std::process::Command::new("taskkill")
-                                .args(["/PID", &p.to_string()])
-                                .creation_flags(0x08000000)
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null())
-                                .status();
-                        }
+                    use std::os::windows::process::CommandExt;
+                    if let Some(p) = child.id() {
+                        // taskkill /PID without /F posts WM_CLOSE for clean shutdown.
+                        // 0x08000000 = CREATE_NO_WINDOW — suppress the console flash.
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/PID", &p.to_string()])
+                            .creation_flags(0x08000000)
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status();
                     }
                     let graceful = tokio::time::timeout(
                         std::time::Duration::from_secs(5),

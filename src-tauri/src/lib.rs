@@ -1,5 +1,8 @@
 // ShardX Launcher — Tauri backend.
 
+#[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+compile_error!("ShardX Launcher supports only Windows x64 (x86_64-pc-windows-msvc)");
+
 mod api;
 mod cookies;
 mod fingerprints;
@@ -196,45 +199,18 @@ fn host_logical_cores() -> u32 {
     })
 }
 
-/// Host physical RAM in GiB, best-effort per OS.
+/// Host physical RAM in GiB from the native Windows API.
 fn host_ram_gb() -> Option<u32> {
-    #[cfg(target_os = "macos")]
-    {
-        let out = std::process::Command::new("sysctl")
-            .args(["-n", "hw.memsize"])
-            .output()
-            .ok()?;
-        let bytes: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
-        return Some((bytes / (1024 * 1024 * 1024)) as u32);
+    use windows_sys::Win32::System::SystemInformation::{
+        GlobalMemoryStatusEx, MEMORYSTATUSEX,
+    };
+
+    let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+        return None;
     }
-    #[cfg(target_os = "linux")]
-    {
-        let s = std::fs::read_to_string("/proc/meminfo").ok()?;
-        let kb: u64 = s
-            .lines()
-            .find(|l| l.starts_with("MemTotal:"))?
-            .split_whitespace()
-            .nth(1)?
-            .parse()
-            .ok()?;
-        return Some((kb / (1024 * 1024)) as u32);
-    }
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        // 0x08000000 = CREATE_NO_WINDOW — suppress the brief console flash a GUI
-        // app gets when shelling out to a console-subsystem binary.
-        let out = std::process::Command::new("wmic")
-            .args(["ComputerSystem", "get", "TotalPhysicalMemory"])
-            .creation_flags(0x08000000)
-            .output()
-            .ok()?;
-        let txt = String::from_utf8_lossy(&out.stdout);
-        let bytes: u64 = txt.lines().filter_map(|l| l.trim().parse::<u64>().ok()).next()?;
-        return Some((bytes / (1024 * 1024 * 1024)) as u32);
-    }
-    #[allow(unreachable_code)]
-    None
+    Some((status.ullTotalPhys / (1024 * 1024 * 1024)) as u32)
 }
 
 /// Physical RAM rounded to Chrome's {8,16,32} deviceMemory bucket; unknown → 16.
@@ -388,8 +364,7 @@ pub(crate) fn randomize_hardware(payload: &mut serde_json::Map<String, Value>) {
     }
 }
 
-/// Clamp profile.screen to the real display when it's smaller than the FP claim.
-/// On Win/Linux always use the real display (presets rarely match user monitors).
+/// Keep profile.screen aligned with the real Windows display.
 fn clamp_screen_to_real_display(
     window: &tauri::WebviewWindow,
     payload: &mut serde_json::Map<String, Value>,
@@ -429,16 +404,6 @@ fn clamp_screen_to_real_display(
     if fp_w <= 0 || fp_h <= 0 {
         return;
     }
-    // macOS keeps curated FP unless real display smaller; Win/Linux always uses real.
-    if cfg!(target_os = "macos") {
-        if real_w >= fp_w && real_h >= fp_h {
-            eprintln!(
-                "[launcher] display: real {real_w}x{real_h} >= fp {fp_w}x{fp_h} — keeping FP screen (macOS)"
-            );
-            return;
-        }
-    }
-
     // Preserve FP menubar/dock insets for avail_*.
     let fp_avail_w = scr.get("avail_width").and_then(|v| v.as_i64()).unwrap_or(fp_w);
     let fp_avail_h = scr.get("avail_height").and_then(|v| v.as_i64()).unwrap_or(fp_h);
@@ -658,16 +623,10 @@ fn folder_delete(folder: String, delete_profiles: bool) -> Result<usize, String>
     profile::delete_folder(&folder, delete_profiles).map_err(|e| e.to_string())
 }
 
-/// Host OS in fingerprint-library vocabulary (macOS/Windows/Linux).
+/// Host OS in fingerprint-library vocabulary.
 #[tauri::command]
 fn host_platform() -> String {
-    match std::env::consts::OS {
-        "macos" => "macOS",
-        "windows" => "Windows",
-        "linux" => "Linux",
-        other => other,
-    }
-    .to_string()
+    "Windows".to_string()
 }
 
 #[tauri::command]
@@ -861,17 +820,14 @@ fn open_portable_directory(
     let canonical_root = std::fs::canonicalize(&root).map_err(|e| e.to_string())?;
     let canonical_directory = std::fs::canonicalize(&directory).map_err(|e| e.to_string())?;
 
-    #[cfg(target_os = "windows")]
-    {
-        let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-        let executable_directory = executable
-            .parent()
-            .ok_or_else(|| "executable directory unavailable".to_string())?;
-        let canonical_executable_directory =
-            std::fs::canonicalize(executable_directory).map_err(|e| e.to_string())?;
-        if !canonical_root.starts_with(&canonical_executable_directory) {
-            return Err("portable root resolves outside the executable directory".into());
-        }
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let executable_directory = executable
+        .parent()
+        .ok_or_else(|| "executable directory unavailable".to_string())?;
+    let canonical_executable_directory =
+        std::fs::canonicalize(executable_directory).map_err(|e| e.to_string())?;
+    if !canonical_root.starts_with(&canonical_executable_directory) {
+        return Err("portable root resolves outside the executable directory".into());
     }
 
     if !canonical_directory.starts_with(&canonical_root) {
@@ -1325,7 +1281,6 @@ async fn ps_set_tag(id: i64, tag: String) -> Result<Value, String> {
     .map_err(|e| e.to_string())
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Bring the main window back from the tray / minimized state and focus it.
 fn show_main_window(app: &tauri::AppHandle) {
     use tauri::Manager;
@@ -1475,7 +1430,6 @@ pub fn run() {
             let mut window_builder =
                 tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?;
 
-            #[cfg(target_os = "windows")]
             let launcher_root = {
                 let exe_dir = std::env::current_exe()?
                     .parent()
@@ -1494,7 +1448,6 @@ pub fn run() {
             };
 
             let main_window = window_builder.build()?;
-            #[cfg(target_os = "windows")]
             taskbar_icon::apply_launcher_taskbar_icon(
                 main_window.hwnd()?.0 as isize,
                 &launcher_root.join("icons"),
@@ -1536,13 +1489,10 @@ pub fn run() {
                 }
             }
 
-            // Win/Linux: strip native caption since macOS-only titleBarStyle:Overlay leaves it.
-            #[cfg(not(target_os = "macos"))]
-            {
-                use tauri::Manager;
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.set_decorations(false);
-                }
+            // The custom Windows titlebar owns the full client area.
+            use tauri::Manager;
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.set_decorations(false);
             }
 
             // Migrate already-created profiles' UA + client_hints to the

@@ -1,28 +1,13 @@
-# Build the Tauri launcher for macOS arm64, Windows x64 and Linux x64
-# on free GitHub-hosted runners, then attach every bundle to a GitHub
-# Release.
-#
-# Why three runners instead of cross-compiling from Linux?  Tauri's
-# bundlers are platform-native — .dmg needs `hdiutil`/`codesign` (mac
-# only), .msi needs WiX (Windows only); cross-compiling the Rust
-# binary is possible but the bundling step then fails.  GitHub's
-# hosted runners are free for public repos (and have a generous free
-# tier for private ones), so this is cost-free for the maintainer and
-# avoids any self-hosted-runner setup.
+# Build and publish the Windows x64 Tauri launcher. ShardX Launcher is a
+# Windows-only portable application; no macOS, Linux, ARM64 or x86 jobs should
+# be added to this workflow.
 #
 # Triggers:
 #   * pushing a tag like `v1.2.3`  → release named "ShardX Launcher v1.2.3"
 #   * manual dispatch via the Actions tab (handy for ad-hoc builds)
 #
-# Artifacts attached to the Release:
-#   * macOS arm64 — .dmg + .app.tar.gz
-#   * Windows x64 — .msi installer + portable .exe
-#   * Linux x64   — .AppImage + .deb
-#
-# No Apple Developer ID / Authenticode cert in this repo, so the bundles are
-# unsigned / not notarized.  macOS users clear the quarantine flag
-# (`xattr -dr com.apple.quarantine`) on first launch; README + the release
-# notes document the Gatekeeper / SmartScreen steps.
+# Artifacts attached to the Release: Windows x64 .msi + portable .exe.
+# No Authenticode certificate is configured, so SmartScreen may warn.
 
 name: Release
 
@@ -41,7 +26,7 @@ permissions:
 
 jobs:
   prepare:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     name: validate release version
     outputs:
       tag: ${{ steps.version.outputs.tag }}
@@ -49,46 +34,27 @@ jobs:
     steps:
       - name: Validate and resolve version
         id: version
-        shell: bash
+        shell: pwsh
         env:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_TAG: ${{ github.event.inputs.tag }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            tag="$INPUT_TAG"
-          else
-            tag="$REF_NAME"
-          fi
-
-          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "Invalid release tag: $tag" >&2
-            echo "Expected format: vMAJOR.MINOR.PATCH (for example, v0.1.15)" >&2
-            exit 1
-          fi
-
-          version="${tag#v}"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          $tag = if ($env:EVENT_NAME -eq "workflow_dispatch") {
+            $env:INPUT_TAG
+          } else {
+            $env:REF_NAME
+          }
+          if ($tag -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw "Invalid release tag '$tag'. Expected vMAJOR.MINOR.PATCH (for example, v0.1.15)."
+          }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$($tag.Substring(1))" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
   build:
     needs: prepare
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-14            # Apple Silicon (M-series) runner — free, ARM-only
-            target: aarch64-apple-darwin
-            label: mac-arm64
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            label: linux-x64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            label: win-x64
-
-    runs-on: ${{ matrix.os }}
-    name: build (${{ matrix.label }})
+    runs-on: windows-latest
+    name: build (Windows x64)
 
     steps:
       - name: Checkout
@@ -100,10 +66,10 @@ jobs:
           node-version: 20
           cache: npm
 
-      - name: Set up Rust (stable, ${{ matrix.target }})
+      - name: Set up Rust (stable, Windows x64 MSVC)
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-pc-windows-msvc
 
       - name: Cache Cargo registry + build target
         uses: actions/cache@v4
@@ -112,93 +78,69 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target
-          key: ${{ matrix.label }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: win-x64-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
-            ${{ matrix.label }}-cargo-
+            win-x64-cargo-
 
-      # Tauri needs WebKitGTK + a few X libs on Linux; nothing extra on
-      # mac / windows runners.
-      - name: Install Linux build deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            patchelf
-
-      - name: npm install
+      - name: Install frontend dependencies
         run: npm ci
 
       - name: Build Tauri bundle (unsigned)
-        shell: bash
-        # No Apple Developer ID / Authenticode cert in this repo, so bundles
-        # ship unsigned / un-notarized. (Ad-hoc signing wouldn't help: it only
-        # avoids the "app is damaged" error, not the "Apple could not verify…"
-        # notarization block — which needs a paid Developer ID.) The Tauri
-        # bundler only skips codesign / signtool when the signing env vars are
-        # UNSET — an *empty* string makes it import a cert and crash, so we set
-        # nothing here. macOS users clear the quarantine flag on first launch
-        # (`xattr -dr com.apple.quarantine`, see release notes / README).
-        run: >-
-          npx tauri build
-          --target ${{ matrix.target }}
-          --config '{"version":"${{ needs.prepare.outputs.version }}"}'
-
-      - name: Collect bundles
-        shell: bash
+        shell: pwsh
         run: |
-          mkdir -p staging
-          # Grab every distributable Tauri produced — paths differ per OS.
-          find src-tauri/target/${{ matrix.target }}/release/bundle \
-            -type f \
-            \( -name '*.dmg' -o -name '*.app.tar.gz' \
-               -o -name '*.msi' -o -name '*.exe' \
-               -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) \
-            -exec cp -v {} staging/ \;
-          ls -la staging/
+          $config = '{"version":"${{ needs.prepare.outputs.version }}"}'
+          npx tauri build --target x86_64-pc-windows-msvc --config $config
+
+      - name: Collect Windows MSI
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force staging | Out-Null
+          $bundle = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle"
+          $msi = @(Get-ChildItem -Path $bundle -Recurse -File -Filter *.msi)
+          if ($msi.Count -eq 0) {
+            throw "Tauri produced no Windows x64 MSI under $bundle"
+          }
+          $msi | Copy-Item -Destination staging -Verbose
+          Get-ChildItem staging
 
       # The raw compiled binary (one level above bundle/) is a standalone,
       # installer-free executable — no MSI/NSIS, no admin, just run it. It uses
       # the system's Evergreen WebView2 (preinstalled on Windows 10/11). Ship it
       # as the portable build alongside the installers.
       - name: Collect Windows portable binary
-        if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         run: |
-          rel="src-tauri/target/${{ matrix.target }}/release"
+          $rel = "src-tauri/target/x86_64-pc-windows-msvc/release"
           # Tauri renames the binary to the product name; fall back to the
           # cargo package name in case that changes.
-          if [ -f "$rel/ShardX Launcher.exe" ]; then
-            src="$rel/ShardX Launcher.exe"
-          else
-            src="$rel/shardx-launcher.exe"
-          fi
-          cp -v "$src" "staging/ShardX-Launcher-portable-${{ needs.prepare.outputs.version }}-${{ matrix.label }}.exe"
-          ls -la staging/
+          $src = Join-Path $rel "ShardX Launcher.exe"
+          if (-not (Test-Path -LiteralPath $src)) {
+            $src = Join-Path $rel "shardx-launcher.exe"
+          }
+          Copy-Item -LiteralPath $src -Destination "staging/ShardX-Launcher-portable-${{ needs.prepare.outputs.version }}-win-x64.exe" -Verbose
+          Get-ChildItem staging
 
       - name: Upload to workflow artifacts (intermediate)
         uses: actions/upload-artifact@v4
         with:
-          name: shardx-launcher-${{ matrix.label }}
+          name: shardx-launcher-win-x64
           path: staging/*
           if-no-files-found: error
 
   release:
     needs: [prepare, build]
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     name: publish release
     steps:
-      - name: Download every per-platform artifact
+      - name: Download Windows x64 artifact
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
       - name: List collected bundles
-        run: ls -la dist/
+        shell: pwsh
+        run: Get-ChildItem -Path dist -Recurse
 
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
@@ -212,9 +154,7 @@ jobs:
           body: |
             ## Install
 
-            * **macOS** (Apple Silicon — M1/M2/M3/M4) — download the `.dmg` and drag *ShardX Launcher.app* to Applications.  The build isn't notarized (no Apple Developer ID), so macOS blocks it on first launch — clear the quarantine flag in Terminal, then open it normally: `xattr -dr com.apple.quarantine "/Applications/ShardX Launcher.app"`  (alternative: *System Settings → Privacy & Security → Open Anyway*).
-            * **Windows** — `.msi` installer, or the installer-free **portable** `ShardX-Launcher-portable-${{ needs.prepare.outputs.version }}-win-x64.exe` (just run it — needs the Evergreen WebView2 runtime, preinstalled on Windows 10/11).  SmartScreen will warn: *More info* → *Run anyway* (the build isn't signed with Authenticode).
-            * **Linux** — `.AppImage` (`chmod +x` and run) or `.deb` (`sudo apt install ./...deb`).
+            **Windows x64 only** — use the `.msi` installer or the installer-free `ShardX-Launcher-portable-${{ needs.prepare.outputs.version }}-win-x64.exe`. The portable build uses the Evergreen WebView2 runtime included with Windows 10/11. Because the binaries are not Authenticode-signed, SmartScreen may require **More info → Run anyway**.
 
             On first launch the launcher downloads the patched ShardX browser, Widevine CDM and a starter library of 170 device profiles from our CDN.  After that it boots straight to the workspace.
           files: dist/*
