@@ -14,3 +14,7 @@ Inter is licensed under the SIL Open Font License 1.1. The license is stored at
 `src/fonts.css` is the single typography configuration entry point. Feature
 styles must reference `--font-app` rather than naming a font directly. The
 application's two semantic font weights remain 400 and 600.
+
+The Windows taskbar badge uses the separately named and packaged
+`src-tauri/fonts/Inter-Variable-GDI.ttf`. It is a native TrueType font embedded
+by Rust; these WOFF2 files remain frontend-only.
