@@ -488,7 +488,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
   pointer-events: none;
 }
-/* Spin animation on the "Starting…" play icon. */
+/* Spin animation on the dedicated starting-state loader. */
 .btn-launch-ico.spin svg { animation: shardx-spin 0.9s linear infinite; }
 @keyframes shardx-spin {
   from { transform: rotate(0deg); }
@@ -673,6 +673,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   border: 1px solid #4ade8055;
   background: #4ade8014;
   color: var(--ok);
+  box-shadow: 0 0 0 2px #4ade800d, 0 0 12px -5px #4ade8070;
   cursor: pointer;
   transition: background .12s, border-color .12s, transform .04s, box-shadow .12s;
 }
@@ -685,7 +686,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .btn-launch:focus-visible {
   outline: none;
   border-color: var(--ok);
-  box-shadow: 0 0 0 3px #4ade8033;
+  box-shadow: 0 0 0 3px #4ade8033, 0 0 16px -4px #4ade8066;
 }
 .btn-launch:disabled {
   opacity: 0.45;
@@ -700,11 +701,16 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   border-color: #fb718555;
   background: #fb71851a;
   color: var(--err);
+  box-shadow: 0 0 0 2px #fb71850d, 0 0 12px -5px #fb718570;
 }
 .btn-launch-stop:hover {
   background: #fb718530;
   border-color: #fb7185aa;
   box-shadow: 0 0 0 3px #fb71851a, 0 0 16px -4px #fb718566;
+}
+.btn-launch-stop:focus-visible {
+  border-color: var(--err);
+  box-shadow: 0 0 0 3px #fb718533, 0 0 16px -4px #fb718566;
 }
 
 /* ===== bulk bar ===== */
