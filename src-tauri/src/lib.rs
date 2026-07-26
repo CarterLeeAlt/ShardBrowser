@@ -8,6 +8,7 @@ mod cookies;
 mod fingerprints;
 mod launch;
 mod mcp_setup;
+mod pixel_font_data;
 mod process;
 mod profile;
 mod proxy;
