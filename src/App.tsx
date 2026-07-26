@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { currentMonitor, getCurrentWindow, LogicalSize, type Monitor } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import "./fonts.css";
 import "./App.css";
@@ -659,6 +659,46 @@ function toStored(f: ProfileForm, lib: FingerprintEntry | null): any {
 
 type Theme = "dark" | "light";
 
+const WINDOW_BASE_SCREEN = { width: 1920, height: 1080 } as const;
+const WINDOW_BASE_MINIMUM = { width: 1385, height: 900 } as const;
+const WINDOW_WORK_AREA_MARGIN = 32;
+
+/**
+ * Scale the launcher's minimum size with the monitor's logical resolution.
+ * A 1920x1080 logical desktop uses 1385x900; larger desktops keep the same
+ * 16:9-relative footprint. The work-area cap keeps the window usable beside
+ * taskbars and on a smaller secondary monitor.
+ */
+function adaptiveWindowBounds(monitor: Monitor) {
+  const scaleFactor = monitor.scaleFactor || 1;
+  const screenWidth = monitor.size.width / scaleFactor;
+  const screenHeight = monitor.size.height / scaleFactor;
+  const workWidth = monitor.workArea.size.width / scaleFactor;
+  const workHeight = monitor.workArea.size.height / scaleFactor;
+  const resolutionScale = Math.max(
+    1,
+    Math.min(
+      screenWidth / WINDOW_BASE_SCREEN.width,
+      screenHeight / WINDOW_BASE_SCREEN.height,
+    ),
+  );
+  const maxWidth = Math.max(1, Math.floor(workWidth - WINDOW_WORK_AREA_MARGIN));
+  const maxHeight = Math.max(1, Math.floor(workHeight - WINDOW_WORK_AREA_MARGIN));
+
+  return {
+    minWidth: Math.min(
+      Math.round(WINDOW_BASE_MINIMUM.width * resolutionScale),
+      maxWidth,
+    ),
+    minHeight: Math.min(
+      Math.round(WINDOW_BASE_MINIMUM.height * resolutionScale),
+      maxHeight,
+    ),
+    maxWidth,
+    maxHeight,
+  };
+}
+
 export default function App() {
   const [section, setSection] = useState<Section>("browsers");
   const [theme, setTheme] = useState<Theme>(
@@ -688,6 +728,72 @@ export default function App() {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("shardx-theme", theme);
   }, [theme]);
+  useEffect(() => {
+    const appWindow = getCurrentWindow();
+    let disposed = false;
+    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+    let unlistenMoved: undefined | (() => void);
+    let unlistenScaleChanged: undefined | (() => void);
+
+    const applyWindowBounds = async () => {
+      try {
+        const monitor = await currentMonitor();
+        if (!monitor || disposed) return;
+
+        const bounds = adaptiveWindowBounds(monitor);
+        await appWindow.setMinSize(new LogicalSize(bounds.minWidth, bounds.minHeight));
+
+        // Setting a larger minimum does not resize an already-created window
+        // on every Windows version. Fit it explicitly, while also shrinking a
+        // window that was moved from a large display onto a smaller work area.
+        if (!(await appWindow.isMaximized())) {
+          const [physicalSize, scaleFactor] = await Promise.all([
+            appWindow.innerSize(),
+            appWindow.scaleFactor(),
+          ]);
+          const currentSize = physicalSize.toLogical(scaleFactor);
+          const width = Math.min(
+            Math.max(currentSize.width, bounds.minWidth),
+            bounds.maxWidth,
+          );
+          const height = Math.min(
+            Math.max(currentSize.height, bounds.minHeight),
+            bounds.maxHeight,
+          );
+          if (
+            Math.abs(width - currentSize.width) >= 1
+            || Math.abs(height - currentSize.height) >= 1
+          ) {
+            await appWindow.setSize(new LogicalSize(Math.round(width), Math.round(height)));
+          }
+        }
+      } catch (error) {
+        console.warn("Unable to apply adaptive launcher window bounds", error);
+      }
+    };
+
+    const scheduleWindowBounds = () => {
+      if (resizeTimer !== undefined) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => void applyWindowBounds(), 150);
+    };
+
+    void applyWindowBounds();
+    appWindow.onMoved(scheduleWindowBounds).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlistenMoved = unlisten;
+    }).catch(() => {});
+    appWindow.onScaleChanged(scheduleWindowBounds).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlistenScaleChanged = unlisten;
+    }).catch(() => {});
+
+    return () => {
+      disposed = true;
+      if (resizeTimer !== undefined) clearTimeout(resizeTimer);
+      unlistenMoved?.();
+      unlistenScaleChanged?.();
+    };
+  }, []);
   return (
     <>
       {/* Custom title bar; drag-region outside .app stays clickable above modals. */}
