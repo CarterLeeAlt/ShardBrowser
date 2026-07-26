@@ -703,7 +703,9 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   color: var(--err);
   box-shadow: 0 0 0 2px #fb71850d, 0 0 12px -5px #fb718570;
 }
-.btn-launch-stop:hover {
+/* Include the base class and disabled guard so this outranks the generic
+   `.btn-launch:hover:not(:disabled)` rule instead of inheriting its green glow. */
+.btn-launch.btn-launch-stop:hover:not(:disabled) {
   background: #fb718530;
   border-color: #fb7185aa;
   box-shadow: 0 0 0 3px #fb71851a, 0 0 16px -4px #fb718566;
