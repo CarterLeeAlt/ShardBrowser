@@ -24,9 +24,10 @@ BASE_PATH = ICON_DIR / "shardx-browser-taskbar-base.png"
 BASE_ICO_PATH = ICON_DIR / "shardx-browser-taskbar-base.ico"
 WINDOWS_ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 # Tauri 2.11 decodes only the first entry of a configured Windows ICO when it
-# constructs the default window icon.  Put 32px first so a 100%-scale taskbar
-# downsamples it to 24px instead of enlarging the 16px frame.
-TAURI_LAUNCHER_ICON_ORDER = (32, 16, 20, 24, 40, 48, 64, 128, 256)
+# constructs the default window icon. Put the native 96-DPI taskbar size first;
+# the runtime replaces it with the closest DPI-specific frame immediately after
+# the window is created.
+TAURI_LAUNCHER_ICON_ORDER = (24, 16, 20, 32, 40, 48, 64, 128, 256)
 SUPERSAMPLING = 4
 
 
