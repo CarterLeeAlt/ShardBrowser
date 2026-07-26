@@ -135,6 +135,13 @@ impl Tracker {
             .collect()
     }
 
+    pub fn is_running_pid(&self, pid: u32) -> bool {
+        self.inner
+            .lock()
+            .map(|entries| entries.values().any(|entry| entry.pid == pid))
+            .unwrap_or(false)
+    }
+
     pub async fn kill(&self, profile_id: &str) -> Result<bool> {
         let killer = {
             let g = self.inner.lock().unwrap();

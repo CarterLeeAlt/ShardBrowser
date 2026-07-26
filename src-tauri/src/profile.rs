@@ -279,6 +279,10 @@ pub fn delete(id: &str) -> Result<()> {
     if udd.exists() {
         let _ = fs::remove_dir_all(udd);
     }
+    // Per-profile browser copies exist only to give Windows an independent
+    // taskbar identity and NAME badge.  Remove them with the profile; a copy
+    // still locked by a closing browser is retried by later launch cleanup.
+    crate::taskbar_icon::remove_profile_launchers(id);
     Ok(())
 }
 

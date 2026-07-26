@@ -12,6 +12,7 @@ mod psapi;
 mod runtime;
 mod settings;
 mod store;
+mod taskbar_icon;
 
 use serde_json::Value;
 
