@@ -87,9 +87,20 @@ jobs:
 
       - name: Build Tauri bundle (unsigned)
         shell: pwsh
+        env:
+          APP_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          $config = '{"version":"${{ needs.prepare.outputs.version }}"}'
-          npx tauri build --target x86_64-pc-windows-msvc --config $config
+          # Pass the override as a file. PowerShell's native-command argument
+          # conversion strips the quotes from inline JSON, turning
+          # {"version":"0.1.1"} into the invalid {version:0.1.1}.
+          $configPath = Join-Path $env:RUNNER_TEMP "tauri-release-config.json"
+          $config = @{ version = $env:APP_VERSION } | ConvertTo-Json -Compress
+          [System.IO.File]::WriteAllText(
+            $configPath,
+            $config,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          npx tauri build --target x86_64-pc-windows-msvc --config $configPath
 
       - name: Collect Windows MSI
         shell: pwsh
