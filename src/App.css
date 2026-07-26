@@ -563,7 +563,8 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   color: var(--tx-1);
   border: 1px solid var(--bd-1);
 }
-.btn-ghost:hover { background: var(--bg-3); border-color: var(--bd-2); }
+.btn-ghost:hover:not(:disabled) { background: var(--bg-3); border-color: var(--bd-2); }
+.btn-ghost:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn-sm { font-size: 12px; padding: 5px 10px; }
 
 .icon-btn {
@@ -577,13 +578,13 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   transition: background .12s ease, color .12s ease, border-color .12s ease,
               box-shadow .12s ease, transform .04s ease;
 }
-.icon-btn:hover {
+.icon-btn:hover:not(:disabled) {
   background: var(--bg-2);
   color: var(--tx-1);
   border-color: var(--bd-3);
   box-shadow: 0 1px 2px #0006, 0 0 0 3px #8b5cf612;
 }
-.icon-btn:active { transform: translateY(1px); }
+.icon-btn:active:not(:disabled) { transform: translateY(1px); }
 .icon-btn:focus-visible {
   outline: none;
   border-color: var(--accent);
@@ -599,7 +600,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   border-color: var(--bd-1);
   box-shadow: none;
 }
-.icon-btn.danger:hover {
+.icon-btn.danger:hover:not(:disabled) {
   color: var(--err);
   border-color: #fb71855e;
   box-shadow: 0 1px 2px #0006, 0 0 0 3px #fb71851a;
@@ -1357,6 +1358,8 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 
 .cell-click { cursor: pointer; transition: color .12s; }
 .cell-click:hover { color: var(--accent-hi); }
+.cell-locked { cursor: not-allowed; }
+.cell-click.cell-locked:hover { color: inherit; }
 
 .proxy-test-cell { min-width: 0; }
 .proxy-test {
