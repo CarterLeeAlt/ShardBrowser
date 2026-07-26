@@ -1,10 +1,10 @@
 /*
- * Arimo v36 is bundled locally from Google Fonts. The application uses only
+ * Inter v20 is bundled locally from Google Fonts. The application uses only
  * the regular (400) and emphasis (600) values from the variable font files.
  */
 @font-face {
-  font-family: "Arimo";
-  src: url("./assets/fonts/Arimo-Variable-CyrillicExt.woff2") format("woff2");
+  font-family: "Inter";
+  src: url("./assets/fonts/Inter-Variable-CyrillicExt.woff2") format("woff2");
   font-style: normal;
   font-weight: 400 600;
   font-display: swap;
@@ -12,8 +12,8 @@
 }
 
 @font-face {
-  font-family: "Arimo";
-  src: url("./assets/fonts/Arimo-Variable-Cyrillic.woff2") format("woff2");
+  font-family: "Inter";
+  src: url("./assets/fonts/Inter-Variable-Cyrillic.woff2") format("woff2");
   font-style: normal;
   font-weight: 400 600;
   font-display: swap;
@@ -21,8 +21,8 @@
 }
 
 @font-face {
-  font-family: "Arimo";
-  src: url("./assets/fonts/Arimo-Variable-GreekExt.woff2") format("woff2");
+  font-family: "Inter";
+  src: url("./assets/fonts/Inter-Variable-GreekExt.woff2") format("woff2");
   font-style: normal;
   font-weight: 400 600;
   font-display: swap;
@@ -30,8 +30,8 @@
 }
 
 @font-face {
-  font-family: "Arimo";
-  src: url("./assets/fonts/Arimo-Variable-Greek.woff2") format("woff2");
+  font-family: "Inter";
+  src: url("./assets/fonts/Inter-Variable-Greek.woff2") format("woff2");
   font-style: normal;
   font-weight: 400 600;
   font-display: swap;
@@ -39,17 +39,8 @@
 }
 
 @font-face {
-  font-family: "Arimo";
-  src: url("./assets/fonts/Arimo-Variable-Hebrew.woff2") format("woff2");
-  font-style: normal;
-  font-weight: 400 600;
-  font-display: swap;
-  unicode-range: U+0307-0308, U+0590-05FF, U+200C-2010, U+20AA, U+25CC, U+FB1D-FB4F;
-}
-
-@font-face {
-  font-family: "Arimo";
-  src: url("./assets/fonts/Arimo-Variable-Vietnamese.woff2") format("woff2");
+  font-family: "Inter";
+  src: url("./assets/fonts/Inter-Variable-Vietnamese.woff2") format("woff2");
   font-style: normal;
   font-weight: 400 600;
   font-display: swap;
@@ -57,8 +48,8 @@
 }
 
 @font-face {
-  font-family: "Arimo";
-  src: url("./assets/fonts/Arimo-Variable-LatinExt.woff2") format("woff2");
+  font-family: "Inter";
+  src: url("./assets/fonts/Inter-Variable-LatinExt.woff2") format("woff2");
   font-style: normal;
   font-weight: 400 600;
   font-display: swap;
@@ -66,8 +57,8 @@
 }
 
 @font-face {
-  font-family: "Arimo";
-  src: url("./assets/fonts/Arimo-Variable-Latin.woff2") format("woff2");
+  font-family: "Inter";
+  src: url("./assets/fonts/Inter-Variable-Latin.woff2") format("woff2");
   font-style: normal;
   font-weight: 400 600;
   font-display: swap;
@@ -75,7 +66,7 @@
 }
 
 :root {
-  --font-app: "Arimo";
+  --font-app: "Inter";
   /* ShardX typography has two semantic levels only. */
   --font-weight-regular: 400;
   --font-weight-emphasis: 600;
