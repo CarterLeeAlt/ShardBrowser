@@ -1064,6 +1064,14 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   font-size: 11px; color: var(--tx-3);
   display: block;
 }
+.inline-editor input.input-invalid {
+  border-color: var(--err);
+}
+.field-error {
+  color: var(--err);
+  font-size: 11px;
+  line-height: 1.25;
+}
 
 /* ===== custom select (CSSelect) ===== */
 .cs { position: relative; width: 100%; }
