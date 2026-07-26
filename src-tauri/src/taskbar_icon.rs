@@ -2,12 +2,14 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use unicode_segmentation::UnicodeSegmentation;
 
-/// The taskbar badge is the last one to four user-perceived characters from NAME.
-/// Short names are never padded, so `A`, `AB`, `ABC`, and `ABCD` stay exactly that.
+const MAX_BADGE_GRAPHEMES: usize = 3;
+
+/// The taskbar badge is the last one to three user-perceived characters from NAME.
+/// Short names are never padded, so `A`, `AB`, and `ABC` stay exactly that.
 pub(crate) fn badge_label(name: &str) -> String {
     let mut graphemes: Vec<&str> = UnicodeSegmentation::graphemes(name, true)
         .rev()
-        .take(4)
+        .take(MAX_BADGE_GRAPHEMES)
         .collect();
     graphemes.reverse();
     graphemes.concat()
@@ -55,6 +57,10 @@ mod windows {
     const ICON_SIZE: i32 = 256;
     const ICON_SIZES: [u32; 9] = [16, 20, 24, 32, 40, 48, 64, 128, 256];
     const TASKBAR_ICON_SIZES: [i32; 5] = [24, 32, 40, 48, 64];
+    const BADGE_FONT_HEIGHT_AT_256: i32 = 104;
+    const BADGE_FONT_WIDTH_AT_256: i32 = 48;
+    const BADGE_LAYOUT_REVISION: &[u8] =
+        b"taskbar-badge-layout-v14-three-char-cascadia-mono-regular-large";
     const RT_ICON: *const u16 = 3usize as *const u16;
     const RT_GROUP_ICON: *const u16 = 14usize as *const u16;
     const DIB_RGB_COLORS: u32 = 0;
@@ -311,7 +317,7 @@ mod windows {
         let fingerprint = stable_hash(&[
             label.as_bytes(),
             BASE_ICON_ICO,
-            b"taskbar-badge-layout-v13-cascadia-mono-regular-tracking",
+            BADGE_LAYOUT_REVISION,
             &metadata.len().to_le_bytes(),
             &modified.to_le_bytes(),
         ]);
@@ -563,192 +569,7 @@ mod windows {
         pid: u32,
         executable: &PathBuf,
         icons: &LoadedIcons,
-        app_id: &[u16],
-        icon_resource: &[u16],
-    ) -> usize {
-        let mut context = WindowApplyContext {
-            pid,
-            executable,
-            icons,
-            app_id: app_id.as_ptr(),
-            icon_resource: icon_resource.as_ptr(),
-            matched_windows: 0,
-        };
-        unsafe {
-            let com_result = CoInitializeEx(null_mut(), COINIT_MULTITHREADED);
-            EnumWindows(
-                Some(apply_window_callback),
-                (&mut context as *mut WindowApplyContext) as isize,
-            );
-            if com_result >= 0 {
-                CoUninitialize();
-            }
-        }
-        context.matched_windows
-    }
-
-    unsafe extern "system" fn apply_window_callback(window: isize, param: isize) -> i32 {
-        let context = &*(param as *const WindowApplyContext);
-        let mut window_pid = 0u32;
-        GetWindowThreadProcessId(window, &mut window_pid);
-        if window_pid != context.pid
-            && !process_uses_executable(window_pid, &*context.executable)
-        {
-            return 1;
-        }
-
-        set_window_taskbar_properties(window, context.app_id, context.icon_resource);
-        let icons = &*context.icons;
-        SendMessageW(window, WM_SETICON, 1, icons.taskbar_for_window(window));
-        SendMessageW(window, WM_SETICON, 0, icons.small);
-        (*(param as *mut WindowApplyContext)).matched_windows += 1;
-        1
-    }
-
-    unsafe fn process_uses_executable(process_id: u32, expected: &Path) -> bool {
-        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
-        if process == 0 {
-            return false;
-        }
-        let mut path = vec![0u16; 32_768];
-        let mut length = path.len() as u32;
-        let ok = QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut length) != 0;
-        CloseHandle(process);
-        if !ok {
-            return false;
-        }
-        path.truncate(length as usize);
-        let actual = PathBuf::from(OsString::from_wide(&path));
-        actual
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&expected.to_string_lossy())
-    }
-
-    unsafe fn set_window_taskbar_properties(
-        window: isize,
-        app_id: *const u16,
-        icon_resource: *const u16,
-    ) {
-        let mut store: *mut PropertyStore = null_mut();
-        if SHGetPropertyStoreForWindow(window, &IID_PROPERTY_STORE, &mut store) < 0
-            || store.is_null()
-        {
-            return;
-        }
-
-        let id_key = PropertyKey {
-            format_id: APP_USER_MODEL_FORMAT,
-            property_id: 5,
-        };
-        let icon_key = PropertyKey {
-            format_id: APP_USER_MODEL_FORMAT,
-            property_id: 3,
-        };
-        let id_value = PropVariant {
-            variant_type: VT_LPWSTR,
-            reserved1: 0,
-            reserved2: 0,
-            reserved3: 0,
-            string_value: app_id,
-        };
-        let icon_value = PropVariant {
-            variant_type: VT_LPWSTR,
-            reserved1: 0,
-            reserved2: 0,
-            reserved3: 0,
-            string_value: icon_resource,
-        };
-        let vtable = &*(*store).vtable;
-        (vtable.set_value)(store, &id_key, &id_value);
-        (vtable.set_value)(store, &icon_key, &icon_value);
-        (vtable.commit)(store);
-        (vtable.release)(store);
-    }
-
-    fn stable_hash(parts: &[&[u8]]) -> u64 {
-        // FNV-1a keeps the generated executable path stable across app restarts.
-        let mut hash = 0xcbf29ce484222325u64;
-        for part in parts {
-            for byte in *part {
-                hash ^= u64::from(*byte);
-                hash = hash.wrapping_mul(0x100000001b3);
-            }
-        }
-        hash
-    }
-
-    fn cleanup_stale_launchers(parent: &Path, profile_id: &str, keep: Option<&Path>) {
-        let prefix = format!("shardx-profile-{profile_id}-");
-        let keep_icon = keep.map(profile_icon_path);
-        let Ok(entries) = fs::read_dir(parent) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if keep.is_some_and(|keep| path.as_path() == keep) {
-                continue;
-            }
-            if keep_icon
-                .as_ref()
-                .is_some_and(|keep| path.as_path() == keep.as_path())
-            {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            if name.starts_with(&prefix)
-                && (name.ends_with(".exe") || name.ends_with(".ico"))
-            {
-                // A still-running previous launcher remains locked by Windows and
-                // simply survives until the next launch-time cleanup.
-                let _ = fs::remove_file(path);
-            }
-        }
-    }
-
-    fn profile_icon_path(executable: &Path) -> PathBuf {
-        executable.with_extension("ico")
-    }
-
-    fn write_icon_sidecar(icon_path: &Path, icon: &[u8]) -> Result<()> {
-        let parent = icon_path.parent().context("profile icon has no parent directory")?;
-        let file_name = icon_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .context("profile icon has an invalid file name")?;
-        let temporary = parent.join(format!(
-            ".{file_name}.{}.tmp",
-            uuid::Uuid::new_v4().simple()
-        ));
-        fs::write(&temporary, icon).context("write temporary profile taskbar icon")?;
-        match fs::rename(&temporary, icon_path) {
-            Ok(()) => Ok(()),
-            Err(_) if icon_path.exists() => {
-                let _ = fs::remove_file(&temporary);
-                Ok(())
-            }
-            Err(error) => {
-                let _ = fs::remove_file(&temporary);
-                Err(error).context("publish profile taskbar icon")
-            }
-        }
-    }
-
-    fn build_badged_icon(label: &str) -> Result<Vec<u8>> {
-        let base = IconDir::read(Cursor::new(BASE_ICON_ICO))
-            .context("decode bundled ShardX browser base frames")?;
-        let mut directory = IconDir::new(ResourceType::Icon);
-        for size in ICON_SIZES {
-            // The launcher generator owns the resize step for both products.
-            // Decoding the same native base frame here makes the outer artwork
-            // byte-identical before either center diamond or NAME badge is
-            // applied.
-            let entry = base
-                .entries()
-                .iter()
-                .find(|entry| entry.width() == size && entry.height() == size)
-                .with_context(|| format!("browser base ICO is missing its {size}px frame"))?;
+…1668 tokens truncated…ser base ICO is missing its {size}px frame"))?;
             let mut rgba = entry
                 .decode()
                 .with_context(|| format!("decode browser base {size}px frame"))?
@@ -772,8 +593,8 @@ mod windows {
         }
         ensure_cascadia_mono_font()?;
         // The taskbar badge uses a repository-bundled static monospace face,
-        // so narrow labels such as `1111` keep the same cell spacing as wide
-        // labels such as `WXYZ` on every Windows installation.
+        // so narrow labels such as `111` keep the same cell spacing as wide
+        // labels such as `XYZ` on every Windows installation.
         let face_name = wide_null(OsStr::new("Cascadia Mono"));
 
         unsafe {
@@ -784,12 +605,12 @@ mod windows {
 
             // Full-width, borderless label: use every available taskbar pixel
             // for NAME instead of spending space on side margins and a white
-            // outline. The explicit width keeps four monospaced cells inside
-            // the badge. Eight 256px-reference units equal one source pixel at
+            // outline. The explicit width keeps three larger monospaced cells
+            // inside the badge. Eight 256px-reference units equal one pixel at
             // the taskbar's 32px big-icon frame.
             let badge_height = scaled(132, icon_size);
-            let font_height = scaled(80, icon_size).max(5);
-            let font_width = scaled(36, icon_size).max(1);
+            let font_height = scaled(BADGE_FONT_HEIGHT_AT_256, icon_size).max(5);
+            let font_width = scaled(BADGE_FONT_WIDTH_AT_256, icon_size).max(1);
             let character_spacing = if label.chars().count() > 1 {
                 scaled(8, icon_size)
             } else {
@@ -1167,14 +988,15 @@ mod windows {
     mod tests {
         use super::{
             build_badged_icon, nearest_taskbar_icon_index, parse_ico, scaled, BASE_ICON_ICO,
-            CASCADIA_MONO_REGULAR_TTF, ICON_SIZES, LAUNCHER_ICON_ICO, TASKBAR_ICON_SIZES,
+            BADGE_FONT_HEIGHT_AT_256, BADGE_FONT_WIDTH_AT_256, CASCADIA_MONO_REGULAR_TTF,
+            ICON_SIZES, LAUNCHER_ICON_ICO, TASKBAR_ICON_SIZES,
         };
         use ico::IconDir;
         use std::io::Cursor;
 
         #[test]
         fn generated_icon_contains_every_native_windows_size() {
-            let icon = build_badged_icon("1111").expect("generate test taskbar icon");
+            let icon = build_badged_icon("111").expect("generate test taskbar icon");
             let entries = parse_ico(&icon).expect("parse generated taskbar icon");
             let sizes: Vec<u32> = entries
                 .iter()
@@ -1253,6 +1075,14 @@ mod windows {
         fn badge_tracking_is_one_source_pixel_at_32px() {
             assert_eq!(scaled(8, 32), 1);
         }
+
+        #[test]
+        fn three_character_layout_uses_larger_native_taskbar_text() {
+            assert_eq!(scaled(BADGE_FONT_HEIGHT_AT_256, 24), 10);
+            assert_eq!(scaled(BADGE_FONT_WIDTH_AT_256, 24), 5);
+            assert_eq!(scaled(BADGE_FONT_HEIGHT_AT_256, 32), 13);
+            assert_eq!(scaled(BADGE_FONT_WIDTH_AT_256, 32), 6);
+        }
     }
 }
 
@@ -1261,19 +1091,20 @@ mod tests {
     use super::badge_label;
 
     #[test]
-    fn badge_uses_up_to_four_trailing_characters_without_padding() {
+    fn badge_uses_up_to_three_trailing_characters_without_padding() {
         assert_eq!(badge_label("A"), "A");
         assert_eq!(badge_label("ABC"), "ABC");
-        assert_eq!(badge_label("ABCD"), "ABCD");
-        assert_eq!(badge_label("ABCDE"), "BCDE");
+        assert_eq!(badge_label("ABCD"), "BCD");
+        assert_eq!(badge_label("ABCDE"), "CDE");
     }
 
     #[test]
     fn badge_truncation_is_unicode_safe() {
         assert_eq!(badge_label("浏览器"), "浏览器");
-        assert_eq!(badge_label("一号浏览器"), "号浏览器");
-        assert_eq!(badge_label("A🧩环境"), "A🧩环境");
-        assert_eq!(badge_label("五e\u{301}六七八"), "e\u{301}六七八");
-        assert_eq!(badge_label("X👨‍👩‍👧‍👦YZ"), "X👨‍👩‍👧‍👦YZ");
+        assert_eq!(badge_label("一号浏览器"), "浏览器");
+        assert_eq!(badge_label("A🧩环境"), "🧩环境");
+        assert_eq!(badge_label("五e\u{301}六七八"), "六七八");
+        assert_eq!(badge_label("X👨‍👩‍👧‍👦YZ"), "👨‍👩‍👧‍👦YZ");
     }
 }
+
