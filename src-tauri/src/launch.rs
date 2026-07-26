@@ -3,6 +3,7 @@ use crate::{
     profile, proxy, settings, store,
 };
 use anyhow::{Context, Result};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -32,6 +33,30 @@ pub async fn launch_profile(
     let bin = resolve_binary()?;
     let stored = profile::load_raw(profile_id)?;
     let udd = profile::user_data_dir(profile_id)?;
+    let profile_name = stored
+        .config
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("(unnamed)");
+    // Windows groups Chromium taskbar buttons by executable identity.  Launch
+    // a portable, per-profile copy whose icon contains the trailing NAME badge;
+    // other platforms keep using the original engine binary unchanged.
+    let launch_bin = if headless {
+        bin.clone()
+    } else {
+        match crate::taskbar_icon::prepare_profile_binary(&bin, profile_id, profile_name) {
+            Ok(profile_binary) => profile_binary,
+            Err(error) => {
+                // A blocked icon-resource update (for example over-eager AV)
+                // must never make the browser unusable.  Fall back to the
+                // untouched engine and lose only the optional taskbar badge.
+                eprintln!(
+                    "[launcher] taskbar badge unavailable for {profile_id}: {error:#}; using original browser binary"
+                );
+                bin.clone()
+            }
+        }
+    };
 
     // Stored proxy by id, else ephemeral inline (quick profiles, not in store).
     let bound_proxy: Option<proxy::ProxyEntry> = stored
@@ -88,10 +113,10 @@ pub async fn launch_profile(
         eprintln!("[launcher] widevine pre-warm skipped: {e}");
     }
 
-    let mut cmd = tokio::process::Command::new(&bin);
-    cmd.arg(format!("--fingerprint-profile={}", fp_file.display()));
-    cmd.arg(format!("--user-data-dir={}", udd.display()));
-    cmd.arg("--no-first-run");
+    let mut launch_args = Vec::<OsString>::new();
+    launch_args.push(format!("--fingerprint-profile={}", fp_file.display()).into());
+    launch_args.push(format!("--user-data-dir={}", udd.display()).into());
+    launch_args.push("--no-first-run".into());
 
     // Disable WebGPU when profile omits `webgpu` (matches real Linux Chrome).
     let webgpu_present = raw
@@ -99,27 +124,27 @@ pub async fn launch_profile(
         .map(|v| !v.is_null())
         .unwrap_or(false);
     if !webgpu_present {
-        cmd.arg("--disable-features=WebGPU");
+        launch_args.push("--disable-features=WebGPU".into());
     }
 
     // Interactive launches: restore previous session, suppress crash bubble.
     if !headless && !enable_cdp {
-        cmd.arg("--restore-last-session");
-        cmd.arg("--hide-crash-restore-bubble");
+        launch_args.push("--restore-last-session".into());
+        launch_args.push("--hide-crash-restore-bubble".into());
     }
 
     if let Some(p) = bound_proxy.as_ref() {
-        cmd.arg(format!("--proxy-server={}", p.to_proxy_server_arg()));
+        launch_args.push(format!("--proxy-server={}", p.to_proxy_server_arg()).into());
 
         // QUIC: enable only when proxy UDP relay verified; rely on Alt-Svc upgrade path.
         if proxy_udp_ok {
-            cmd.arg("--enable-quic");
+            launch_args.push("--enable-quic".into());
             eprintln!(
                 "[launcher] QUIC enabled (Alt-Svc upgrade path): proxy {} UDP relay verified",
                 p.host
             );
         } else {
-            cmd.arg("--disable-quic");
+            launch_args.push("--disable-quic".into());
             eprintln!("[launcher] QUIC disabled: proxy {} has no working UDP relay", p.host);
         }
     }
@@ -143,15 +168,15 @@ pub async fn launch_profile(
     };
     match webrtc_mode {
         "block" => {
-            cmd.arg("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
-            cmd.arg("--shardx-webrtc-policy=block");
+            launch_args.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp".into());
+            launch_args.push("--shardx-webrtc-policy=block".into());
             eprintln!("[launcher] WebRTC blocked (servers stripped, relay-only, UDP off)");
         }
         "tcp_only" => {
-            cmd.arg("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
-            cmd.arg("--shardx-webrtc-policy=tcp_only");
+            launch_args.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp".into());
+            launch_args.push("--shardx-webrtc-policy=tcp_only".into());
             if let Some(ip) = proxy_public_ip.as_deref() {
-                cmd.arg(format!("--shardx-webrtc-public-ip={ip}"));
+                launch_args.push(format!("--shardx-webrtc-public-ip={ip}").into());
             }
             eprintln!("[launcher] WebRTC: TCP-only (servers stripped, mDNS host only, UDP off)");
         }
@@ -162,10 +187,11 @@ pub async fn launch_profile(
                 // when they explicitly didn't bind a proxy).
                 eprintln!("[launcher] WebRTC auto -> native (no proxy bound)");
             } else if !proxy_udp_ok {
-                cmd.arg("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
-                cmd.arg("--shardx-webrtc-policy=tcp_only");
+                launch_args
+                    .push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp".into());
+                launch_args.push("--shardx-webrtc-policy=tcp_only".into());
                 if let Some(ip) = proxy_public_ip.as_deref() {
-                    cmd.arg(format!("--shardx-webrtc-public-ip={ip}"));
+                    launch_args.push(format!("--shardx-webrtc-public-ip={ip}").into());
                 }
                 eprintln!("[launcher] WebRTC auto -> TCP-only (no proxied UDP available)");
             } else {
@@ -177,30 +203,51 @@ pub async fn launch_profile(
     // Screen resolution mode: presence-only switch to use host monitor.
     let s = settings::load()?;
     if s.screen_resolution_mode.as_deref() == Some("real") {
-        cmd.arg("--shardx-real-screen");
+        launch_args.push("--shardx-real-screen".into());
     }
 
     // CDP: port=0 makes Chrome pick free port and write DevToolsActivePort.
     if enable_cdp {
         let _ = std::fs::remove_file(udd.join("DevToolsActivePort"));
-        cmd.arg("--remote-debugging-port=0");
-        cmd.arg("--remote-allow-origins=*");
+        launch_args.push("--remote-debugging-port=0".into());
+        launch_args.push("--remote-allow-origins=*".into());
     }
 
     if headless {
-        cmd.arg("--headless=new");
+        launch_args.push("--headless=new".into());
     }
 
-    cmd.stdout(Stdio::null()).stderr(Stdio::null());
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        // 0x08000000 = CREATE_NO_WINDOW — suppress the brief console flash
-        // when a Tauri GUI app spawns the engine binary.
-        cmd.creation_flags(0x08000000);
-    }
-    let child = cmd.spawn().context("spawn ShardX")?;
+    let (child, taskbar_binary) = match browser_command(&launch_bin, &launch_args).spawn() {
+        Ok(child) => {
+            let taskbar_binary = (launch_bin != bin).then(|| launch_bin.clone());
+            (child, taskbar_binary)
+        }
+        Err(badge_error) if launch_bin != bin => {
+            // Some endpoint-security products allow resource creation but block
+            // the modified copy at CreateProcess time. Preserve browser access
+            // by retrying once with the untouched engine and identical args.
+            eprintln!(
+                "[launcher] profile taskbar binary failed to start for {profile_id}: {badge_error}; retrying original browser binary"
+            );
+            let child = browser_command(&bin, &launch_args)
+                .spawn()
+                .with_context(|| {
+                    format!(
+                        "spawn original ShardX after taskbar launcher failed: {badge_error}"
+                    )
+                })?;
+            (child, None)
+        }
+        Err(error) => return Err(error).context("spawn ShardX"),
+    };
     let pid = Tracker::shared().track(profile_id.to_string(), child, stored.meta.temporary);
+    if let Some(taskbar_binary) = taskbar_binary {
+        crate::taskbar_icon::watch_profile_taskbar(
+            pid,
+            profile_id.to_string(),
+            taskbar_binary,
+        );
+    }
 
     profile::touch_launched(profile_id, None)?;
 
@@ -221,6 +268,20 @@ pub async fn launch_profile(
     };
 
     Ok(LaunchOutcome { pid, cdp })
+}
+
+fn browser_command(binary: &Path, args: &[OsString]) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(binary);
+    command.args(args);
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // 0x08000000 = CREATE_NO_WINDOW — suppress the brief console flash
+        // when a Tauri GUI app spawns the engine binary.
+        command.creation_flags(0x08000000);
+    }
+    command
 }
 
 /// Poll `<udd>/DevToolsActivePort` for ~6s; line 1 = port, line 2 = ws path.
