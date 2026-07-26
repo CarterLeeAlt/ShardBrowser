@@ -213,6 +213,9 @@ async fn persist_created(folder_override: Option<String>, body: CreateReq) -> Ap
     if let Some(n) = body.notes.as_ref() {
         cfg.insert("notes".into(), json!(n));
     }
+    let profile_name = cfg.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    crate::profile::validate_profile_name(profile_name)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let folder = folder_override.or(body.folder).unwrap_or_default();
     let mut meta = json!({ "id": "", "folder": folder });
@@ -269,6 +272,9 @@ async fn create_temporary(Json(body): Json<TempReq>) -> ApiResult {
     if let Some(n) = body.name.as_ref() {
         cfg.insert("name".into(), json!(n));
     }
+    let profile_name = cfg.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    crate::profile::validate_profile_name(profile_name)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
     let mut meta = json!({ "id": "", "folder": body.folder.unwrap_or_default(), "temporary": true });
     if let Some(pstr) = body.proxy.as_ref() {
         let entry = crate::proxy::parse_single(pstr)
@@ -316,6 +322,12 @@ async fn edit_profile(Path(id): Path<String>, Json(body): Json<EditReq>) -> ApiR
         .map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
     let mut stored = crate::profile::load_raw(&id)
         .map_err(|e| err(StatusCode::NOT_FOUND, e.to_string()))?;
+    let original_name = stored
+        .config
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     if let Some(fp) = body.fingerprint {
         let mut cfg = fp
@@ -330,6 +342,15 @@ async fn edit_profile(Path(id): Path<String>, Json(body): Json<EditReq>) -> ApiR
     }
     if let Some(n) = body.notes.as_ref() {
         stored.config.insert("notes".into(), json!(n));
+    }
+    let edited_name = stored
+        .config
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if edited_name != original_name.as_str() {
+        crate::profile::validate_profile_name(edited_name)
+            .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
     }
     if let Some(pid) = body.proxy_id.as_ref() {
         stored.meta.proxy_id = if pid.is_empty() { None } else { Some(pid.clone()) };
