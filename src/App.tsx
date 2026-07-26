@@ -1757,7 +1757,7 @@ function BrowsersView() {
               }}
             />
           </div>
-          <div>Name</div><div>Status</div><div>Proxy</div><div>Notes</div><div className="head-time">Time</div><div className="head-lastrun">Last run</div><div></div>
+          <div>Name</div><div>Status</div><div>Proxy</div><div>Notes</div><div className="head-time">Time</div><div className="head-lastrun">Last run</div><div className="head-actions">ACTIONS</div>
         </div>
         {expanded === "__new__" && draft && (
           <div className="row-wrap row-expanded row-new">
@@ -2928,7 +2928,7 @@ function ProxiesView() {
               }}
             />
           </div>
-          <div>Name</div><div>Type</div><div>Host:Port</div><div>Country</div><div>Profiles</div><div>Test result</div><div></div>
+          <div>Name</div><div>Type</div><div>Host:Port</div><div>Country</div><div>Profiles</div><div>Test result</div><div className="head-actions">ACTIONS</div>
         </div>
         {pagedProxies.map((p) => {
           const r = snapshots[p.id];

@@ -821,6 +821,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   background: var(--bg-2);
   border-bottom: 1px solid var(--bd-1);
 }
+.head-actions { text-align: center; }
 .row-wrap {
   border-top: 1px solid var(--bd-1);
   position: relative;
