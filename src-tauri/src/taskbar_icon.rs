@@ -75,7 +75,6 @@ mod windows {
     const DEFAULT_CHARSET: u32 = 1;
     const OUT_TT_PRECIS: u32 = 4;
     const CLIP_DEFAULT_PRECIS: u32 = 0;
-    const NONANTIALIASED_QUALITY: u32 = 3;
     const ANTIALIASED_QUALITY: u32 = 4;
     const DEFAULT_PITCH: u32 = 0;
     const WM_SETICON: u32 = 0x0080;
@@ -320,7 +319,7 @@ mod windows {
         let fingerprint = stable_hash(&[
             label.as_bytes(),
             BASE_ICON_PNG,
-            b"taskbar-badge-layout-v9-inter-gdi-small-no-aa",
+            b"taskbar-badge-layout-v10-inter-gdi-antialiased",
             &metadata.len().to_le_bytes(),
             &modified.to_le_bytes(),
         ]);
@@ -728,7 +727,6 @@ mod windows {
         // typography. This family comes from INTER_GDI_FONT_TTF above rather
         // than from the host's system font directory.
         let face_name = wide_null(OsStr::new("Inter"));
-        let font_quality = badge_font_quality(icon_size);
 
         unsafe {
             let dc = CreateCompatibleDC(0);
@@ -784,12 +782,7 @@ mod windows {
             copy_nonoverlapping(bgra.as_ptr(), bits.cast::<u8>(), bgra.len());
 
             let old_bitmap = SelectObject(dc, bitmap);
-            let font = match create_badge_font(
-                font_height,
-                font_width,
-                font_quality,
-                &face_name,
-            ) {
+            let font = match create_badge_font(font_height, font_width, &face_name) {
                 Ok(font) => font,
                 Err(error) => {
                     SelectObject(dc, old_bitmap);
@@ -878,20 +871,7 @@ mod windows {
         }
     }
 
-    fn badge_font_quality(icon_size: i32) -> u32 {
-        if icon_size <= 32 {
-            NONANTIALIASED_QUALITY
-        } else {
-            ANTIALIASED_QUALITY
-        }
-    }
-
-    unsafe fn create_badge_font(
-        height: i32,
-        width: i32,
-        quality: u32,
-        face_name: &[u16],
-    ) -> Result<isize> {
+    unsafe fn create_badge_font(height: i32, width: i32, face_name: &[u16]) -> Result<isize> {
         let font = CreateFontW(
             -height,
             width,
@@ -904,7 +884,7 @@ mod windows {
             DEFAULT_CHARSET,
             OUT_TT_PRECIS,
             CLIP_DEFAULT_PRECIS,
-            quality,
+            ANTIALIASED_QUALITY,
             DEFAULT_PITCH,
             face_name.as_ptr(),
         );
@@ -1120,10 +1100,7 @@ mod windows {
 
     #[cfg(test)]
     mod tests {
-        use super::{
-            badge_font_quality, build_badged_icon, parse_ico, ANTIALIASED_QUALITY,
-            ICON_SIZES, INTER_GDI_FONT_TTF, NONANTIALIASED_QUALITY,
-        };
+        use super::{build_badged_icon, parse_ico, ICON_SIZES, INTER_GDI_FONT_TTF};
 
         #[test]
         fn generated_icon_contains_every_native_windows_size() {
@@ -1146,16 +1123,6 @@ mod windows {
         #[test]
         fn bundled_inter_font_is_true_type() {
             assert_eq!(&INTER_GDI_FONT_TTF[..4], &[0, 1, 0, 0]);
-        }
-
-        #[test]
-        fn small_badge_frames_disable_gray_antialiasing() {
-            for size in [16, 20, 24, 32] {
-                assert_eq!(badge_font_quality(size), NONANTIALIASED_QUALITY);
-            }
-            for size in [40, 48, 64, 128, 256] {
-                assert_eq!(badge_font_quality(size), ANTIALIASED_QUALITY);
-            }
         }
     }
 }
