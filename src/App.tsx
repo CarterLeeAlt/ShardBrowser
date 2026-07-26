@@ -1035,6 +1035,16 @@ function BrowsersView() {
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   const [fingerprints, setFingerprints] = useState<FingerprintEntry[]>([]);
   const [quickEdit, setQuickEdit] = useState<{ kind: "proxy" | "notes"; profile: ProfileMeta } | null>(null);
+  // A profile may be launched while one of its editors is already open.
+  // Close stale editors as soon as the process poll marks it running; the
+  // backend guard below remains authoritative during the polling window.
+  useEffect(() => {
+    if (expanded && expanded !== "__new__" && running[expanded]) {
+      setExpanded(null);
+      setDraft(null);
+    }
+    if (quickEdit && running[quickEdit.profile.id]) setQuickEdit(null);
+  }, [running, expanded, quickEdit]);
   // Empty folders persist in localStorage until a profile lands in them.
   const [folderRegistry, setFolderRegistry] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem("shardx-folders") || "[]"); }
@@ -1236,12 +1246,22 @@ function BrowsersView() {
   };
 
   const remove = async (id: string) => {
+    if (running[id]) {
+      toast.err("Stop the browser before deleting this profile");
+      return;
+    }
     if ((await confirmModal({ title: "Delete profile", message: "Delete this profile? Its user-data dir is wiped too.", danger: true })) !== true) return;
-    await invoke("profile_delete", { id });
-    reload();
+    try {
+      await invoke("profile_delete", { id });
+      reload();
+    } catch (e) { toast.err(String(e)); }
   };
 
   const cloneProfile = async (id: string) => {
+    if (running[id]) {
+      toast.err("Stop the browser before cloning this profile");
+      return;
+    }
     try {
       await invoke<ProfileMeta>("profile_clone", { id });
       reload();
@@ -1303,6 +1323,10 @@ function BrowsersView() {
     // Dropping a profile onto the folder it already lives in is a no-op —
     // tell the user instead of silently doing nothing.
     const p = profiles.find((x) => x.id === id);
+    if (running[id]) {
+      toast.err("Stop the browser before moving this profile");
+      return;
+    }
     if (p && p.folder === f) {
       const who = p.name || id.slice(0, 8);
       toast.info(f ? `“${who}” is already in “${f}”` : `“${who}” isn’t in any folder`);
@@ -1317,6 +1341,11 @@ function BrowsersView() {
 
   const deleteFolder = async (f: string) => {
     const count = profiles.filter((p) => p.folder === f).length;
+    const runningCount = profiles.filter((p) => p.folder === f && running[p.id]).length;
+    if (runningCount > 0) {
+      toast.err(`Stop the ${runningCount} running browser${runningCount === 1 ? "" : "s"} in this folder first`);
+      return;
+    }
     // Three outcomes: delete profiles, unfile, cancel.
     const choice = await confirmModal({
       title: `Delete folder “${f}”`,
@@ -1373,6 +1402,11 @@ function BrowsersView() {
   const bulkDelete = async () => {
     const ids = [...selected];
     if (ids.length === 0) return;
+    const runningIds = ids.filter((id) => !!running[id]);
+    if (runningIds.length > 0) {
+      toast.err(`Stop the ${runningIds.length} selected running browser${runningIds.length === 1 ? "" : "s"} first`);
+      return;
+    }
     if ((await confirmModal({ title: "Delete profiles", message: `Delete ${ids.length} profile${ids.length === 1 ? "" : "s"}? This wipes their user-data dirs too.`, danger: true })) !== true) return;
     for (const id of ids) {
       try { await invoke("profile_delete", { id }); } catch (e) { toast.err(String(e)); }
@@ -1407,6 +1441,10 @@ function BrowsersView() {
   };
 
   const expand = async (id: string) => {
+    if (running[id]) {
+      toast.err("Stop the browser before editing this profile");
+      return;
+    }
     if (expanded === id) { setExpanded(null); setDraft(null); return; }
     const stored = await invoke<any>("profile_get", { id });
     setDraft(fromStored(stored));
@@ -1543,7 +1581,12 @@ function BrowsersView() {
               <button className="btn-ghost btn-sm" onClick={bulkLaunch}><Icon.Play /> Launch</button>
               <button className="btn-ghost btn-sm" onClick={bulkStop}><Icon.Stop /> Stop</button>
               <button className="btn-ghost btn-sm" onClick={bulkExport}><Icon.Upload /> Export</button>
-              <button className="btn-ghost btn-sm" onClick={bulkDelete}><Icon.Trash /> Delete</button>
+              <button
+                className="btn-ghost btn-sm"
+                onClick={bulkDelete}
+                disabled={[...selected].some((id) => !!running[id])}
+                title={[...selected].some((id) => !!running[id]) ? "Stop selected running browsers before deleting" : "Delete selected profiles"}
+              ><Icon.Trash /> Delete</button>
               <button className="btn-ghost btn-sm" onClick={() => setSelected(new Set())}>Clear</button>
             </div>
           )}
@@ -1660,8 +1703,14 @@ function BrowsersView() {
             <div
               key={p.id}
               className={`row-wrap ${isRunning ? "row-running" : ""} ${isExpanded ? "row-expanded" : ""} ${p.pinned ? "row-pinned" : ""}`}
-              onContextMenu={(e) => ctx.open(e, profileMenu(p))}
-              draggable={!isExpanded}
+              onContextMenu={(e) => {
+                if (isRunning) {
+                  e.preventDefault();
+                  return;
+                }
+                ctx.open(e, profileMenu(p));
+              }}
+              draggable={!isExpanded && !isRunning}
               onDragStart={(e) => {
                 e.dataTransfer.effectAllowed = "move";
                 // Set BOTH a custom MIME (so non-folder drop zones can ignore
@@ -1691,7 +1740,11 @@ function BrowsersView() {
                 <div>
                   <input type="checkbox" checked={isSel} onChange={() => toggleSel(p.id)} />
                 </div>
-                <div className="cell-name" onClick={() => expand(p.id)}>
+                <div
+                  className={`cell-name ${isRunning ? "cell-locked" : ""}`}
+                  onClick={isRunning ? undefined : () => expand(p.id)}
+                  title={isRunning ? "Stop browser before editing" : "Edit profile"}
+                >
                   <div className="name-main">
                     {p.pinned && <span className="pin-mark" title="Pinned"><Icon.Pin2 /></span>}
                     {p.name}
@@ -1704,7 +1757,11 @@ function BrowsersView() {
                     {isRunning ? "Running" : "Idle"}
                   </span>
                 </div>
-                <div className="cell-proxy cell-click" onClick={() => setQuickEdit({ kind: "proxy", profile: p })} title="Change proxy">
+                <div
+                  className={`cell-proxy cell-click ${isRunning ? "cell-locked" : ""}`}
+                  onClick={isRunning ? undefined : () => setQuickEdit({ kind: "proxy", profile: p })}
+                  title={isRunning ? "Stop browser before changing proxy" : "Change proxy"}
+                >
                   {px ? (
                     <div className="proxy-cell">
                       <div className="proxy-main">
@@ -1726,9 +1783,9 @@ function BrowsersView() {
                   ) : <span className="muted small">— direct —</span>}
                 </div>
                 <div
-                  className="cell-notes cell-click"
-                  title={p.notes || "Click to edit notes"}
-                  onClick={() => setQuickEdit({ kind: "notes", profile: p })}
+                  className={`cell-notes cell-click ${isRunning ? "cell-locked" : ""}`}
+                  title={isRunning ? "Stop browser before editing notes" : p.notes || "Click to edit notes"}
+                  onClick={isRunning ? undefined : () => setQuickEdit({ kind: "notes", profile: p })}
                 >
                   {p.notes || <span className="muted">—</span>}
                 </div>
@@ -1768,13 +1825,14 @@ function BrowsersView() {
                   >
                     <Icon.Pin />
                   </button>
-                  <button className="icon-btn" onClick={() => expand(p.id)} title="Edit"><Icon.Edit /></button>
-                  <button className="icon-btn" onClick={() => cloneProfile(p.id)} title="Clone"><Icon.Clone /></button>
-                  <button className="icon-btn danger" onClick={() => remove(p.id)} title="Delete"><Icon.Trash /></button>
+                  <button className="icon-btn" onClick={() => expand(p.id)} disabled={isRunning} title={isRunning ? "Stop browser before editing" : "Edit"}><Icon.Edit /></button>
+                  <button className="icon-btn" onClick={() => cloneProfile(p.id)} disabled={isRunning} title={isRunning ? "Stop browser before cloning" : "Clone"}><Icon.Clone /></button>
+                  <button className="icon-btn danger" onClick={() => remove(p.id)} disabled={isRunning} title={isRunning ? "Stop browser before deleting" : "Delete"}><Icon.Trash /></button>
                   <button
                     className="icon-btn"
                     onClick={(e) => { e.stopPropagation(); ctx.open(e, profileMenu(p)); }}
-                    title="More actions"
+                    disabled={isRunning}
+                    title={isRunning ? "Stop browser before using more actions" : "More actions"}
                   ><Icon.More /></button>
                 </div>
               </div>
