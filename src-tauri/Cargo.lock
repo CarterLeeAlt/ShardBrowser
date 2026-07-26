@@ -3876,6 +3876,7 @@ dependencies = [
  "getrandom 0.2.17",
  "hmac",
  "ico",
+ "image",
  "jsonwebtoken",
  "libc",
  "pbkdf2",

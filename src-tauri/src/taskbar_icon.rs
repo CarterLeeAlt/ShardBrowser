@@ -50,6 +50,7 @@ mod windows {
     use super::badge_label;
     use anyhow::{Context, Result};
     use ico::{IconDir, IconDirEntry, IconImage, ResourceType};
+    use image::{imageops::FilterType, RgbaImage};
     use std::ffi::{c_void, OsStr, OsString};
     use std::fs;
     use std::io::Cursor;
@@ -59,10 +60,10 @@ mod windows {
     use std::ptr::{copy_nonoverlapping, null_mut};
     use std::slice;
     use std::time::{Instant, UNIX_EPOCH};
-    use unicode_segmentation::UnicodeSegmentation;
 
     const BASE_ICON_PNG: &[u8] = include_bytes!("../icons/shardx-browser-taskbar-base.png");
     const ICON_SIZE: i32 = 256;
+    const ICON_SIZES: [u32; 9] = [16, 20, 24, 32, 40, 48, 64, 128, 256];
     const RT_ICON: *const u16 = 3usize as *const u16;
     const RT_GROUP_ICON: *const u16 = 14usize as *const u16;
     const DIB_RGB_COLORS: u32 = 0;
@@ -303,7 +304,7 @@ mod windows {
         let fingerprint = stable_hash(&[
             label.as_bytes(),
             BASE_ICON_PNG,
-            b"taskbar-badge-layout-v7-max4-fullwidth-borderless",
+            b"taskbar-badge-layout-v8-multisize-monospace",
             &metadata.len().to_le_bytes(),
             &modified.to_le_bytes(),
         ]);
@@ -434,8 +435,11 @@ mod windows {
         fn from_icon_file(icon_file: &Path) -> Result<Self> {
             let path = wide_null(icon_file.as_os_str());
             unsafe {
-                let large = LoadImageW(0, path.as_ptr(), IMAGE_ICON, 256, 256, LR_LOADFROMFILE);
-                let small = LoadImageW(0, path.as_ptr(), IMAGE_ICON, 32, 32, LR_LOADFROMFILE);
+                // Load native taskbar/window sizes from the multi-resolution
+                // ICO. Loading 256px and letting Windows shrink it made both
+                // the logo and the tiny NAME label visibly soft.
+                let large = LoadImageW(0, path.as_ptr(), IMAGE_ICON, 32, 32, LR_LOADFROMFILE);
+                let small = LoadImageW(0, path.as_ptr(), IMAGE_ICON, 16, 16, LR_LOADFROMFILE);
                 if large == 0 || small == 0 {
                     if large != 0 {
                         DestroyIcon(large);
@@ -671,26 +675,44 @@ mod windows {
         if base.width() != ICON_SIZE as u32 || base.height() != ICON_SIZE as u32 {
             anyhow::bail!("bundled ShardX browser icon must be 256x256");
         }
-        let mut rgba = base.into_rgba_data();
-        if !label.is_empty() {
-            render_badge(&mut rgba, label)?;
-        }
-
-        let image = IconImage::from_rgba_data(ICON_SIZE as u32, ICON_SIZE as u32, rgba);
+        let base = RgbaImage::from_raw(
+            ICON_SIZE as u32,
+            ICON_SIZE as u32,
+            base.into_rgba_data(),
+        )
+        .context("construct bundled ShardX browser image")?;
         let mut directory = IconDir::new(ResourceType::Icon);
-        directory.add_entry(IconDirEntry::encode_as_png(&image)?);
+        for size in ICON_SIZES {
+            // Render each Windows icon size independently. In particular, the
+            // 16/20/24/32px entries get native text pixels instead of a second
+            // shell downscale from the 256px source.
+            let mut rgba = if size == ICON_SIZE as u32 {
+                base.clone().into_raw()
+            } else {
+                image::imageops::resize(&base, size, size, FilterType::Lanczos3).into_raw()
+            };
+            if !label.is_empty() {
+                render_badge(&mut rgba, label, size as i32)?;
+            }
+            let image = IconImage::from_rgba_data(size, size, rgba);
+            directory.add_entry(IconDirEntry::encode_as_png(&image)?);
+        }
         let mut bytes = Cursor::new(Vec::new());
         directory.write(&mut bytes)?;
         Ok(bytes.into_inner())
     }
 
-    fn render_badge(rgba: &mut [u8], label: &str) -> Result<()> {
+    fn render_badge(rgba: &mut [u8], label: &str, icon_size: i32) -> Result<()> {
         let text: Vec<u16> = label.encode_utf16().collect();
         if text.is_empty() {
             return Ok(());
         }
-        let face_name = wide_null(OsStr::new("Arial Narrow"));
-        let grapheme_count = UnicodeSegmentation::graphemes(label, true).count();
+        // Consolas has a fixed advance width: a character keeps exactly the
+        // same size and spacing in `111`, `1111`, or any shorter label. The
+        // previous proportional font was horizontally compressed separately
+        // for every label length, which caused the inconsistent spacing in the
+        // taskbar screenshot.
+        let face_name = wide_null(OsStr::new("Consolas"));
 
         unsafe {
             let dc = CreateCompatibleDC(0);
@@ -698,56 +720,35 @@ mod windows {
                 return Err(std::io::Error::last_os_error()).context("create badge drawing context");
             }
 
-            let chosen_height = 116;
-            let initial_width = match grapheme_count {
-                0 | 1 => 132,
-                2 => 100,
-                3 => 72,
-                _ => 52,
-            };
-            let mut chosen_width = 20;
-            let mut measured = Size::default();
-            for width in (20..=initial_width).rev() {
-                let font = match create_badge_font(chosen_height, width, &face_name) {
-                    Ok(font) => font,
-                    Err(error) => {
-                        DeleteDC(dc);
-                        return Err(error);
-                    }
-                };
-                let old_font = SelectObject(dc, font);
-                let ok = GetTextExtentPoint32W(dc, text.as_ptr(), text.len() as i32, &mut measured);
-                SelectObject(dc, old_font);
-                DeleteObject(font);
-                if ok == 0 {
-                    DeleteDC(dc);
-                    return Err(std::io::Error::last_os_error()).context("measure taskbar badge text");
-                }
-                if measured.cx <= 250 {
-                    chosen_width = width;
-                    break;
-                }
-            }
-
             // Full-width, borderless label: use every available taskbar pixel
             // for NAME instead of spending space on side margins and a white
-            // outline. The panel occupies just over half of the source icon so
-            // four characters remain legible after Windows scales it to 32px.
-            let badge_height = 132;
+            // outline. The font is deliberately a little smaller than before.
+            let badge_height = scaled(132, icon_size);
+            let font_height = scaled(100, icon_size).max(5);
+            let radius = scaled(20, icon_size).max(1);
             let left = 0;
-            let top = ICON_SIZE - badge_height;
-            let right = ICON_SIZE;
-            let bottom = ICON_SIZE;
-            fill_rounded_rect(rgba, left, top, right, bottom, 20, [3, 8, 15, 252]);
+            let top = icon_size - badge_height;
+            let right = icon_size;
+            let bottom = icon_size;
+            fill_rounded_rect(
+                rgba,
+                icon_size,
+                left,
+                top,
+                right,
+                bottom,
+                radius,
+                [3, 8, 15, 252],
+            );
 
             let mut info: BitmapInfo = zeroed();
             info.header.size = size_of::<BitmapInfoHeader>() as u32;
-            info.header.width = ICON_SIZE;
-            info.header.height = -ICON_SIZE; // top-down rows
+            info.header.width = icon_size;
+            info.header.height = -icon_size; // top-down rows
             info.header.planes = 1;
             info.header.bit_count = 32;
             info.header.compression = BI_RGB;
-            info.header.size_image = (ICON_SIZE * ICON_SIZE * 4) as u32;
+            info.header.size_image = (icon_size * icon_size * 4) as u32;
 
             let mut bits: *mut c_void = null_mut();
             let bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, 0, 0);
@@ -763,7 +764,7 @@ mod windows {
             copy_nonoverlapping(bgra.as_ptr(), bits.cast::<u8>(), bgra.len());
 
             let old_bitmap = SelectObject(dc, bitmap);
-            let font = match create_badge_font(chosen_height, chosen_width, &face_name) {
+            let font = match create_badge_font(font_height, 0, &face_name) {
                 Ok(font) => font,
                 Err(error) => {
                     SelectObject(dc, old_bitmap);
@@ -784,7 +785,7 @@ mod windows {
             }
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, 0x00ff_ffff);
-            let text_x = (ICON_SIZE - final_size.cx) / 2;
+            let text_x = (icon_size - final_size.cx) / 2;
             let text_y = top + (badge_height - final_size.cy) / 2;
             let drawn = TextOutW(dc, text_x, text_y, text.as_ptr(), text.len() as i32);
 
@@ -798,7 +799,15 @@ mod windows {
             }
             // GDI does not maintain alpha for glyph pixels. The whole badge is
             // intentionally opaque, so restore alpha for its rounded footprint.
-            force_rounded_alpha(rgba, left, top, right, bottom, 20);
+            force_rounded_alpha(
+                rgba,
+                icon_size,
+                left,
+                top,
+                right,
+                bottom,
+                radius,
+            );
 
             SelectObject(dc, old_font);
             DeleteObject(font);
@@ -838,6 +847,7 @@ mod windows {
 
     fn fill_rounded_rect(
         rgba: &mut [u8],
+        icon_size: i32,
         left: i32,
         top: i32,
         right: i32,
@@ -845,10 +855,10 @@ mod windows {
         radius: i32,
         color: [u8; 4],
     ) {
-        for y in top.max(0)..bottom.min(ICON_SIZE) {
-            for x in left.max(0)..right.min(ICON_SIZE) {
+        for y in top.max(0)..bottom.min(icon_size) {
+            for x in left.max(0)..right.min(icon_size) {
                 if inside_rounded_rect(x, y, left, top, right, bottom, radius) {
-                    let offset = ((y * ICON_SIZE + x) * 4) as usize;
+                    let offset = ((y * icon_size + x) * 4) as usize;
                     rgba[offset..offset + 4].copy_from_slice(&color);
                 }
             }
@@ -857,16 +867,17 @@ mod windows {
 
     fn force_rounded_alpha(
         rgba: &mut [u8],
+        icon_size: i32,
         left: i32,
         top: i32,
         right: i32,
         bottom: i32,
         radius: i32,
     ) {
-        for y in top.max(0)..bottom.min(ICON_SIZE) {
-            for x in left.max(0)..right.min(ICON_SIZE) {
+        for y in top.max(0)..bottom.min(icon_size) {
+            for x in left.max(0)..right.min(icon_size) {
                 if inside_rounded_rect(x, y, left, top, right, bottom, radius) {
-                    let offset = ((y * ICON_SIZE + x) * 4 + 3) as usize;
+                    let offset = ((y * icon_size + x) * 4 + 3) as usize;
                     rgba[offset] = 255;
                 }
             }
@@ -890,6 +901,10 @@ mod windows {
         let dx = x - nearest_x;
         let dy = y - nearest_y;
         dx * dx + dy * dy <= radius * radius
+    }
+
+    fn scaled(value_at_256: i32, icon_size: i32) -> i32 {
+        (value_at_256 * icon_size + ICON_SIZE / 2) / ICON_SIZE
     }
 
     fn patch_main_icon(executable: &Path, icon: &[u8]) -> Result<()> {
@@ -1032,6 +1047,29 @@ mod windows {
 
     fn wide_null(value: &OsStr) -> Vec<u16> {
         value.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{build_badged_icon, parse_ico, ICON_SIZES};
+
+        #[test]
+        fn generated_icon_contains_every_native_windows_size() {
+            let icon = build_badged_icon("1111").expect("generate test taskbar icon");
+            let entries = parse_ico(&icon).expect("parse generated taskbar icon");
+            let sizes: Vec<u32> = entries
+                .iter()
+                .map(|entry| {
+                    assert_eq!(entry.width, entry.height);
+                    if entry.width == 0 {
+                        256
+                    } else {
+                        u32::from(entry.width)
+                    }
+                })
+                .collect();
+            assert_eq!(sizes.as_slice(), ICON_SIZES.as_slice());
+        }
     }
 }
 
