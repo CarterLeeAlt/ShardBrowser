@@ -3425,10 +3425,10 @@ host:8080               # no auth
                             <span className="status-pill status-udp" title={`UDP relay works (${r.udp_ms} ms)`}>UDP</span>
                           )}
                           {r.country && (
-                            <>
+                            <span className="bulk-country">
                               <CountryFlag cc={r.country} />
-                              <span className="flag">{r.country}</span>
-                            </>
+                              <span className="flag bulk-country-code">{r.country}</span>
+                            </span>
                           )}
                         </>
                       )}
