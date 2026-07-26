@@ -85,6 +85,26 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # `src-tauri/target` is cached for fast Rust rebuilds, but Tauri's bundle
+      # directory contains versioned release artifacts. Remove only that output
+      # so an older MSI restored from the cache can never enter this release.
+      - name: Clean stale cached bundles
+        shell: pwsh
+        run: |
+          $targetRoot = [System.IO.Path]::GetFullPath(
+            (Join-Path $env:GITHUB_WORKSPACE "src-tauri/target")
+          )
+          $bundle = [System.IO.Path]::GetFullPath(
+            (Join-Path $targetRoot "x86_64-pc-windows-msvc/release/bundle")
+          )
+          $targetPrefix = $targetRoot + [System.IO.Path]::DirectorySeparatorChar
+          if (-not $bundle.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to clean bundle directory outside Cargo target: $bundle"
+          }
+          if (Test-Path -LiteralPath $bundle) {
+            Remove-Item -LiteralPath $bundle -Recurse -Force
+          }
+
       - name: Build Tauri bundle (unsigned)
         shell: pwsh
         env:
@@ -104,14 +124,19 @@ jobs:
 
       - name: Collect Windows MSI
         shell: pwsh
+        env:
+          APP_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           New-Item -ItemType Directory -Force staging | Out-Null
           $bundle = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle"
-          $msi = @(Get-ChildItem -Path $bundle -Recurse -File -Filter *.msi)
-          if ($msi.Count -eq 0) {
-            throw "Tauri produced no Windows x64 MSI under $bundle"
+          $allMsi = @(Get-ChildItem -Path $bundle -Recurse -File -Filter *.msi)
+          $versionMarker = "_$($env:APP_VERSION)_x64_"
+          $msi = @($allMsi | Where-Object { $_.Name.Contains($versionMarker) })
+          if ($msi.Count -ne 1) {
+            $found = if ($allMsi.Count -eq 0) { "none" } else { $allMsi.FullName -join "; " }
+            throw "Expected exactly one Windows x64 MSI for version $($env:APP_VERSION), found $($msi.Count). All MSI files: $found"
           }
-          $msi | Copy-Item -Destination staging -Verbose
+          Copy-Item -LiteralPath $msi[0].FullName -Destination staging -Verbose
           Get-ChildItem staging
 
       # The raw compiled binary (one level above bundle/) is a standalone,
