@@ -739,13 +739,13 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   grid-template-columns:
     4px       /* shard strip */
     28px      /* checkbox */
-    minmax(140px, 1.2fr)  /* name */
+    minmax(140px, 1fr)     /* name: flexible */
     100px                  /* status */
-    minmax(260px, 1.7fr)  /* two-line proxy summary */
-    minmax(120px, 1.1fr)  /* notes */
-    minmax(70px, 90px)    /* time (cumulative uptime) */
-    minmax(110px, 130px)  /* last run */
-    minmax(200px, auto);  /* six fixed 28px row-action buttons */
+    200px                  /* two-line proxy summary */
+    minmax(120px, 1fr)     /* notes: flexible */
+    90px                   /* time (cumulative uptime) */
+    130px                  /* last run */
+    188px;                 /* six fixed 28px row-action buttons */
   gap: 10px;
   padding: 10px 16px 10px 0;
   align-items: center;
@@ -763,11 +763,11 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
     grid-template-columns:
       4px
       28px
-      minmax(120px, 1.2fr)
+      minmax(120px, 1fr)
       90px
-      minmax(240px, 1.5fr)
+      200px
       minmax(100px, 1fr)
-      minmax(60px, 80px)
+      80px
       188px;
   }
   .t-cols > .cell-lastrun, .t-cols > .head-lastrun { display: none; }
