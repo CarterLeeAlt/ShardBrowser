@@ -66,6 +66,50 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// User-facing profile names are also passed to browser/taskbar integration,
+/// so keep the accepted alphabet explicit and consistent across every entry point.
+pub fn validate_profile_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        anyhow::bail!("Profile name is required");
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        anyhow::bail!(
+            "Profile name may only contain letters, numbers, underscores (_), and hyphens (-)"
+        );
+    }
+    Ok(())
+}
+
+/// Produce a valid name only for names generated internally (templates/clones).
+/// Explicit user input is validated and rejected instead of being rewritten.
+pub fn generated_profile_name(value: &str, fallback: &str) -> String {
+    fn sanitize(value: &str) -> String {
+        let mut out = String::with_capacity(value.len());
+        for ch in value.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                out.push(ch);
+            } else if !out.is_empty() && !out.ends_with('-') {
+                out.push('-');
+            }
+        }
+        out.trim_matches('-').to_string()
+    }
+
+    let generated = sanitize(value);
+    if !generated.is_empty() {
+        return generated;
+    }
+    let fallback = sanitize(fallback);
+    if fallback.is_empty() {
+        "profile".to_string()
+    } else {
+        fallback
+    }
+}
+
 fn path_for(id: &str) -> Result<PathBuf> {
     if id.contains(['/', '\\', '.']) {
         anyhow::bail!("invalid profile id");
@@ -328,12 +372,13 @@ pub fn clone_profile(id: &str) -> Result<ProfileMeta> {
         .and_then(|v| v.as_str())
         .unwrap_or("profile")
         .to_string();
+    let clone_name = format!("{}-copy", generated_profile_name(&old_name, "profile"));
     src.meta.id = new_id.clone();
     src.meta.last_launched_at = None;
     src.meta.created_at = None;
     src.meta.pinned = false;
     src.config
-        .insert("name".into(), serde_json::Value::String(format!("{old_name} (copy)")));
+        .insert("name".into(), serde_json::Value::String(clone_name.clone()));
     // Re-randomize CPU/RAM/platform_version so the copy doesn't collide on those axes.
     crate::randomize_platform_version(&mut src.config);
     crate::randomize_hardware(&mut src.config);
@@ -344,7 +389,7 @@ pub fn clone_profile(id: &str) -> Result<ProfileMeta> {
     save_raw(&mut src)?;
     Ok(ProfileMeta {
         id: src.meta.id,
-        name: format!("{old_name} (copy)"),
+        name: clone_name,
         notes: src
             .config
             .get("notes")

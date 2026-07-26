@@ -525,6 +525,29 @@ pub fn save_profile_core(
 
     let mut stored: profile::StoredProfile =
         serde_json::from_value(payload).map_err(|e| e.to_string())?;
+    let profile_name = stored
+        .config
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    // New profiles always validate. Existing legacy names are tolerated until
+    // the name itself changes, so editing notes/proxy settings is not blocked.
+    let name_changed = is_new
+        || profile::load_raw(&stored.meta.id)
+            .ok()
+            .map(|existing| {
+                existing
+                    .config
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    != profile_name.as_str()
+            })
+            .unwrap_or(true);
+    if name_changed {
+        profile::validate_profile_name(&profile_name).map_err(|e| e.to_string())?;
+    }
     if !is_new {
         profile::ensure_stopped(&stored.meta.id).map_err(|e| e.to_string())?;
     }
@@ -575,6 +598,12 @@ fn profile_clone(id: String) -> Result<profile::ProfileMeta, String> {
 /// Import profiles verbatim under fresh ids; returns the count.
 #[tauri::command]
 fn profile_import(payloads: Vec<Value>) -> Result<usize, String> {
+    // Validate the entire import before writing anything, avoiding a partial
+    // import when a later profile contains an invalid name.
+    for payload in &payloads {
+        let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        profile::validate_profile_name(name).map_err(|e| e.to_string())?;
+    }
     let mut n = 0;
     for mut payload in payloads {
         if let Some(obj) = payload.as_object_mut() {
@@ -673,6 +702,11 @@ pub fn merge_library_fingerprint(
             merged.insert(k.clone(), v.clone());
         }
     }
+    let raw_name = merged.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    merged.insert(
+        "name".into(),
+        Value::String(profile::generated_profile_name(raw_name, template_id)),
+    );
 
     // launch-time resolver fills tz/lang/geo from the bound proxy
     merged.insert("timezone".into(), Value::String("auto".into()));

@@ -283,6 +283,15 @@ type FingerprintEntry = {
 
 // ---- profile form ----
 
+const PROFILE_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
+function profileNameError(name: string): string | null {
+  if (!name.trim()) return "Profile name is required";
+  if (!PROFILE_NAME_PATTERN.test(name)) {
+    return "Use only letters, numbers, underscores (_), and hyphens (-)";
+  }
+  return null;
+}
+
 type NoiseMode = "real" | "auto";
 type WebRtcMode = "auto" | "tcp_only" | "block";
 type GeoMode = "auto" | "manual";
@@ -525,7 +534,7 @@ function toStored(f: ProfileForm, lib: FingerprintEntry | null): any {
     last_launched_at: null,
     gpu_preset_id: f.gpu_preset_id,
   };
-  base.name = f.name || "untitled";
+  base.name = f.name;
   base.notes = f.notes;
   // "auto" sentinel: resolver replaces at launch; persists across edits.
   base.timezone = f.timezone;
@@ -1463,6 +1472,11 @@ function BrowsersView() {
 
   const saveDraft = async () => {
     if (!draft) return;
+    const nameError = profileNameError(draft.name);
+    if (nameError) {
+      toast.err(nameError);
+      return;
+    }
     try {
       const fp = fingerprints.find((g) => g.id === draft.gpu_preset_id) ?? null;
       const saved = await invoke<ProfileMeta>("profile_save", { payload: toStored(draft, fp) });
@@ -1979,6 +1993,7 @@ function InlineEditor({
   onCancel: () => void;
 }) {
   const f = draft;
+  const nameError = profileNameError(f.name);
   const u = <K extends keyof ProfileForm>(k: K, v: ProfileForm[K]) => setDraft({ ...f, [k]: v });
   const draftRef = useRef(f);
   draftRef.current = f;
@@ -2115,7 +2130,13 @@ function InlineEditor({
         {/* ----- col 1: identity + hardware ----- */}
         <div className="ie-section">
           <div className="ie-section-title">Identity</div>
-          <Field label="Profile name" value={f.name} onChange={(v) => u("name", v)} placeholder="e.g. shop-pl-1" />
+          <Field
+            label="Profile name"
+            value={f.name}
+            onChange={(v) => u("name", v)}
+            placeholder="e.g. shop-pl-1"
+            error={nameError}
+          />
 
           <label>
             <span className="lbl">Operating system</span>
@@ -2147,7 +2168,7 @@ function InlineEditor({
 
           <div className="form-row">
             <SelectField
-              label="CPU logical processors"
+              label="Logical CPUs"
               value={f.hardware_concurrency}
               onChange={setCpu}
               options={cpuOptions}
@@ -2280,7 +2301,7 @@ function InlineEditor({
       </div>
       <div className="ie-foot">
         <button className="btn-ghost" onClick={onCancel}>Cancel</button>
-        <button className="btn-primary" onClick={onSave}>
+        <button className="btn-primary" onClick={onSave} disabled={nameError != null} title={nameError ?? undefined}>
           <ShardMini /> {f.id ? "Save changes" : "Create profile"}
         </button>
       </div>
@@ -2301,12 +2322,22 @@ type FieldProps = {
   type?: string;
   placeholder?: string;
   mono?: boolean;
+  error?: string | null;
 };
-function Field({ label, value, onChange, type = "text", placeholder, mono }: FieldProps) {
+function Field({ label, value, onChange, type = "text", placeholder, mono, error }: FieldProps) {
+  const className = [mono ? "mono" : "", error ? "input-invalid" : ""].filter(Boolean).join(" ");
   return (
     <label>
       <span className="lbl">{label}</span>
-      <input className={mono ? "mono" : ""} type={type} value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />
+      <input
+        className={className}
+        type={type}
+        value={value}
+        placeholder={placeholder}
+        aria-invalid={error ? true : undefined}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      {error && <span className="field-error">{error}</span>}
     </label>
   );
 }
