@@ -289,6 +289,8 @@ async fn create_temporary(Json(body): Json<TempReq>) -> ApiResult {
 }
 
 async fn delete_profile(Path(id): Path<String>) -> ApiResult {
+    crate::profile::ensure_stopped(&id)
+        .map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
     crate::profile::delete(&id).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     crate::notify_store_changed("profiles");
     Ok(Json(json!({ "deleted": true, "id": id })))
@@ -310,6 +312,8 @@ struct EditReq {
 
 /// Edit profile; only provided fields change. Returns the updated profile.
 async fn edit_profile(Path(id): Path<String>, Json(body): Json<EditReq>) -> ApiResult {
+    crate::profile::ensure_stopped(&id)
+        .map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
     let mut stored = crate::profile::load_raw(&id)
         .map_err(|e| err(StatusCode::NOT_FOUND, e.to_string()))?;
 

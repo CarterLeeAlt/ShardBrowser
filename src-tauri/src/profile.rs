@@ -230,6 +230,17 @@ fn clear_noise_seeds(config: &mut serde_json::Map<String, serde_json::Value>) {
     }
 }
 
+/// Reject user-initiated profile mutations while its browser owns the live
+/// user-data directory. Runtime bookkeeping continues to use `save_raw`
+/// directly, and temporary cleanup calls `delete` only after the tracker entry
+/// is removed, so lifecycle persistence keeps working normally.
+pub fn ensure_stopped(id: &str) -> Result<()> {
+    if crate::is_profile_running(id) {
+        anyhow::bail!("Stop the running browser before modifying this profile");
+    }
+    Ok(())
+}
+
 pub fn save_raw(stored: &mut StoredProfile) -> Result<()> {
     let is_new = stored.meta.id.is_empty();
     if is_new {
@@ -270,6 +281,7 @@ pub fn save_raw(stored: &mut StoredProfile) -> Result<()> {
 }
 
 pub fn delete(id: &str) -> Result<()> {
+    ensure_stopped(id)?;
     let path = path_for(id)?;
     if path.exists() {
         fs::remove_file(path)?;
@@ -307,6 +319,7 @@ pub fn touch_launched(id: &str, proxy_id: Option<String>) -> Result<()> {
 }
 
 pub fn clone_profile(id: &str) -> Result<ProfileMeta> {
+    ensure_stopped(id)?;
     let mut src = load_raw(id)?;
     let new_id = uuid::Uuid::new_v4().to_string();
     let old_name = src
@@ -359,6 +372,7 @@ pub fn set_pin(id: &str, pinned: bool) -> Result<()> {
 
 /// Assign folder tag (empty string clears).
 pub fn set_folder(id: &str, folder: &str) -> Result<()> {
+    ensure_stopped(id)?;
     let mut p = load_raw(id)?;
     p.meta.folder = folder.trim().to_string();
     let path = path_for(&p.meta.id)?;
@@ -367,59 +381,62 @@ pub fn set_folder(id: &str, folder: &str) -> Result<()> {
     Ok(())
 }
 
-/// Retag profiles from folder `old` to `new`; returns count.
-pub fn rename_folder(old: &str, new: &str) -> Result<usize> {
+fn profiles_in_folder(name: &str) -> Result<Vec<(PathBuf, StoredProfile)>> {
     let dir = store::profiles_dir()?;
-    let new = new.trim();
-    let mut n = 0;
+    let mut profiles = Vec::new();
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
         let Ok(body) = fs::read_to_string(entry.path()) else { continue; };
-        let Ok(mut stored): std::result::Result<StoredProfile, _> = serde_json::from_str(&body)
-        else {
-            continue;
-        };
-        if stored.meta.folder == old {
-            stored.meta.folder = new.to_string();
-            if let Ok(out) = serde_json::to_string_pretty(&stored) {
-                let _ = fs::write(entry.path(), out);
-            }
-            n += 1;
-        }
-    }
-    Ok(n)
-}
-
-/// Delete folder; `delete_profiles` true removes, false unfiles. Returns count.
-pub fn delete_folder(name: &str, delete_profiles: bool) -> Result<usize> {
-    let dir = store::profiles_dir()?;
-    let mut n = 0;
-    for entry in fs::read_dir(&dir)? {
-        let entry = entry?;
-        if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(body) = fs::read_to_string(entry.path()) else { continue; };
-        let Ok(mut stored): std::result::Result<StoredProfile, _> = serde_json::from_str(&body)
+        let Ok(stored): std::result::Result<StoredProfile, _> = serde_json::from_str(&body)
         else {
             continue;
         };
         if stored.meta.folder == name {
-            if delete_profiles {
-                let _ = delete(&stored.meta.id);
-            } else {
-                stored.meta.folder = String::new();
-                if let Ok(out) = serde_json::to_string_pretty(&stored) {
-                    let _ = fs::write(entry.path(), out);
-                }
-            }
-            n += 1;
+            profiles.push((entry.path(), stored));
         }
     }
-    Ok(n)
+    Ok(profiles)
+}
+
+/// Retag profiles from folder `old` to `new`; returns count.
+pub fn rename_folder(old: &str, new: &str) -> Result<usize> {
+    let profiles = profiles_in_folder(old)?;
+    // Preflight the whole folder so a running profile cannot cause a partial
+    // rename after earlier profiles were already written.
+    for (_, stored) in &profiles {
+        ensure_stopped(&stored.meta.id)?;
+    }
+    let count = profiles.len();
+    let new = new.trim();
+    for (path, mut stored) in profiles {
+        ensure_stopped(&stored.meta.id)?;
+        stored.meta.folder = new.to_string();
+        fs::write(path, serde_json::to_string_pretty(&stored)?)?;
+    }
+    Ok(count)
+}
+
+/// Delete folder; `delete_profiles` true removes, false unfiles. Returns count.
+pub fn delete_folder(name: &str, delete_profiles: bool) -> Result<usize> {
+    let profiles = profiles_in_folder(name)?;
+    // As with rename, reject before changing anything when one member runs.
+    for (_, stored) in &profiles {
+        ensure_stopped(&stored.meta.id)?;
+    }
+    let count = profiles.len();
+    for (path, mut stored) in profiles {
+        if delete_profiles {
+            delete(&stored.meta.id)?;
+        } else {
+            ensure_stopped(&stored.meta.id)?;
+            stored.meta.folder = String::new();
+            fs::write(path, serde_json::to_string_pretty(&stored)?)?;
+        }
+    }
+    Ok(count)
 }
 
 /// Per-profile user-data-dir; created on first call.

@@ -525,6 +525,9 @@ pub fn save_profile_core(
 
     let mut stored: profile::StoredProfile =
         serde_json::from_value(payload).map_err(|e| e.to_string())?;
+    if !is_new {
+        profile::ensure_stopped(&stored.meta.id).map_err(|e| e.to_string())?;
+    }
     profile::save_raw(&mut stored).map_err(|e| e.to_string())?;
     let name = stored
         .config
@@ -558,6 +561,7 @@ fn profile_delete(id: String) -> Result<(), String> {
 
 #[tauri::command]
 fn profile_bind_proxy(profile_id: String, proxy_id: Option<String>) -> Result<(), String> {
+    profile::ensure_stopped(&profile_id).map_err(|e| e.to_string())?;
     let mut p = profile::load_raw(&profile_id).map_err(|e| e.to_string())?;
     p.meta.proxy_id = proxy_id;
     profile::save_raw(&mut p).map_err(|e| e.to_string())
