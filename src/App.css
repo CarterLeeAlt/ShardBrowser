@@ -760,16 +760,20 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .t-cols > *,
 .p-cols > * { min-width: 0; }
 .p-cols {
+  /* Proxy data columns use the same equal-surplus model as browser rows.
+     At the 960px minimum track area each column is at its explicit floor;
+     every additional 6px adds exactly 1px to all six data columns. */
+  --p-equal-share: 16.666667%;
   display: grid;
   grid-template-columns:
-    28px                       /* checkbox */
-    minmax(160px, 1.4fr)       /* name */
-    80px                       /* type */
-    minmax(140px, 1.2fr)       /* host:port */
-    minmax(110px, 0.8fr)       /* country */
-    64px                       /* profiles count */
-    minmax(180px, 1.4fr)       /* test result */
-    minmax(180px, auto);       /* actions */
+    28px                                               /* checkbox */
+    max(160px, var(--p-equal-share))                   /* name */
+    max(80px, calc(var(--p-equal-share) - 80px))       /* type */
+    max(140px, calc(var(--p-equal-share) - 20px))      /* host:port */
+    max(110px, calc(var(--p-equal-share) - 50px))      /* country */
+    max(68px, calc(var(--p-equal-share) - 92px))       /* profiles */
+    max(180px, calc(var(--p-equal-share) + 20px))      /* test result */
+    124px;                                              /* row actions */
   gap: 10px;
   padding: 10px 16px;
   align-items: center;
@@ -788,24 +792,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .proxy-data-row .small {
   font-size: 12px;
   font-weight: var(--font-weight-regular);
-}
-/* At narrow widths the sum of minimums (~1146px content + sidebar
-   240px) overflows the 1280px min-window, pushing the action column
-   off-screen.  Shrink the widest cells just enough to fit — the
-   8-column structure stays intact; long values truncate via the
-   `min-width: 0` rule above instead of forcing horizontal scroll. */
-@media (max-width: 1366px) {
-  .p-cols {
-    grid-template-columns:
-      28px
-      minmax(120px, 1.4fr)     /* name */
-      72px                     /* type */
-      minmax(120px, 1.2fr)     /* host:port */
-      minmax(80px, 0.8fr)      /* country (drops city text, keeps flag+code) */
-      56px                     /* profiles count */
-      minmax(140px, 1.2fr)     /* test result */
-      minmax(140px, auto);     /* actions */
-  }
 }
 .profile-count {
   display: inline-flex; align-items: center; justify-content: center;
@@ -1005,6 +991,13 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   flex-wrap: nowrap;
 }
 .t-cols > .row-actions > .icon-btn {
+  flex: 0 0 28px;
+}
+.p-cols > .row-actions {
+  min-width: 124px;
+  flex-wrap: nowrap;
+}
+.p-cols > .row-actions > .icon-btn {
   flex: 0 0 28px;
 }
 
