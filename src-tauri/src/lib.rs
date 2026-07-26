@@ -920,6 +920,11 @@ async fn proxy_full_test(entry: proxy::ProxyEntry) -> Result<proxy::TestSnapshot
 }
 
 #[tauri::command]
+async fn proxy_full_test_batch(entries: Vec<proxy::ProxyEntry>) -> Vec<proxy::BatchTestResult> {
+    proxy::full_test_batch(entries).await
+}
+
+#[tauri::command]
 fn proxy_history(id: String) -> Result<Vec<proxy::TestSnapshot>, String> {
     proxy::history(&id).map_err(|e| e.to_string())
 }
@@ -1384,6 +1389,7 @@ pub fn run() {
             proxy_check_udp,
             proxy_geo,
             proxy_full_test,
+            proxy_full_test_batch,
             proxy_history,
             proxy_last_test,
             proxy_bulk_import,
