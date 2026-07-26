@@ -59,9 +59,11 @@ mod windows {
     use std::path::{Path, PathBuf};
     use std::ptr::{copy_nonoverlapping, null_mut};
     use std::slice;
+    use std::sync::OnceLock;
     use std::time::{Instant, UNIX_EPOCH};
 
     const BASE_ICON_PNG: &[u8] = include_bytes!("../icons/shardx-browser-taskbar-base.png");
+    const INTER_GDI_FONT_TTF: &[u8] = include_bytes!("../fonts/Inter-Variable-GDI.ttf");
     const ICON_SIZE: i32 = 256;
     const ICON_SIZES: [u32; 9] = [16, 20, 24, 32, 40, 48, 64, 128, 256];
     const RT_ICON: *const u16 = 3usize as *const u16;
@@ -73,6 +75,7 @@ mod windows {
     const DEFAULT_CHARSET: u32 = 1;
     const OUT_TT_PRECIS: u32 = 4;
     const CLIP_DEFAULT_PRECIS: u32 = 0;
+    const NONANTIALIASED_QUALITY: u32 = 3;
     const ANTIALIASED_QUALITY: u32 = 4;
     const DEFAULT_PITCH: u32 = 0;
     const WM_SETICON: u32 = 0x0080;
@@ -81,6 +84,13 @@ mod windows {
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     const VT_LPWSTR: u16 = 31;
     const COINIT_MULTITHREADED: u32 = 0;
+
+    // AddFontMemResourceEx keeps the memory font available until it is
+    // explicitly removed. The bytes are compiled into the executable and the
+    // process-lifetime handle is intentionally retained, so taskbar rendering
+    // never depends on Inter being installed in Windows.
+    static INTER_GDI_FONT_REGISTRATION: OnceLock<std::result::Result<isize, String>> =
+        OnceLock::new();
 
     #[repr(C)]
     struct BitmapInfoHeader {
@@ -211,6 +221,12 @@ mod windows {
 
     #[link(name = "gdi32")]
     extern "system" {
+        fn AddFontMemResourceEx(
+            font_data: *const c_void,
+            data_size: u32,
+            reserved: *mut c_void,
+            font_count: *mut u32,
+        ) -> isize;
         fn CreateCompatibleDC(dc: isize) -> isize;
         fn DeleteDC(dc: isize) -> i32;
         fn CreateDIBSection(
@@ -304,7 +320,7 @@ mod windows {
         let fingerprint = stable_hash(&[
             label.as_bytes(),
             BASE_ICON_PNG,
-            b"taskbar-badge-layout-v8-multisize-monospace",
+            b"taskbar-badge-layout-v9-inter-gdi-small-no-aa",
             &metadata.len().to_le_bytes(),
             &modified.to_le_bytes(),
         ]);
@@ -707,12 +723,12 @@ mod windows {
         if text.is_empty() {
             return Ok(());
         }
-        // Consolas has a fixed advance width: a character keeps exactly the
-        // same size and spacing in `111`, `1111`, or any shorter label. The
-        // previous proportional font was horizontally compressed separately
-        // for every label length, which caused the inconsistent spacing in the
-        // taskbar screenshot.
-        let face_name = wide_null(OsStr::new("Consolas"));
+        ensure_inter_gdi_font()?;
+        // Keep the taskbar badge aligned with the launcher's bundled Inter UI
+        // typography. This family comes from INTER_GDI_FONT_TTF above rather
+        // than from the host's system font directory.
+        let face_name = wide_null(OsStr::new("Inter"));
+        let font_quality = badge_font_quality(icon_size);
 
         unsafe {
             let dc = CreateCompatibleDC(0);
@@ -722,9 +738,13 @@ mod windows {
 
             // Full-width, borderless label: use every available taskbar pixel
             // for NAME instead of spending space on side margins and a white
-            // outline. The font is deliberately a little smaller than before.
+            // outline. Inter has taller/wider metrics than the former font, so
+            // use one fixed aspect ratio at every icon size. This keeps up to
+            // four wide characters inside the badge without per-label spacing
+            // compression.
             let badge_height = scaled(132, icon_size);
-            let font_height = scaled(100, icon_size).max(5);
+            let font_height = scaled(80, icon_size).max(5);
+            let font_width = scaled(36, icon_size).max(1);
             let radius = scaled(20, icon_size).max(1);
             let left = 0;
             let top = icon_size - badge_height;
@@ -764,7 +784,12 @@ mod windows {
             copy_nonoverlapping(bgra.as_ptr(), bits.cast::<u8>(), bgra.len());
 
             let old_bitmap = SelectObject(dc, bitmap);
-            let font = match create_badge_font(font_height, 0, &face_name) {
+            let font = match create_badge_font(
+                font_height,
+                font_width,
+                font_quality,
+                &face_name,
+            ) {
                 Ok(font) => font,
                 Err(error) => {
                     SelectObject(dc, old_bitmap);
@@ -822,7 +847,51 @@ mod windows {
         Ok(())
     }
 
-    unsafe fn create_badge_font(height: i32, width: i32, face_name: &[u16]) -> Result<isize> {
+    fn ensure_inter_gdi_font() -> Result<()> {
+        let registration = INTER_GDI_FONT_REGISTRATION.get_or_init(|| {
+            let data_size = match u32::try_from(INTER_GDI_FONT_TTF.len()) {
+                Ok(size) => size,
+                Err(_) => return Err("bundled Inter GDI font is too large".to_string()),
+            };
+            let mut font_count = 0u32;
+            let handle = unsafe {
+                AddFontMemResourceEx(
+                    INTER_GDI_FONT_TTF.as_ptr().cast::<c_void>(),
+                    data_size,
+                    null_mut(),
+                    &mut font_count,
+                )
+            };
+            if handle == 0 || font_count == 0 {
+                Err(format!(
+                    "register bundled Inter GDI font: {}",
+                    std::io::Error::last_os_error()
+                ))
+            } else {
+                Ok(handle)
+            }
+        });
+
+        match registration {
+            Ok(_) => Ok(()),
+            Err(message) => anyhow::bail!(message.clone()),
+        }
+    }
+
+    fn badge_font_quality(icon_size: i32) -> u32 {
+        if icon_size <= 32 {
+            NONANTIALIASED_QUALITY
+        } else {
+            ANTIALIASED_QUALITY
+        }
+    }
+
+    unsafe fn create_badge_font(
+        height: i32,
+        width: i32,
+        quality: u32,
+        face_name: &[u16],
+    ) -> Result<isize> {
         let font = CreateFontW(
             -height,
             width,
@@ -835,7 +904,7 @@ mod windows {
             DEFAULT_CHARSET,
             OUT_TT_PRECIS,
             CLIP_DEFAULT_PRECIS,
-            ANTIALIASED_QUALITY,
+            quality,
             DEFAULT_PITCH,
             face_name.as_ptr(),
         );
@@ -1051,7 +1120,10 @@ mod windows {
 
     #[cfg(test)]
     mod tests {
-        use super::{build_badged_icon, parse_ico, ICON_SIZES};
+        use super::{
+            badge_font_quality, build_badged_icon, parse_ico, ANTIALIASED_QUALITY,
+            ICON_SIZES, INTER_GDI_FONT_TTF, NONANTIALIASED_QUALITY,
+        };
 
         #[test]
         fn generated_icon_contains_every_native_windows_size() {
@@ -1069,6 +1141,21 @@ mod windows {
                 })
                 .collect();
             assert_eq!(sizes.as_slice(), ICON_SIZES.as_slice());
+        }
+
+        #[test]
+        fn bundled_inter_font_is_true_type() {
+            assert_eq!(&INTER_GDI_FONT_TTF[..4], &[0, 1, 0, 0]);
+        }
+
+        #[test]
+        fn small_badge_frames_disable_gray_antialiasing() {
+            for size in [16, 20, 24, 32] {
+                assert_eq!(badge_font_quality(size), NONANTIALIASED_QUALITY);
+            }
+            for size in [40, 48, 64, 128, 256] {
+                assert_eq!(badge_font_quality(size), ANTIALIASED_QUALITY);
+            }
         }
     }
 }
