@@ -569,7 +569,192 @@ mod windows {
         pid: u32,
         executable: &PathBuf,
         icons: &LoadedIcons,
-…1668 tokens truncated…ser base ICO is missing its {size}px frame"))?;
+        app_id: &[u16],
+        icon_resource: &[u16],
+    ) -> usize {
+        let mut context = WindowApplyContext {
+            pid,
+            executable,
+            icons,
+            app_id: app_id.as_ptr(),
+            icon_resource: icon_resource.as_ptr(),
+            matched_windows: 0,
+        };
+        unsafe {
+            let com_result = CoInitializeEx(null_mut(), COINIT_MULTITHREADED);
+            EnumWindows(
+                Some(apply_window_callback),
+                (&mut context as *mut WindowApplyContext) as isize,
+            );
+            if com_result >= 0 {
+                CoUninitialize();
+            }
+        }
+        context.matched_windows
+    }
+
+    unsafe extern "system" fn apply_window_callback(window: isize, param: isize) -> i32 {
+        let context = &*(param as *const WindowApplyContext);
+        let mut window_pid = 0u32;
+        GetWindowThreadProcessId(window, &mut window_pid);
+        if window_pid != context.pid
+            && !process_uses_executable(window_pid, &*context.executable)
+        {
+            return 1;
+        }
+
+        set_window_taskbar_properties(window, context.app_id, context.icon_resource);
+        let icons = &*context.icons;
+        SendMessageW(window, WM_SETICON, 1, icons.taskbar_for_window(window));
+        SendMessageW(window, WM_SETICON, 0, icons.small);
+        (*(param as *mut WindowApplyContext)).matched_windows += 1;
+        1
+    }
+
+    unsafe fn process_uses_executable(process_id: u32, expected: &Path) -> bool {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
+        if process == 0 {
+            return false;
+        }
+        let mut path = vec![0u16; 32_768];
+        let mut length = path.len() as u32;
+        let ok = QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut length) != 0;
+        CloseHandle(process);
+        if !ok {
+            return false;
+        }
+        path.truncate(length as usize);
+        let actual = PathBuf::from(OsString::from_wide(&path));
+        actual
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&expected.to_string_lossy())
+    }
+
+    unsafe fn set_window_taskbar_properties(
+        window: isize,
+        app_id: *const u16,
+        icon_resource: *const u16,
+    ) {
+        let mut store: *mut PropertyStore = null_mut();
+        if SHGetPropertyStoreForWindow(window, &IID_PROPERTY_STORE, &mut store) < 0
+            || store.is_null()
+        {
+            return;
+        }
+
+        let id_key = PropertyKey {
+            format_id: APP_USER_MODEL_FORMAT,
+            property_id: 5,
+        };
+        let icon_key = PropertyKey {
+            format_id: APP_USER_MODEL_FORMAT,
+            property_id: 3,
+        };
+        let id_value = PropVariant {
+            variant_type: VT_LPWSTR,
+            reserved1: 0,
+            reserved2: 0,
+            reserved3: 0,
+            string_value: app_id,
+        };
+        let icon_value = PropVariant {
+            variant_type: VT_LPWSTR,
+            reserved1: 0,
+            reserved2: 0,
+            reserved3: 0,
+            string_value: icon_resource,
+        };
+        let vtable = &*(*store).vtable;
+        (vtable.set_value)(store, &id_key, &id_value);
+        (vtable.set_value)(store, &icon_key, &icon_value);
+        (vtable.commit)(store);
+        (vtable.release)(store);
+    }
+
+    fn stable_hash(parts: &[&[u8]]) -> u64 {
+        // FNV-1a keeps the generated executable path stable across app restarts.
+        let mut hash = 0xcbf29ce484222325u64;
+        for part in parts {
+            for byte in *part {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
+        hash
+    }
+
+    fn cleanup_stale_launchers(parent: &Path, profile_id: &str, keep: Option<&Path>) {
+        let prefix = format!("shardx-profile-{profile_id}-");
+        let keep_icon = keep.map(profile_icon_path);
+        let Ok(entries) = fs::read_dir(parent) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if keep.is_some_and(|keep| path.as_path() == keep) {
+                continue;
+            }
+            if keep_icon
+                .as_ref()
+                .is_some_and(|keep| path.as_path() == keep.as_path())
+            {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if name.starts_with(&prefix)
+                && (name.ends_with(".exe") || name.ends_with(".ico"))
+            {
+                // A still-running previous launcher remains locked by Windows and
+                // simply survives until the next launch-time cleanup.
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
+    fn profile_icon_path(executable: &Path) -> PathBuf {
+        executable.with_extension("ico")
+    }
+
+    fn write_icon_sidecar(icon_path: &Path, icon: &[u8]) -> Result<()> {
+        let parent = icon_path.parent().context("profile icon has no parent directory")?;
+        let file_name = icon_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("profile icon has an invalid file name")?;
+        let temporary = parent.join(format!(
+            ".{file_name}.{}.tmp",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::write(&temporary, icon).context("write temporary profile taskbar icon")?;
+        match fs::rename(&temporary, icon_path) {
+            Ok(()) => Ok(()),
+            Err(_) if icon_path.exists() => {
+                let _ = fs::remove_file(&temporary);
+                Ok(())
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&temporary);
+                Err(error).context("publish profile taskbar icon")
+            }
+        }
+    }
+
+    fn build_badged_icon(label: &str) -> Result<Vec<u8>> {
+        let base = IconDir::read(Cursor::new(BASE_ICON_ICO))
+            .context("decode bundled ShardX browser base frames")?;
+        let mut directory = IconDir::new(ResourceType::Icon);
+        for size in ICON_SIZES {
+            // The launcher generator owns the resize step for both products.
+            // Decoding the same native base frame here makes the outer artwork
+            // byte-identical before either center diamond or NAME badge is
+            // applied.
+            let entry = base
+                .entries()
+                .iter()
+                .find(|entry| entry.width() == size && entry.height() == size)
+                .with_context(|| format!("browser base ICO is missing its {size}px frame"))?;
             let mut rgba = entry
                 .decode()
                 .with_context(|| format!("decode browser base {size}px frame"))?
@@ -1107,4 +1292,3 @@ mod tests {
         assert_eq!(badge_label("X👨‍👩‍👧‍👦YZ"), "👨‍👩‍👧‍👦YZ");
     }
 }
-
