@@ -65,17 +65,22 @@ const UDP_DOCS_URL = withUtm("https://docs.proxyshard.com/eng/our-products/about
 // ---- toasts (global queue, auto-expiry; push via toast.ok / toast.err) ----
 
 type ToastItem = { id: number; kind: "ok" | "err" | "info"; text: string };
+const MAX_VISIBLE_TOASTS = 5;
 let toastSeq = 0;
 const toastSubs = new Set<(items: ToastItem[]) => void>();
 let toastList: ToastItem[] = [];
+const publishToasts = () => toastSubs.forEach((cb) => cb(toastList));
 const pushToast = (kind: ToastItem["kind"], text: string) => {
   const id = ++toastSeq;
-  toastList = [...toastList, { id, kind, text }];
-  toastSubs.forEach((cb) => cb(toastList));
+  toastList = [...toastList, { id, kind, text }].slice(-MAX_VISIBLE_TOASTS);
+  publishToasts();
   setTimeout(() => {
-    toastList = toastList.filter((t) => t.id !== id);
-    toastSubs.forEach((cb) => cb(toastList));
-  }, 5500);
+    const next = toastList.filter((t) => t.id !== id);
+    // The toast may already have been evicted by the five-item cap.
+    if (next.length === toastList.length) return;
+    toastList = next;
+    publishToasts();
+  }, 3000);
 };
 const toast = {
   ok: (t: string) => pushToast("ok", t),
