@@ -541,7 +541,7 @@ async fn add_proxy(Json(body): Json<AddProxyReq>) -> ApiResult {
         entry.notes = nt;
     }
     let stored = crate::proxy::upsert_dedup(entry)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
     crate::notify_store_changed("proxies");
     Ok(Json(json!({
         "id": stored.id,

@@ -1,7 +1,7 @@
 use crate::{settings, store};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -11,7 +11,7 @@ const LATENCY_TIMEOUT_ERROR: &str = "proxy latency test timed out after 5 second
 const BULK_TEST_CONCURRENCY: usize = 5;
 static TEST_RESULT_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProxyKind {
     Socks5,
@@ -37,6 +37,96 @@ pub struct ProxyEntry {
     /// Free-form note.
     #[serde(default)]
     pub notes: String,
+}
+
+type ProxyDuplicateKey = (ProxyKind, String, u16, String);
+
+fn normalized_host_key(host: &str) -> String {
+    let host = host.trim();
+    let unbracketed = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = unbracketed.parse::<std::net::IpAddr>() {
+        return ip.to_string();
+    }
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn duplicate_key(entry: &ProxyEntry) -> ProxyDuplicateKey {
+    (
+        entry.kind.clone(),
+        normalized_host_key(&entry.host),
+        entry.port,
+        entry.username.clone(),
+    )
+}
+
+fn validate_host(host: &str) -> Result<()> {
+    if host.is_empty() {
+        anyhow::bail!("host is required");
+    }
+    if host.chars().any(|character| character.is_whitespace() || character.is_control()) {
+        anyhow::bail!("host must not contain whitespace or control characters");
+    }
+
+    if host.starts_with('[') || host.ends_with(']') {
+        let inner = host
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+            .ok_or_else(|| anyhow::anyhow!("IPv6 host must use matching brackets"))?;
+        inner
+            .parse::<std::net::Ipv6Addr>()
+            .map_err(|_| anyhow::anyhow!("invalid IPv6 address"))?;
+        return Ok(());
+    }
+    if host.contains('[') || host.contains(']') {
+        anyhow::bail!("invalid host brackets");
+    }
+    if host.contains(':') {
+        anyhow::bail!("IPv6 addresses must be enclosed in brackets");
+    }
+    url::Host::parse(host).map_err(|_| anyhow::anyhow!("invalid IP address or hostname"))?;
+    Ok(())
+}
+
+fn normalize_entry(mut entry: ProxyEntry) -> Result<ProxyEntry> {
+    entry.host = entry.host.trim().to_string();
+    validate_host(&entry.host)?;
+    if entry.port == 0 {
+        anyhow::bail!("port must be between 1 and 65535");
+    }
+    if entry.username.chars().any(char::is_control)
+        || entry.password.chars().any(char::is_control)
+    {
+        anyhow::bail!("credentials must not contain control characters");
+    }
+    if entry.username.is_empty() && !entry.password.is_empty() {
+        anyhow::bail!("password requires a username");
+    }
+    if matches!(entry.kind, ProxyKind::Socks5)
+        && (entry.username.as_bytes().len() > u8::MAX as usize
+            || entry.password.as_bytes().len() > u8::MAX as usize)
+    {
+        anyhow::bail!("SOCKS5 username and password must each be at most 255 bytes");
+    }
+
+    entry.country = entry.country.trim().to_ascii_uppercase();
+    if entry.country == "—" {
+        entry.country.clear();
+    }
+    if !entry.country.is_empty()
+        && (entry.country.len() != 2
+            || !entry.country.bytes().all(|byte| byte.is_ascii_alphabetic()))
+    {
+        anyhow::bail!("country must be a two-letter code");
+    }
+
+    entry.name = entry.name.trim().to_string();
+    if entry.name.is_empty() {
+        entry.name = format!("{}:{}", entry.host, entry.port);
+    }
+    Ok(entry)
 }
 
 impl ProxyEntry {
@@ -86,10 +176,18 @@ pub fn list() -> Result<Vec<ProxyEntry>> {
 }
 
 pub fn upsert(mut entry: ProxyEntry) -> Result<ProxyEntry> {
+    entry = normalize_entry(entry)?;
+    let mut s = load()?;
+    let key = duplicate_key(&entry);
+    if s.proxies
+        .iter()
+        .any(|proxy| proxy.id != entry.id && duplicate_key(proxy) == key)
+    {
+        anyhow::bail!("proxy already exists with the same type, host, port, and username");
+    }
     if entry.id.is_empty() {
         entry.id = uuid::Uuid::new_v4().to_string();
     }
-    let mut s = load()?;
     if let Some(slot) = s.proxies.iter_mut().find(|p| p.id == entry.id) {
         *slot = entry.clone();
     } else {
@@ -101,16 +199,13 @@ pub fn upsert(mut entry: ProxyEntry) -> Result<ProxyEntry> {
 
 /// Upsert that reuses an entry with the same kind/host/port/username.
 pub fn upsert_dedup(mut entry: ProxyEntry) -> Result<ProxyEntry> {
+    entry = normalize_entry(entry)?;
     let mut s = load()?;
-    if let Some(existing) = s.proxies.iter().find(|p| {
-        p.kind == entry.kind
-            && p.host == entry.host
-            && p.port == entry.port
-            && p.username == entry.username
-    }) {
+    let key = duplicate_key(&entry);
+    if let Some(existing) = s.proxies.iter().find(|proxy| duplicate_key(proxy) == key) {
         return Ok(existing.clone());
     }
-    if entry.id.is_empty() {
+    if entry.id.is_empty() || s.proxies.iter().any(|proxy| proxy.id == entry.id) {
         entry.id = uuid::Uuid::new_v4().to_string();
     }
     s.proxies.push(entry.clone());
@@ -215,48 +310,128 @@ async fn probe_inner(entry: &ProxyEntry) -> Result<u128> {
 
 // ---- Bulk import ----
 //
-// Accepted: socks5://user:pass@host:port, user:pass@host:port, host:port:user:pass,
-//           host:port@user:pass, host:port. `#` lines and trailing `# country=X note=Y`
+// Accepted: socks5://user:pass@host:port, user:pass@host:port,
+//           host:port:user:pass, host:port. `#` lines and trailing `# country=X note=Y`
 //           supported. SOCKS5 default kind when scheme missing.
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BulkParseIssue {
+    pub line: usize,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BulkParsePreview {
+    pub entries: Vec<ProxyEntry>,
+    pub invalid: Vec<BulkParseIssue>,
+    pub duplicate_lines: usize,
+    pub existing_duplicates: usize,
+}
 
 /// Parse a single proxy line for inline (unsaved) use by the API.
 pub fn parse_single(line: &str) -> Option<ProxyEntry> {
-    parse_one(line.trim(), &ProxyKind::Socks5)
+    parse_one_checked(line.trim(), &ProxyKind::Socks5).ok()
 }
 
-pub fn parse_bulk(text: &str, default_kind: ProxyKind) -> Vec<ProxyEntry> {
-    let mut out = Vec::new();
-    for raw in text.lines() {
+fn parse_bulk_against(
+    text: &str,
+    default_kind: ProxyKind,
+    existing: &[ProxyEntry],
+) -> BulkParsePreview {
+    let existing_keys: HashSet<ProxyDuplicateKey> = existing.iter().map(duplicate_key).collect();
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    let mut invalid = Vec::new();
+    let mut duplicate_lines = 0usize;
+    let mut existing_duplicates = 0usize;
+
+    for (index, raw) in text.lines().enumerate() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(p) = parse_one(line, &default_kind) {
-            out.push(p);
+        match parse_one_checked(line, &default_kind) {
+            Ok(entry) => {
+                let key = duplicate_key(&entry);
+                if existing_keys.contains(&key) {
+                    existing_duplicates += 1;
+                } else if !seen.insert(key) {
+                    duplicate_lines += 1;
+                } else {
+                    entries.push(entry);
+                }
+            }
+            Err(error) => invalid.push(BulkParseIssue {
+                line: index + 1,
+                reason: error.to_string(),
+            }),
         }
     }
-    out
+
+    BulkParsePreview {
+        entries,
+        invalid,
+        duplicate_lines,
+        existing_duplicates,
+    }
 }
 
-fn parse_one(line: &str, default_kind: &ProxyKind) -> Option<ProxyEntry> {
+pub fn preview_bulk(text: &str, default_kind: ProxyKind) -> Result<BulkParsePreview> {
+    let existing = load()?.proxies;
+    Ok(parse_bulk_against(text, default_kind, &existing))
+}
+
+pub fn parse_bulk_strict(text: &str, default_kind: ProxyKind) -> Result<Vec<ProxyEntry>> {
+    let preview = parse_bulk_against(text, default_kind, &[]);
+    if !preview.invalid.is_empty() {
+        let details = preview
+            .invalid
+            .iter()
+            .take(5)
+            .map(|issue| format!("line {}: {}", issue.line, issue.reason))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let remaining = preview.invalid.len().saturating_sub(5);
+        if remaining > 0 {
+            anyhow::bail!("invalid proxy lines: {details}; and {remaining} more");
+        }
+        anyhow::bail!("invalid proxy lines: {details}");
+    }
+    if preview.entries.is_empty() {
+        anyhow::bail!("no valid proxy lines found");
+    }
+    Ok(preview.entries)
+}
+
+fn parse_one_checked(line: &str, default_kind: &ProxyKind) -> Result<ProxyEntry> {
     // Optional trailing `# country=US note=foo`.
     let (main, comment) = match line.find('#') {
         Some(i) => (line[..i].trim(), Some(line[i + 1..].trim())),
         None => (line, None),
     };
+    if main.is_empty() {
+        anyhow::bail!("proxy endpoint is empty");
+    }
     let (kind, rest) = if let Some(r) = main.strip_prefix("socks5://") {
         (ProxyKind::Socks5, r)
     } else if let Some(r) = main.strip_prefix("https://") {
         (ProxyKind::Https, r)
     } else if let Some(r) = main.strip_prefix("http://") {
         (ProxyKind::Http, r)
+    } else if main.contains("://") {
+        anyhow::bail!("unsupported proxy scheme");
     } else {
         (default_kind.clone(), main)
     };
 
-    let (host_part, user, pass) = if let Some((u, hp)) = rest.split_once('@') {
+    let (host_part, user, pass) = if let Some((u, hp)) = rest.rsplit_once('@') {
+        if u.contains('@') {
+            anyhow::bail!("credentials contain an unescaped @ character");
+        }
         let (un, pw) = u.split_once(':').unwrap_or((u, ""));
         (hp.to_string(), un.to_string(), pw.to_string())
+    } else if rest.starts_with('[') {
+        (rest.to_string(), String::new(), String::new())
     } else {
         // host:port or host:port:user:pass
         let parts: Vec<&str> = rest.split(':').collect();
@@ -267,12 +442,16 @@ fn parse_one(line: &str, default_kind: &ProxyKind) -> Option<ProxyEntry> {
                 parts[2].to_string(),
                 parts[3].to_string(),
             ),
-            _ => return None,
+            _ => (rest.to_string(), String::new(), String::new()),
         }
     };
 
-    let (host, port_s) = host_part.rsplit_once(':')?;
-    let port: u16 = port_s.parse().ok()?;
+    let (host, port_s) = host_part
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("missing port"))?;
+    let port: u16 = port_s
+        .parse()
+        .map_err(|_| anyhow::anyhow!("port must be between 1 and 65535"))?;
     let mut country = String::new();
     let mut notes = String::new();
     if let Some(c) = comment {
@@ -284,7 +463,7 @@ fn parse_one(line: &str, default_kind: &ProxyKind) -> Option<ProxyEntry> {
             }
         }
     }
-    Some(ProxyEntry {
+    normalize_entry(ProxyEntry {
         // ID assigned now so pre-save test snapshots key under the kept uuid.
         id: uuid::Uuid::new_v4().to_string(),
         name: format!("{host}:{port}"),
@@ -298,19 +477,24 @@ fn parse_one(line: &str, default_kind: &ProxyKind) -> Option<ProxyEntry> {
     })
 }
 
-/// Save many entries; returns count actually persisted (deduped on host:port:user).
+/// Save many entries; validates the whole batch, then persists unique endpoints.
 pub fn bulk_save(entries: Vec<ProxyEntry>) -> Result<usize> {
+    let entries = entries
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            normalize_entry(entry).with_context(|| format!("entry {} is invalid", index + 1))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let mut store_data = load()?;
+    let mut seen: HashSet<ProxyDuplicateKey> =
+        store_data.proxies.iter().map(duplicate_key).collect();
     let mut added = 0usize;
     for mut e in entries {
-        let dup = store_data
-            .proxies
-            .iter()
-            .any(|x| x.host == e.host && x.port == e.port && x.username == e.username);
-        if dup {
+        if !seen.insert(duplicate_key(&e)) {
             continue;
         }
-        if e.id.is_empty() {
+        if e.id.is_empty() || store_data.proxies.iter().any(|proxy| proxy.id == e.id) {
             e.id = uuid::Uuid::new_v4().to_string();
         }
         store_data.proxies.push(e);
@@ -318,6 +502,72 @@ pub fn bulk_save(entries: Vec<ProxyEntry>) -> Result<usize> {
     }
     save(&store_data)?;
     Ok(added)
+}
+
+#[cfg(test)]
+mod bulk_import_tests {
+    use super::*;
+
+    fn entry(kind: ProxyKind, host: &str, port: u16, username: &str) -> ProxyEntry {
+        ProxyEntry {
+            id: String::new(),
+            name: String::new(),
+            kind,
+            host: host.to_string(),
+            port,
+            username: username.to_string(),
+            password: String::new(),
+            country: String::new(),
+            notes: String::new(),
+        }
+    }
+
+    #[test]
+    fn validation_rejects_invalid_endpoints() {
+        assert!(normalize_entry(entry(ProxyKind::Socks5, "", 1080, "")).is_err());
+        assert!(normalize_entry(entry(ProxyKind::Socks5, "bad host", 1080, "")).is_err());
+        assert!(normalize_entry(entry(ProxyKind::Socks5, "127.0.0.1", 0, "")).is_err());
+
+        let mut password_without_user = entry(ProxyKind::Http, "proxy.example", 8080, "");
+        password_without_user.password = "secret".to_string();
+        assert!(normalize_entry(password_without_user).is_err());
+    }
+
+    #[test]
+    fn parser_accepts_bracketed_ipv6() {
+        let parsed = parse_one_checked("socks5://[2001:db8::1]:1080", &ProxyKind::Socks5)
+            .expect("bracketed IPv6 should parse");
+        assert_eq!(parsed.host, "[2001:db8::1]");
+        assert_eq!(parsed.port, 1080);
+    }
+
+    #[test]
+    fn preview_reports_invalid_lines_and_removes_duplicates() {
+        let existing = vec![entry(ProxyKind::Socks5, "existing.example", 1080, "user")];
+        let preview = parse_bulk_against(
+            "socks5://user:pass@existing.example:1080\n\
+             socks5://user:pass@new.example:1080\n\
+             socks5://user:other@NEW.EXAMPLE:1080\n\
+             socks4://unsupported.example:1080\n\
+             missing-port.example\n\
+             new.example:0",
+            ProxyKind::Socks5,
+            &existing,
+        );
+
+        assert_eq!(preview.entries.len(), 1);
+        assert_eq!(preview.existing_duplicates, 1);
+        assert_eq!(preview.duplicate_lines, 1);
+        assert_eq!(preview.invalid.len(), 3);
+        assert_eq!(preview.invalid[0].line, 4);
+    }
+
+    #[test]
+    fn duplicate_key_keeps_distinct_proxy_protocols() {
+        let socks = entry(ProxyKind::Socks5, "Proxy.Example.", 1080, "user");
+        let http = entry(ProxyKind::Http, "proxy.example", 1080, "user");
+        assert_ne!(duplicate_key(&socks), duplicate_key(&http));
+    }
 }
 
 // ---- UDP probe (SOCKS5 UDP_ASSOCIATE; RFC 1928 §7) ----
