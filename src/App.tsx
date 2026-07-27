@@ -626,9 +626,17 @@ function fromStored(stored: any): ProfileForm {
 const WEBGL_NOISE_INTENSITY = 0.0005;
 const CLIENT_RECTS_MAX_OFFSET = 1;
 
-/// Build on-disk FingerprintConfig from library payload + user-edited fields.
-function toStored(f: ProfileForm, lib: FingerprintEntry | null): any {
-  const base: any = lib && lib.payload ? JSON.parse(JSON.stringify(lib.payload)) : {};
+/// Build on-disk FingerprintConfig from the durable profile plus user-edited
+/// fields. Existing profiles must keep their current screen/window and any
+/// config fields the editor does not expose; rebuilding from the original
+/// library template would undo the display clamp applied at creation time.
+/// Switching the GPU preset is the one intentional full-template replacement.
+function toStored(f: ProfileForm, lib: FingerprintEntry | null, existing: any | null = null): any {
+  const existingPresetId = existing?._meta?.gpu_preset_id ?? "";
+  const source = f.id && existing && existingPresetId === f.gpu_preset_id
+    ? existing
+    : lib?.payload;
+  const base: any = source ? JSON.parse(JSON.stringify(source)) : {};
 
   base._meta = {
     id: f.id,
@@ -1578,7 +1586,16 @@ function BrowsersView() {
     }
     try {
       const fp = fingerprints.find((g) => g.id === draft.gpu_preset_id) ?? null;
-      const saved = await invoke<ProfileMeta>("profile_save", { payload: toStored(draft, fp) });
+      // Preserve the durable config when editing an existing profile. In
+      // particular, its screen/window block was clamped to this display when
+      // the profile was created and must not be replaced by donor dimensions
+      // merely because NAME (or another unrelated field) changed.
+      const existing = draft.id
+        ? await invoke<any>("profile_get", { id: draft.id })
+        : null;
+      const saved = await invoke<ProfileMeta>("profile_save", {
+        payload: toStored(draft, fp, existing),
+      });
       await invoke("profile_bind_proxy", { profileId: saved.id, proxyId: draft.proxy_id });
       // A profile created while a folder tab is active should land in that
       // folder (otherwise it pops into "All" and the user has to drag it
