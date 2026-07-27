@@ -1,4 +1,12 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
@@ -200,6 +208,36 @@ function confirmModal(opts: {
   });
 }
 
+function DialogBackdrop({
+  children,
+  onClose,
+  dismissOnBackdrop = true,
+}: {
+  children: ReactNode;
+  onClose: () => void;
+  dismissOnBackdrop?: boolean;
+}) {
+  // Judge the press origin instead of the synthesized click target. A text
+  // selection that starts inside a dialog and ends on the backdrop can retarget
+  // its final click to the backdrop even though the user never clicked it.
+  const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (
+      dismissOnBackdrop &&
+      event.isPrimary &&
+      event.button === 0 &&
+      event.target === event.currentTarget
+    ) {
+      onClose();
+    }
+  };
+
+  return (
+    <div className="dialog-bg" onPointerDown={handlePointerDown}>
+      {children}
+    </div>
+  );
+}
+
 function ConfirmHost() {
   const [req, setReq] = useState<ConfirmReq | null>(null);
   useEffect(() => {
@@ -209,8 +247,8 @@ function ConfirmHost() {
   if (!req) return null;
   const done = (v: any) => { req.resolve(v); setReq(null); };
   return (
-    <div className="dialog-bg" onClick={() => done(null)}>
-      <div className="dialog dialog-confirm" onClick={(e) => e.stopPropagation()}>
+    <DialogBackdrop onClose={() => done(null)}>
+      <div className="dialog dialog-confirm">
         <header className="dialog-head">
           <h2>{req.title ?? "Confirm"}</h2>
           <button className="icon-btn" onClick={() => done(null)}>✕</button>
@@ -230,7 +268,7 @@ function ConfirmHost() {
           ))}
         </div>
       </div>
-    </div>
+    </DialogBackdrop>
   );
 }
 
@@ -2031,8 +2069,8 @@ function QuickEditDialog({
   };
 
   return (
-    <div className="dialog-bg" onClick={onClose}>
-      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+    <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
+      <div className="dialog">
         <header className="dialog-head">
           <h2><ShardMini /> {kind === "proxy" ? "Bind proxy" : "Edit notes"} — {profile.name}</h2>
           <button className="icon-btn" onClick={onClose}>✕</button>
@@ -2064,7 +2102,7 @@ function QuickEditDialog({
           </button>
         </footer>
       </div>
-    </div>
+    </DialogBackdrop>
   );
 }
 
@@ -3357,8 +3395,8 @@ function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
   const selCount = rows.filter((r) => r.selected).length;
 
   return (
-    <div className="dialog-bg" onClick={onClose}>
-      <div className="dialog dialog-wide" onClick={(e) => e.stopPropagation()}>
+    <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
+      <div className="dialog dialog-wide">
         <header className="dialog-head">
           <h2><ShardMini /> Bulk import proxies</h2>
           <button className="icon-btn" onClick={onClose}>✕</button>
@@ -3480,7 +3518,7 @@ host:8080               # no auth
           )}
         </footer>
       </div>
-    </div>
+    </DialogBackdrop>
   );
 }
 
@@ -3521,8 +3559,8 @@ function ProxyEditor({ initial, onClose }: { initial: ProxyEntry; onClose: () =>
     } catch (e) { toast.err(String(e)); }
   };
   return (
-    <div className="dialog-bg" onClick={onClose}>
-      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+    <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
+      <div className="dialog">
         <header className="dialog-head">
           <h2><ShardMini /> {initial.id ? "Edit proxy" : "New proxy"}</h2>
           <button className="icon-btn" onClick={onClose}>✕</button>
@@ -3564,7 +3602,7 @@ function ProxyEditor({ initial, onClose }: { initial: ProxyEntry; onClose: () =>
           <button className="btn-primary" onClick={save}><ShardMini /> Save</button>
         </footer>
       </div>
-    </div>
+    </DialogBackdrop>
   );
 }
 
@@ -3710,8 +3748,8 @@ function FingerprintImporter({ onClose }: { onClose: () => void }) {
     } catch (e) { toast.err(String(e)); }
   };
   return (
-    <div className="dialog-bg" onClick={onClose}>
-      <div className="dialog dialog-wide" onClick={(e) => e.stopPropagation()}>
+    <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
+      <div className="dialog dialog-wide">
         <header className="dialog-head">
           <h2><ShardMini /> Paste FingerprintConfig JSON</h2>
           <button className="icon-btn" onClick={onClose}>✕</button>
@@ -3728,7 +3766,7 @@ function FingerprintImporter({ onClose }: { onClose: () => void }) {
           <button className="btn-primary" onClick={save}><ShardMini /> Import</button>
         </footer>
       </div>
-    </div>
+    </DialogBackdrop>
   );
 }
 
@@ -3750,8 +3788,8 @@ function FolderModal({
   const create = () => { if (trimmed && !dup) onCreate(trimmed); };
   const showList = mode === "move" && existing.length > 0;
   return (
-    <div className="dialog-bg" onClick={onClose}>
-      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+    <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
+      <div className="dialog">
         <header className="dialog-head">
           <h2><ShardMini /> {mode === "move" ? "Move to folder" : "New folder"}</h2>
           <button className="icon-btn" onClick={onClose}>✕</button>
@@ -3792,7 +3830,7 @@ function FolderModal({
           </div>
         </div>
       </div>
-    </div>
+    </DialogBackdrop>
   );
 }
 
@@ -3818,8 +3856,8 @@ function TemplatePicker({
   // Only host-matching fingerprints (UA/fonts/WebGL renderer are host-coupled).
   const tpls = host ? lib.filter((e) => e.platform === host) : [];
   return (
-    <div className="dialog-bg" onClick={onClose}>
-      <div className="dialog dialog-wide" onClick={(e) => e.stopPropagation()}>
+    <DialogBackdrop onClose={onClose}>
+      <div className="dialog dialog-wide">
         <header className="dialog-head">
           <h2><ShardMini /> Pick a {host || ""} fingerprint</h2>
           <button className="icon-btn" onClick={onClose}>✕</button>
@@ -3847,7 +3885,7 @@ function TemplatePicker({
           )}
         </div>
       </div>
-    </div>
+    </DialogBackdrop>
   );
 }
 
@@ -4410,8 +4448,8 @@ function PsResiGenerator({ type, onClose }: { type: ResiType; onClose: () => voi
   };
 
   return (
-    <div className="dialog-bg" onClick={onClose}>
-      <div className="dialog dialog-wide" onClick={(e) => e.stopPropagation()}>
+    <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
+      <div className="dialog dialog-wide">
         <header className="dialog-head">
           <h2><ShardMini /> Generate residential proxies — {plan}</h2>
           <button className="icon-btn" onClick={onClose}>✕</button>
@@ -4484,7 +4522,7 @@ function PsResiGenerator({ type, onClose }: { type: ResiType; onClose: () => voi
           </button>
         </footer>
       </div>
-    </div>
+    </DialogBackdrop>
   );
 }
 
@@ -4691,8 +4729,8 @@ function PsImportModal({ order, onClose }: { order: PsOrder; onClose: () => void
   };
 
   return (
-    <div className="dialog-bg" onClick={onClose}>
-      <div className="dialog dialog-wide" onClick={(e) => e.stopPropagation()}>
+    <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
+      <div className="dialog dialog-wide">
         <header className="dialog-head">
           <h2><ShardMini /> Add proxies — {order.product_name} #{order.order_id}</h2>
           <button className="icon-btn" onClick={onClose}>✕</button>
@@ -4753,7 +4791,7 @@ function PsImportModal({ order, onClose }: { order: PsOrder; onClose: () => void
           </button>
         </footer>
       </div>
-    </div>
+    </DialogBackdrop>
   );
 }
 
@@ -4770,8 +4808,8 @@ function PsTagModal({ order, onClose, onDone }: { order: PsOrder; onClose: () =>
     finally { setBusy(false); }
   };
   return (
-    <div className="dialog-bg" onClick={onClose}>
-      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+    <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
+      <div className="dialog">
         <header className="dialog-head">
           <h2><Icon.Edit /> Edit tag</h2>
           <button className="icon-btn" onClick={onClose}>✕</button>
@@ -4785,7 +4823,7 @@ function PsTagModal({ order, onClose, onDone }: { order: PsOrder; onClose: () =>
           <button className="btn-primary" onClick={submit} disabled={busy}><ShardMini /> {busy ? "Saving…" : "Save"}</button>
         </footer>
       </div>
-    </div>
+    </DialogBackdrop>
   );
 }
 
@@ -4804,8 +4842,8 @@ function PsTopupModal({ order, onClose, onDone }: { order: PsOrder; onClose: () 
     finally { setBusy(false); }
   };
   return (
-    <div className="dialog-bg" onClick={onClose}>
-      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+    <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
+      <div className="dialog">
         <header className="dialog-head">
           <h2><ShardMini /> Add traffic</h2>
           <button className="icon-btn" onClick={onClose}>✕</button>
@@ -4822,7 +4860,7 @@ function PsTopupModal({ order, onClose, onDone }: { order: PsOrder; onClose: () 
           </button>
         </footer>
       </div>
-    </div>
+    </DialogBackdrop>
   );
 }
 
