@@ -4153,7 +4153,7 @@ function RuntimeUpdateCard() {
   return (
     <div className="card settings-card runtime-update-card">
       <div className="runtime-update-head">
-        <div>
+        <div className="settings-card-heading">
           <h3>Runtime update check</h3>
           <p className="muted small">
             Checks run only when you press the button. ShardX will not download or install updates automatically.
@@ -5277,19 +5277,19 @@ function SettingsView() {
       <Topbar crumbs={["System", "Settings"]} search="" onSearch={() => {}} />
       <div className="page-title"><h1>Settings</h1></div>
 
-
-      <div className="card settings-card">
-        <h3>Proxy geo checker</h3>
-        <p className="muted small">Which free public IP-geo service to hit when you press the proxy <strong>Test</strong> button. All three are no-key, rate-limited.</p>
-        <label>
-          <span className="lbl">Provider</span>
-          <select value={s.geo_checker ?? "ip-api.com"} onChange={(e) => setS({ ...s, geo_checker: e.target.value })}>
-            <option value="ip-api.com">ip-api.com (45 req/min, HTTP)</option>
-            <option value="ipapi.co">ipapi.co (1k/day, HTTPS)</option>
-            <option value="ipwho.is">ipwho.is (10k/month, HTTPS)</option>
-          </select>
-        </label>
-      </div>
+      <div className="settings-card-list">
+        <div className="card settings-card">
+          <h3>Proxy geo checker</h3>
+          <p className="muted small">Which free public IP-geo service to hit when you press the proxy <strong>Test</strong> button. All three are no-key, rate-limited.</p>
+          <label>
+            <span className="lbl">Provider</span>
+            <select value={s.geo_checker ?? "ip-api.com"} onChange={(e) => setS({ ...s, geo_checker: e.target.value })}>
+              <option value="ip-api.com">ip-api.com (45 req/min, HTTP)</option>
+              <option value="ipapi.co">ipapi.co (1k/day, HTTPS)</option>
+              <option value="ipwho.is">ipwho.is (10k/month, HTTPS)</option>
+            </select>
+          </label>
+        </div>
 
       <div className="card settings-card">
         <h3>Screen resolution</h3>
@@ -5375,7 +5375,8 @@ function SettingsView() {
         </button>
       </div>
 
-      <RuntimeUpdateCard />
+        <RuntimeUpdateCard />
+      </div>
 
       <div className="card-actions">
         <button className="btn-primary" onClick={async () => { await save(); refreshApi(); }}><ShardMini /> Save settings</button>
