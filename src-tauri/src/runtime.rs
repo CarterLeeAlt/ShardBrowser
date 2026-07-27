@@ -125,6 +125,23 @@ fn effective_installed_version(local: &Manifest) -> Option<String> {
         .or_else(installed_engine_version)
 }
 
+fn version_is_newer(candidate: &str, installed: Option<&str>) -> bool {
+    let Some(installed) = installed else {
+        return true;
+    };
+    let parse = |value: &str| {
+        value
+            .split('.')
+            .map(str::parse::<u32>)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .ok()
+    };
+    match (parse(candidate), parse(installed)) {
+        (Some(candidate), Some(installed)) => candidate > installed,
+        _ => candidate != installed,
+    }
+}
+
 fn load_manifest() -> Manifest {
     let Ok(p) = manifest_path() else { return Manifest::default() };
     fs::read_to_string(p)
@@ -149,6 +166,43 @@ pub struct RuntimeStatus {
     pub spec: PlatformSpec,
     /// True once the fingerprint library bundle has been extracted.
     pub fingerprints_installed: bool,
+}
+
+fn fingerprints_are_installed(local: &Manifest) -> bool {
+    local.fingerprints_etag.is_some()
+        && crate::store::fingerprints_dir()
+            .map(|d| {
+                fs::read_dir(&d)
+                    .map(|it| {
+                        it.flatten().any(|e| {
+                            e.path().extension().and_then(|s| s.to_str()) == Some("json")
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+}
+
+fn status_from_manifest(
+    installed: bool,
+    local: Manifest,
+    manifest: RemoteManifest,
+    update_available: bool,
+) -> RuntimeStatus {
+    let spec = host_spec();
+    let remote = manifest.archives.get(&spec.browser.key).cloned();
+    // Stamp present AND dir has at least one .json (catches user-nuked dir).
+    let fingerprints_installed = fingerprints_are_installed(&local);
+
+    RuntimeStatus {
+        installed,
+        binary_path: if installed { binary_path().ok() } else { None },
+        installed_browser_etag: local.browser_etag,
+        remote_browser_etag: remote,
+        update_available,
+        spec,
+        fingerprints_installed,
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -199,11 +253,22 @@ async fn fetch_manifest() -> RemoteManifest {
             grease_version: str_field("grease_version"),
         })
     }
+    let bundled = bundled_manifest();
     match inner().await {
-        Some(manifest) => manifest,
+        Some(manifest) => {
+            let bundled_is_newer = bundled.chromium_version.as_deref().is_some_and(|candidate| {
+                version_is_newer(candidate, manifest.chromium_version.as_deref())
+            });
+            if bundled_is_newer {
+                eprintln!("[runtime] remote manifest is older than bundled metadata; using bundled");
+                bundled
+            } else {
+                manifest
+            }
+        }
         None => {
             eprintln!("[runtime] remote manifest unavailable; using bundled metadata");
-            bundled_manifest()
+            bundled
         }
     }
 }
@@ -338,9 +403,8 @@ pub async fn ensure_profiles_migrated() {
 
 #[tauri::command]
 pub async fn runtime_status() -> Result<RuntimeStatus, String> {
-    let spec = host_spec();
     let installed = binary_path().map(|p| p.exists()).unwrap_or(false);
-    let m = load_manifest();
+    let local = load_manifest();
     // A clean install does not need a network round-trip merely to discover
     // that the browser is absent. The install command fetches fresh metadata
     // next, with a bounded bundled fallback.
@@ -349,39 +413,44 @@ pub async fn runtime_status() -> Result<RuntimeStatus, String> {
     } else {
         bundled_manifest()
     };
-    let remote = manifest.archives.get(&spec.browser.key).cloned();
-    // Update is detected by VERSION (engine on disk vs manifest's
-    // chromium_version), not by etag — robust for users whose stored etag
-    // already matched but whose binary never actually updated. Manifest
-    // unreachable (chromium_version None) → assume up to date.
+    // Update is detected by VERSION (a newer manifest version vs the engine on
+    // disk), not by etag — robust for users whose stored etag already matched
+    // but whose binary never actually updated. Manifest unreachable
+    // (chromium_version None) → assume up to date.
     let update_available = installed
         && manifest
             .chromium_version
             .as_deref()
-            .is_some_and(|rv| effective_installed_version(&m).as_deref() != Some(rv));
-    // Stamp present AND dir has ≥1 .json (catches user-nuked dir).
-    let fingerprints_installed = m.fingerprints_etag.is_some()
-        && crate::store::fingerprints_dir()
-            .map(|d| {
-                fs::read_dir(&d)
-                    .map(|it| {
-                        it.flatten().any(|e| {
-                            e.path().extension().and_then(|s| s.to_str()) == Some("json")
-                        })
-                    })
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
+            .is_some_and(|candidate| {
+                version_is_newer(candidate, effective_installed_version(&local).as_deref())
+            });
 
-    Ok(RuntimeStatus {
+    Ok(status_from_manifest(
         installed,
-        binary_path: if installed { binary_path().ok() } else { None },
-        installed_browser_etag: m.browser_etag,
-        remote_browser_etag: remote,
+        local,
+        manifest,
         update_available,
-        spec,
-        fingerprints_installed,
-    })
+    ))
+}
+
+/// Fast startup check that only reads local files and bundled release metadata.
+/// Remote update discovery is intentionally kept out of the launch-critical path.
+#[tauri::command]
+pub fn runtime_local_status() -> Result<RuntimeStatus, String> {
+    let installed = binary_path().map(|p| p.exists()).unwrap_or(false);
+    let local = load_manifest();
+    let manifest = bundled_manifest();
+    let update_available = installed
+        && manifest.chromium_version.as_deref().is_some_and(|candidate| {
+            version_is_newer(candidate, effective_installed_version(&local).as_deref())
+        });
+
+    Ok(status_from_manifest(
+        installed,
+        local,
+        manifest,
+        update_available,
+    ))
 }
 
 #[tauri::command]
@@ -394,15 +463,18 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
     let local = load_manifest();
     let manifest = fetch_manifest().await;
 
-    // Re-download the engine when its on-disk version differs from the
-    // manifest's chromium_version (or when missing / forced). VERSION-based,
-    // not etag — so the update actually fires for already-installed users on a
-    // bump. Manifest unreachable (None) → don't force a re-download.
+    // Re-download the engine when the manifest has a newer chromium_version
+    // (or when missing / forced). VERSION-based, not etag — so the update
+    // actually fires for already-installed users on a bump. Manifest
+    // unreachable (None) → don't force a re-download.
     let need_browser = if force || !installed_now {
         true
     } else {
         match &manifest.chromium_version {
-            Some(rv) => effective_installed_version(&local).as_deref() != Some(rv.as_str()),
+            Some(candidate) => version_is_newer(
+                candidate,
+                effective_installed_version(&local).as_deref(),
+            ),
             None => false,
         }
     };
@@ -435,10 +507,16 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
     // Fingerprint seed: overwrites bundled templates, leaves user-added files;
     // skipped when the etag matches. User-added FP get version-migrated below.
     let fp_remote = manifest.archives.get(FINGERPRINTS_ARCHIVE_KEY).map(|s| s.as_str());
-    let fp_etag = install_fingerprints(&window, force, local.fingerprints_etag.as_deref(), fp_remote)
-        .await
-        .map_err(|e| e.to_string())?
-        .or(local.fingerprints_etag);
+    let repair_fingerprints = !fingerprints_are_installed(&local);
+    let fp_etag = install_fingerprints(
+        &window,
+        force || repair_fingerprints,
+        local.fingerprints_etag.as_deref(),
+        fp_remote,
+    )
+    .await
+    .map_err(|e| e.to_string())?
+    .or(local.fingerprints_etag);
 
     // Migrate already-created profiles AND the fingerprint library (incl.
     // user-added) to the new engine descriptor (UA + client_hints incl. grease).
@@ -478,7 +556,7 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
     .map_err(|e| e.to_string())?;
 
     let _ = window.emit("runtime:done", ());
-    runtime_status().await
+    runtime_local_status()
 }
 
 /// Download + seed fingerprint library. Bundled templates are always

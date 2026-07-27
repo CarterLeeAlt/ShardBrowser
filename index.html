@@ -5,9 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ShardX Launcher</title>
     <script>
-      if (!localStorage.getItem("shardx-theme")) {
-        localStorage.setItem("shardx-theme", "light");
-      }
+      // Resolve the persisted theme in <head>, before CSS and React can paint.
+      const savedTheme = localStorage.getItem("shardx-theme");
+      const initialTheme = savedTheme === "dark" ? "dark" : "light";
+      localStorage.setItem("shardx-theme", initialTheme);
+      document.documentElement.setAttribute("data-theme", initialTheme);
     </script>
   </head>
 

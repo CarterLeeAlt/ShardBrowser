@@ -3911,34 +3911,79 @@ type RtProgress = {
   percent: number;
 };
 
+type RtGatePhase = "checking" | "installing" | "ready";
+type RtInstallMode = "setup" | "repair" | "update";
+const RUNTIME_UPDATE_PENDING_KEY = "shardx-runtime-update-pending";
+
 function FirstRunGate({ children }: { children: ReactNode }) {
-  // null = querying backend; true = reveal; false = show overlay.
-  const [installed, setInstalled] = useState<boolean | null>(null);
+  const [phase, setPhase] = useState<RtGatePhase>("checking");
+  const [installMode, setInstallMode] = useState<RtInstallMode>("setup");
+  const [showChecking, setShowChecking] = useState(false);
   const [prog, setProg] = useState<RtProgress | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  // Single in-flight install at a time.
-  const installing = useRef(false);
 
   const fmt = (b: number) =>
     b < 1024 * 1024 ? `${(b / 1024).toFixed(0)} KB` : `${(b / (1024 * 1024)).toFixed(1)} MB`;
 
+  // Most local checks finish before the first useful paint. Only reveal a
+  // neutral startup state when disk access is unusually slow.
+  useEffect(() => {
+    const timer = window.setTimeout(() => setShowChecking(true), 200);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     let unProg: (() => void) | undefined;
-    let unDone: (() => void) | undefined;
 
-    (async () => {
-      // Subscribe BEFORE invoking so we don't miss the first event.
-      unProg = await listen<RtProgress>("runtime:progress", (e) => {
+    const installRuntime = async (mode: RtInstallMode) => {
+      if (cancelled) return;
+      setInstallMode(mode);
+      setPhase("installing");
+      setErr(null);
+      setProg(null);
+
+      // Subscribe immediately before install so the local startup check never
+      // waits on event registration, while still preserving the first event.
+      const stopProgress = await listen<RtProgress>("runtime:progress", (e) => {
         if (!cancelled) setProg(e.payload);
       });
-      unDone = await listen("runtime:done", () => {
-        if (!cancelled) { setProg(null); setInstalled(true); }
-      });
+      if (cancelled) {
+        stopProgress();
+        return;
+      }
+      unProg = stopProgress;
 
+      try {
+        const result = await invoke<RtStatus>("runtime_install", { force: false });
+        if (cancelled) return;
+        if (!result.installed || !result.fingerprints_installed) {
+          throw new Error("Browser runtime installation did not complete");
+        }
+        localStorage.removeItem(RUNTIME_UPDATE_PENDING_KEY);
+        setProg(null);
+        setPhase("ready");
+      } catch (e: any) {
+        if (!cancelled) setErr(typeof e === "string" ? e : (e?.message ?? String(e)));
+      }
+    };
+
+    const checkRemoteUpdate = async () => {
+      try {
+        const status = await invoke<RtStatus>("runtime_status");
+        if (cancelled || !status.update_available) return;
+        localStorage.setItem(RUNTIME_UPDATE_PENDING_KEY, "1");
+        toast.info("Browser runtime update available. Restart ShardX to install it.");
+      } catch {
+        // Remote update discovery must never delay or break an otherwise valid
+        // local installation. The next launch will try again.
+      }
+    };
+
+    (async () => {
       let status: RtStatus;
       try {
-        status = await invoke<RtStatus>("runtime_status");
+        status = await invoke<RtStatus>("runtime_local_status");
       } catch (e: any) {
         if (!cancelled) setErr(String(e));
         return;
@@ -3947,99 +3992,90 @@ function FirstRunGate({ children }: { children: ReactNode }) {
 
       // Unsupported platform: let the user in; launch will error if attempted.
       if (!status.spec) {
-        setInstalled(true);
-        return;
-      }
-      // Reveal only when the engine + fingerprints are installed AND up to
-      // date. An available engine update (chromium version bump) falls through
-      // to the install path below, which re-downloads the changed archives.
-      if (status.installed && status.fingerprints_installed && !status.update_available) {
-        setInstalled(true);
+        setPhase("ready");
         return;
       }
 
-      setInstalled(false);
-      if (installing.current) return;
-      installing.current = true;
-      try {
-        await invoke<RtStatus>("runtime_install", { force: false });
-        if (!cancelled) setInstalled(true);
-      } catch (e: any) {
-        if (!cancelled) setErr(typeof e === "string" ? e : (e?.message ?? String(e)));
-      } finally {
-        installing.current = false;
+      const complete = status.installed && status.fingerprints_installed;
+      const pendingUpdate = localStorage.getItem(RUNTIME_UPDATE_PENDING_KEY) === "1";
+      if (complete && !status.update_available && !pendingUpdate) {
+        setPhase("ready");
+        void checkRemoteUpdate();
+        return;
       }
+
+      const mode: RtInstallMode = !status.installed
+        ? "setup"
+        : !status.fingerprints_installed
+          ? "repair"
+          : "update";
+      await installRuntime(mode);
     })();
 
     return () => {
       cancelled = true;
       unProg?.();
-      unDone?.();
     };
   }, []);
 
-  if (installed) {
+  if (phase === "ready") {
     return <>{children}</>;
   }
 
+  if (phase === "checking" && !showChecking && !err) return null;
+
+  const copy = phase === "checking"
+    ? {
+        title: "Starting ShardX",
+        description: "Checking the local browser runtime…",
+      }
+    : installMode === "update"
+      ? {
+          title: "Updating ShardX browser",
+          description: "Installing the latest browser runtime for this launcher.",
+        }
+      : installMode === "repair"
+        ? {
+            title: "Repairing ShardX browser",
+            description: "Restoring missing browser runtime files.",
+          }
+        : {
+            title: "Setting up ShardX browser",
+            description: "Downloading the browser runtime for this installation.",
+          };
+
   return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 1000,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: "var(--bg, #0b0b0e)",
-        color: "var(--fg, #e6e6e6)",
-      }}
-    >
-      <div style={{ width: 460, padding: "32px 36px", textAlign: "center" }}>
-        <div style={{ fontSize: 20, fontWeight: "var(--font-weight-emphasis)", marginBottom: 8 }}>
-          Setting up ShardX browser
-        </div>
-        <div className="muted small" style={{ marginBottom: 24 }}>
-          First-run download from our CDN. Done once per install
-          (~{prog?.total ? fmt(prog.total) : "150 MB"}).
-        </div>
+    <div className="runtime-gate">
+      <div className="runtime-gate-card">
+        <div className="runtime-gate-mark"><ShardMini /></div>
+        <div className="runtime-gate-title">{copy.title}</div>
+        <div className="runtime-gate-description">{copy.description}</div>
 
         {prog && (
-          <>
-            <div className="muted small" style={{ marginBottom: 6, textAlign: "left" }}>
-              {prog.label} —{" "}
-              {prog.phase === "download"
-                ? `${fmt(prog.received)} / ${fmt(prog.total)}  (${prog.percent}%)`
-                : "extracting…"}
+          <div className="runtime-progress-wrap">
+            <div className="runtime-progress-label">
+              <span>{prog.label}</span>
+              <span>
+                {prog.phase === "download"
+                  ? prog.total > 0
+                    ? `${fmt(prog.received)} / ${fmt(prog.total)} (${prog.percent}%)`
+                    : "Starting download…"
+                  : "Extracting…"}
+              </span>
             </div>
-            <div
-              style={{
-                height: 8,
-                background: "var(--bg-muted, #1f1f24)",
-                borderRadius: 4,
-                overflow: "hidden",
-              }}
-            >
-              <div
-                style={{
-                  width: `${prog.percent}%`,
-                  height: "100%",
-                  background: "var(--accent, #4ade80)",
-                  transition: "width 0.1s linear",
-                }}
-              />
+            <div className="runtime-progress-track">
+              <div className="runtime-progress-fill" style={{ width: `${prog.percent}%` }} />
             </div>
-          </>
+          </div>
         )}
-        {!prog && !err && (
-          <div className="muted small">
-            {installed === null ? "Checking browser runtime…" : "Contacting CDN…"}
+        {!prog && !err && phase === "installing" && (
+          <div className="runtime-gate-status">
+            <span className="runtime-spinner" aria-hidden="true" />
+            Preparing browser runtime…
           </div>
         )}
         {err && (
-          <div style={{ color: "var(--err, #fb7185)", marginTop: 12, fontSize: 13 }}>
-            {err}
-          </div>
+          <div className="runtime-gate-error">{err}</div>
         )}
       </div>
     </div>

@@ -1413,6 +1413,7 @@ pub fn run() {
             cookies_export_portable,
             cookies_import,
             mcp_download,
+            runtime::runtime_local_status,
             runtime::runtime_status,
             runtime::runtime_install,
         ])
