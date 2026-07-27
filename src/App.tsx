@@ -3300,19 +3300,49 @@ type BulkRowState = {
   error?: string;
 };
 
-/// Two-step bulk import: paste → parse → (optional Test-all + dedup) → Save selected.
+type ProxyBulkParseIssue = {
+  line: number;
+  reason: string;
+};
+
+type ProxyBulkParsePreview = {
+  entries: ProxyEntry[];
+  invalid: ProxyBulkParseIssue[];
+  duplicate_lines: number;
+  existing_duplicates: number;
+};
+
+/// Two-step bulk import: paste → validate/dedup preview → optional test → save selected.
 function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
   const [text, setText] = useState("");
   const [kind, setKind] = useState<ProxyEntry["kind"]>("socks5");
   const [rows, setRows] = useState<BulkRowState[]>([]);
   const [busy, setBusy] = useState(false);
+  const [parseIssues, setParseIssues] = useState<ProxyBulkParseIssue[]>([]);
+  const [skipped, setSkipped] = useState({ duplicateLines: 0, existingDuplicates: 0 });
 
   const parse = async () => {
     if (!text.trim()) { toast.err("Nothing to parse"); return; }
     try {
-      const parsed = await invoke<ProxyEntry[]>("proxy_bulk_parse", { text, kind });
-      if (parsed.length === 0) { toast.err("No valid proxy lines found"); return; }
-      setRows(parsed.map((e) => ({ entry: e, selected: true, status: "idle" })));
+      const preview = await invoke<ProxyBulkParsePreview>("proxy_bulk_parse", { text, kind });
+      setParseIssues(preview.invalid);
+      setSkipped({
+        duplicateLines: preview.duplicate_lines,
+        existingDuplicates: preview.existing_duplicates,
+      });
+      if (preview.invalid.length > 0) {
+        toast.err(`Fix ${preview.invalid.length} invalid proxy line${preview.invalid.length === 1 ? "" : "s"}`);
+        return;
+      }
+      const duplicateCount = preview.duplicate_lines + preview.existing_duplicates;
+      if (preview.entries.length === 0) {
+        toast.info(duplicateCount > 0 ? "No new proxies: every valid line is a duplicate" : "No valid proxy lines found");
+        return;
+      }
+      setRows(preview.entries.map((entry) => ({ entry, selected: true, status: "idle" })));
+      if (duplicateCount > 0) {
+        toast.info(`Skipped ${duplicateCount} duplicate proxy line${duplicateCount === 1 ? "" : "s"}`);
+      }
     } catch (e) { toast.err(String(e)); }
   };
 
@@ -3386,13 +3416,19 @@ function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
     if (entries.length === 0) { toast.err("Nothing selected"); return; }
     try {
       const n = await invoke<number>("proxy_bulk_save", { entries });
-      toast.ok(`Imported ${n} prox${n === 1 ? "y" : "ies"}`);
+      const skippedOnSave = entries.length - n;
+      if (skippedOnSave > 0) {
+        toast.info(`Imported ${n}; skipped ${skippedOnSave} duplicate${skippedOnSave === 1 ? "" : "s"}`);
+      } else {
+        toast.ok(`Imported ${n} prox${n === 1 ? "y" : "ies"}`);
+      }
       onClose();
     } catch (e) { toast.err(String(e)); }
   };
 
   const allSel = rows.length > 0 && rows.every((r) => r.selected);
   const selCount = rows.filter((r) => r.selected).length;
+  const skippedCount = skipped.duplicateLines + skipped.existingDuplicates;
 
   return (
     <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
@@ -3418,7 +3454,11 @@ function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
                   rows={12}
                   className="mono"
                   value={text}
-                  onChange={(e) => setText(e.target.value)}
+                  onChange={(e) => {
+                    setText(e.target.value);
+                    setParseIssues([]);
+                    setSkipped({ duplicateLines: 0, existingDuplicates: 0 });
+                  }}
                   placeholder={`socks5://user:pass@host:1080
 user:pass@host:1080
 host:1080:user:pass     # country=PL
@@ -3427,8 +3467,24 @@ host:8080               # no auth
                 />
               </label>
               <p className="muted small">
-                Duplicates (same host:port:user) are skipped on save.
+                Invalid lines must be fixed. Duplicates use type, host, port, and username and are skipped automatically.
               </p>
+              {parseIssues.length > 0 && (
+                <div className="bulk-parse-errors" role="alert">
+                  <strong>Invalid proxy format</strong>
+                  <ul>
+                    {parseIssues.slice(0, 6).map((issue) => (
+                      <li key={`${issue.line}:${issue.reason}`}>Line {issue.line}: {issue.reason}</li>
+                    ))}
+                    {parseIssues.length > 6 && <li>And {parseIssues.length - 6} more invalid lines</li>}
+                  </ul>
+                </div>
+              )}
+              {skippedCount > 0 && rows.length === 0 && (
+                <div className="bulk-dedupe-note">
+                  Found {skippedCount} duplicate{skippedCount === 1 ? "" : "s"}: {skipped.duplicateLines} repeated in this input, {skipped.existingDuplicates} already saved. They will not be imported.
+                </div>
+              )}
             </>
           ) : (
             <>
@@ -3444,7 +3500,13 @@ host:8080               # no auth
                   <span>{selCount} of {rows.length} selected</span>
                 </label>
                 <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-                  <button className="btn-ghost btn-sm" onClick={() => setRows([])}>← Back</button>
+                  <button
+                    className="btn-ghost btn-sm"
+                    onClick={() => {
+                      setRows([]);
+                      setSkipped({ duplicateLines: 0, existingDuplicates: 0 });
+                    }}
+                  >← Back</button>
                   <button className="btn-ghost btn-sm" onClick={testAll} disabled={busy}>
                     {busy ? "Testing…" : <><Icon.Refresh /> Test all</>}
                   </button>
@@ -3461,6 +3523,12 @@ host:8080               # no auth
                   </button>
                 </div>
               </div>
+              {skippedCount > 0 && (
+                <div className="bulk-dedupe-note">
+                  Skipped {skippedCount} duplicate{skippedCount === 1 ? "" : "s"}
+                  {skipped.existingDuplicates > 0 ? ` (${skipped.existingDuplicates} already saved)` : ""}.
+                </div>
+              )}
               <div className="bulk-preview-list">
                 {rows.map((r, i) => (
                   <div key={`${r.entry.host}:${r.entry.port}:${i}`} className={`bulk-row bulk-row-${r.status}`}>
