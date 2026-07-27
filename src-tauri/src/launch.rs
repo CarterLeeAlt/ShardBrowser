@@ -31,7 +31,34 @@ pub async fn launch_profile(
     headless: bool,
 ) -> Result<LaunchOutcome> {
     let bin = resolve_binary()?;
-    let stored = profile::load_raw(profile_id)?;
+    let mut stored = profile::load_raw(profile_id)?;
+    // Older editor builds reconstructed an existing profile from its donor
+    // fingerprint whenever an unrelated field such as NAME changed. That
+    // restored the donor's fixed screen/window dimensions and made Chromium's
+    // window impossible to maximize or resize beyond those bounds. Detect that
+    // exact rollback and re-apply the same real-display clamp used at profile
+    // creation. Persist best-effort; the repaired in-memory config still makes
+    // this launch usable if the disk update happens to fail.
+    if display_matches_fingerprint_template(&stored) {
+        if let Some(window) = crate::main_window() {
+            let before_screen = stored.config.get("screen").cloned();
+            let before_window = stored.config.get("window").cloned();
+            crate::clamp_screen_to_real_display(&window, &mut stored.config);
+            let changed = before_screen != stored.config.get("screen").cloned()
+                || before_window != stored.config.get("window").cloned();
+            if changed {
+                if let Err(error) = profile::save_raw(&mut stored) {
+                    eprintln!(
+                        "[launcher] repaired display config for {profile_id} in memory but could not persist it: {error}"
+                    );
+                } else {
+                    eprintln!(
+                        "[launcher] repaired donor display bounds for renamed profile {profile_id}"
+                    );
+                }
+            }
+        }
+    }
     let udd = profile::user_data_dir(profile_id)?;
     let profile_name = stored
         .config
@@ -267,6 +294,26 @@ pub async fn launch_profile(
     };
 
     Ok(LaunchOutcome { pid, cdp })
+}
+
+/// True only when both stored display blocks exactly match the bound library
+/// donor. A normally created profile has already been clamped and therefore no
+/// longer matches; the equality is the migration marker left by the old editor.
+fn display_matches_fingerprint_template(stored: &profile::StoredProfile) -> bool {
+    let Some(preset_id) = stored.meta.gpu_preset_id.as_deref() else {
+        return false;
+    };
+    let Ok(Some(fingerprint)) = crate::fingerprints::get(preset_id) else {
+        return false;
+    };
+    let Some(template) = fingerprint.payload.as_object() else {
+        return false;
+    };
+
+    ["screen", "window"].into_iter().all(|key| {
+        let stored_value = stored.config.get(key);
+        stored_value.is_some() && stored_value == template.get(key)
+    })
 }
 
 fn browser_command(binary: &Path, args: &[OsString]) -> tokio::process::Command {

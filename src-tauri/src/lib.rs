@@ -365,7 +365,7 @@ pub(crate) fn randomize_hardware(payload: &mut serde_json::Map<String, Value>) {
 }
 
 /// Keep profile.screen aligned with the real Windows display.
-fn clamp_screen_to_real_display(
+pub(crate) fn clamp_screen_to_real_display(
     window: &tauri::WebviewWindow,
     payload: &mut serde_json::Map<String, Value>,
 ) {
@@ -444,12 +444,33 @@ fn profile_save(
         .and_then(|v| v.as_str())
         .map(|s| s.is_empty())
         .unwrap_or(true);
-    if is_new {
+    let preset_changed = if is_new {
+        false
+    } else {
+        let id = payload
+            .get("_meta")
+            .and_then(|m| m.get("id"))
+            .and_then(|v| v.as_str())
+            .ok_or("existing profile payload is missing its id")?;
+        let incoming_preset = payload
+            .get("_meta")
+            .and_then(|m| m.get("gpu_preset_id"))
+            .and_then(|v| v.as_str());
+        profile::load_raw(id)
+            .map_err(|e| e.to_string())?
+            .meta
+            .gpu_preset_id
+            .as_deref()
+            != incoming_preset
+    };
+    if is_new || preset_changed {
         let obj = payload
             .as_object_mut()
             .ok_or("profile payload must be an object")?;
-        // The editor already obtained one coherent hardware/platform pick
-        // from Rust. Validate and preserve it instead of randomizing again.
+        // A new fingerprint identity already contains one coherent hardware /
+        // platform pick from Rust. Validate it and clamp its donor display to
+        // the real monitor. Ordinary edits retain the existing durable
+        // screen/window block and therefore skip this identity initialization.
         validate_hardware_selection(obj)?;
         clamp_screen_to_real_display(&window, obj);
     }
