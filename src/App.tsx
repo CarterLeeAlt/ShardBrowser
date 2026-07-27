@@ -1703,7 +1703,7 @@ function BrowsersView() {
         </div>
         <div className="page-actions">
           {selected.size > 0 && (
-            <div className="bulk-bar">
+            <div className="bulk-bar bulk-bar-floating">
               <span>{selected.size} selected</span>
               <button className="btn-ghost btn-sm" onClick={bulkLaunch}><Icon.Play /> Launch</button>
               <button className="btn-ghost btn-sm" onClick={bulkStop}><Icon.Stop /> Stop</button>
@@ -2950,7 +2950,7 @@ function ProxiesView() {
         <h1>Proxies</h1>
         <div className="page-actions">
           {proxySel.size > 0 && (
-            <div className="bulk-bar">
+            <div className="bulk-bar bulk-bar-floating">
               <span>{proxySel.size} selected</span>
               <button className="btn-ghost btn-sm" onClick={bulkTest}><Icon.Refresh /> Test</button>
               <button className="btn-ghost btn-sm" onClick={bulkExport}><Icon.Upload /> Export</button>
