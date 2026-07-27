@@ -4151,7 +4151,7 @@ function RuntimeUpdateCard() {
     : "Compare the installed browser engine with the latest runtime manifest.";
 
   return (
-    <div className="card runtime-update-card" style={{ marginBottom: 14 }}>
+    <div className="card settings-card runtime-update-card">
       <div className="runtime-update-head">
         <div>
           <h3>Runtime update check</h3>
@@ -5278,7 +5278,7 @@ function SettingsView() {
       <div className="page-title"><h1>Settings</h1></div>
 
 
-      <div className="card" style={{ marginBottom: 14 }}>
+      <div className="card settings-card">
         <h3>Proxy geo checker</h3>
         <p className="muted small">Which free public IP-geo service to hit when you press the proxy <strong>Test</strong> button. All three are no-key, rate-limited.</p>
         <label>
@@ -5291,7 +5291,7 @@ function SettingsView() {
         </label>
       </div>
 
-      <div className="card" style={{ marginBottom: 14 }}>
+      <div className="card settings-card">
         <h3>Screen resolution</h3>
         <p className="muted small">
           <strong>From fingerprint</strong> reports the screen carried in the bound profile (recommended for anti-detect coherence).
@@ -5309,7 +5309,7 @@ function SettingsView() {
         </label>
       </div>
 
-      <div className="card" style={{ marginBottom: 14 }}>
+      <div className="card settings-card">
         <h3>Automation API</h3>
         <p className="muted small">
           Local HTTP API (axum) for scripting — create/launch/close profiles
@@ -5351,18 +5351,18 @@ function SettingsView() {
               <span className="lbl">Bearer token</span>
               <CopyField value={api.token} secret />
             </label>
-            <div className="row-inline" style={{ marginTop: 10, gap: 10 }}>
+            <div className="row-inline settings-card-inline-action">
               <button className="btn-ghost" onClick={regenToken}>Regenerate token</button>
               <span className="muted small">Invalidates the current token immediately.</span>
             </div>
-            <p className="muted small" style={{ marginTop: 8 }}>
+            <p className="muted small settings-card-footnote">
               Send it as <code>Authorization: Bearer &lt;token&gt;</code>.
             </p>
           </>
         )}
       </div>
 
-      <div className="card" style={{ marginBottom: 14 }}>
+      <div className="card settings-card">
         <h3>MCP server</h3>
         <p className="muted small">
           Download the <strong>MCP</strong> server source (lets an AI client drive
