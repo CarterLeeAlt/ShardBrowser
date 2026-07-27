@@ -801,8 +801,11 @@ function Sidebar({
       label: "Workspace",
       items: [
         { id: "browsers", label: "Browsers", svg: <IconShard /> },
-        { id: "proxies", label: "Proxies", svg: <IconWire /> },
       ],
+    },
+    {
+      label: "PROXYLIST",
+      items: [{ id: "proxies", label: "Proxies", svg: <IconWire /> }],
     },
     {
       label: "Library",
@@ -2933,7 +2936,7 @@ function ProxiesView() {
 
   return (
     <section className="page">
-      <Topbar crumbs={["Workspace", "Proxies"]} search={search} onSearch={setSearch} />
+      <Topbar crumbs={["PROXYLIST", "Proxies"]} search={search} onSearch={setSearch} />
       <div className="page-title">
         <h1>Proxies</h1>
         <div className="page-actions">
