@@ -1152,6 +1152,92 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   margin-bottom: 4px;
 }
 .settings-page .card label + label { margin-top: 10px; }
+
+.runtime-update-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+.runtime-update-head h3 { margin-bottom: 5px; }
+.runtime-update-head p { margin: 0; line-height: 1.5; }
+.runtime-update-check {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.runtime-update-check:disabled svg { animation: shardx-spin .8s linear infinite; }
+.runtime-update-list {
+  margin-top: 16px;
+  overflow: hidden;
+  background: var(--bg-2);
+  border: 1px solid var(--bd-1);
+  border-radius: var(--radius);
+}
+.runtime-update-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 20px;
+  min-height: 52px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--bd-1);
+}
+.runtime-update-row:last-child { border-bottom: 0; }
+.runtime-update-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 3px;
+}
+.runtime-update-label { color: var(--tx-1); font-size: 12.5px; }
+.runtime-update-detail {
+  overflow: hidden;
+  color: var(--tx-3);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.runtime-update-state {
+  min-width: 104px;
+  padding: 3px 8px;
+  border: 1px solid var(--bd-2);
+  border-radius: 999px;
+  font-size: 11px;
+  text-align: center;
+  white-space: nowrap;
+}
+.runtime-update-unchecked { color: var(--tx-3); background: var(--bg-1); }
+.runtime-update-current {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 10%, transparent);
+  border-color: color-mix(in srgb, var(--ok) 32%, var(--bd-1));
+}
+.runtime-update-available {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  border-color: color-mix(in srgb, var(--warn) 34%, var(--bd-1));
+}
+.runtime-update-missing {
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 10%, transparent);
+  border-color: color-mix(in srgb, var(--err) 32%, var(--bd-1));
+}
+.runtime-update-error {
+  margin-top: 10px;
+  padding: 8px 10px;
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--err) 28%, var(--bd-1));
+  border-radius: var(--radius);
+  font-size: 11.5px;
+}
+.runtime-update-note {
+  margin-top: 10px;
+  color: var(--tx-4);
+  font-size: 11px;
+}
 /* read-only value with a copy glyph tucked inside the input's right edge */
 .copy-field { position: relative; width: 100%; }
 .copy-field input { width: 100%; padding-right: 34px; }
@@ -1881,12 +1967,18 @@ button.status-pill.status-link:active { transform: translateY(1px); }
   margin-top: 18px;
   padding: 9px 10px;
   color: var(--err);
-  background: var(--err-dim);
+  background: color-mix(in srgb, var(--err) 9%, transparent);
   border: 1px solid color-mix(in srgb, var(--err) 30%, var(--bd-1));
   border-radius: var(--radius);
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+.runtime-repair-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 20px;
 }
 
 /* ===== dialog (proxy create) ===== */

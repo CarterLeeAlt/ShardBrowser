@@ -3897,11 +3897,10 @@ type RtSpec = {
 type RtStatus = {
   installed: boolean;
   binary_path: string | null;
-  installed_browser_etag: string | null;
-  remote_browser_etag: string | null;
-  update_available: boolean;
+  initialized: boolean;
   spec: RtSpec | null;
   fingerprints_installed: boolean;
+  widevine_installed: boolean;
 };
 type RtProgress = {
   label: string;
@@ -3911,13 +3910,13 @@ type RtProgress = {
   percent: number;
 };
 
-type RtGatePhase = "checking" | "installing" | "ready";
-type RtInstallMode = "setup" | "repair" | "update";
-const RUNTIME_UPDATE_PENDING_KEY = "shardx-runtime-update-pending";
+type RtGatePhase = "checking" | "repair-required" | "installing" | "ready";
+type RtInstallMode = "setup" | "repair";
 
 function FirstRunGate({ children }: { children: ReactNode }) {
   const [phase, setPhase] = useState<RtGatePhase>("checking");
   const [installMode, setInstallMode] = useState<RtInstallMode>("setup");
+  const [repairRequested, setRepairRequested] = useState(false);
   const [showChecking, setShowChecking] = useState(false);
   const [prog, setProg] = useState<RtProgress | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -3936,7 +3935,7 @@ function FirstRunGate({ children }: { children: ReactNode }) {
     let cancelled = false;
     let unProg: (() => void) | undefined;
 
-    const installRuntime = async (mode: RtInstallMode) => {
+    const installRuntime = async (mode: RtInstallMode, force: boolean) => {
       if (cancelled) return;
       setInstallMode(mode);
       setPhase("installing");
@@ -3955,12 +3954,11 @@ function FirstRunGate({ children }: { children: ReactNode }) {
       unProg = stopProgress;
 
       try {
-        const result = await invoke<RtStatus>("runtime_install", { force: false });
+        const result = await invoke<RtStatus>("runtime_install", { force });
         if (cancelled) return;
-        if (!result.installed || !result.fingerprints_installed) {
+        if (!result.installed || !result.fingerprints_installed || !result.widevine_installed) {
           throw new Error("Browser runtime installation did not complete");
         }
-        localStorage.removeItem(RUNTIME_UPDATE_PENDING_KEY);
         setProg(null);
         setPhase("ready");
       } catch (e: any) {
@@ -3968,19 +3966,10 @@ function FirstRunGate({ children }: { children: ReactNode }) {
       }
     };
 
-    const checkRemoteUpdate = async () => {
-      try {
-        const status = await invoke<RtStatus>("runtime_status");
-        if (cancelled || !status.update_available) return;
-        localStorage.setItem(RUNTIME_UPDATE_PENDING_KEY, "1");
-        toast.info("Browser runtime update available. Restart ShardX to install it.");
-      } catch {
-        // Remote update discovery must never delay or break an otherwise valid
-        // local installation. The next launch will try again.
-      }
-    };
-
     (async () => {
+      // Remove the pending marker used by older builds. Runtime updates are now
+      // checked only from Settings and are never installed automatically.
+      localStorage.removeItem("shardx-runtime-update-pending");
       let status: RtStatus;
       try {
         status = await invoke<RtStatus>("runtime_local_status");
@@ -3996,27 +3985,31 @@ function FirstRunGate({ children }: { children: ReactNode }) {
         return;
       }
 
-      const complete = status.installed && status.fingerprints_installed;
-      const pendingUpdate = localStorage.getItem(RUNTIME_UPDATE_PENDING_KEY) === "1";
-      if (complete && !status.update_available && !pendingUpdate) {
+      const complete = status.installed
+        && status.fingerprints_installed
+        && status.widevine_installed;
+      if (complete) {
         setPhase("ready");
-        void checkRemoteUpdate();
         return;
       }
 
-      const mode: RtInstallMode = !status.installed
-        ? "setup"
-        : !status.fingerprints_installed
-          ? "repair"
-          : "update";
-      await installRuntime(mode);
+      // Only a genuinely new installation starts downloading automatically.
+      // A previously initialized but damaged runtime waits for explicit repair.
+      if (!status.initialized && !status.installed) {
+        await installRuntime("setup", false);
+      } else if (repairRequested) {
+        await installRuntime("repair", true);
+      } else {
+        setInstallMode("repair");
+        setPhase("repair-required");
+      }
     })();
 
     return () => {
       cancelled = true;
       unProg?.();
     };
-  }, []);
+  }, [repairRequested]);
 
   if (phase === "ready") {
     return <>{children}</>;
@@ -4029,10 +4022,10 @@ function FirstRunGate({ children }: { children: ReactNode }) {
         title: "Starting ShardX",
         description: "Checking the local browser runtime…",
       }
-    : installMode === "update"
+    : phase === "repair-required"
       ? {
-          title: "Updating ShardX browser",
-          description: "Installing the latest browser runtime for this launcher.",
+          title: "Browser runtime needs repair",
+          description: "Required local files are missing or incomplete. Nothing will be downloaded until you choose Repair.",
         }
       : installMode === "repair"
         ? {
@@ -4077,6 +4070,125 @@ function FirstRunGate({ children }: { children: ReactNode }) {
         {err && (
           <div className="runtime-gate-error">{err}</div>
         )}
+        {phase === "repair-required" && !err && (
+          <button className="btn-primary runtime-repair-btn" onClick={() => setRepairRequested(true)}>
+            <Icon.Refresh /> Repair browser runtime
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+type RuntimeUpdateCheck = {
+  chromium_installed: boolean;
+  chromium_installed_version: string | null;
+  chromium_latest_version: string | null;
+  chromium_update_available: boolean;
+  fingerprints_installed: boolean;
+  fingerprints_update_available: boolean;
+  widevine_installed: boolean;
+  widevine_update_available: boolean;
+};
+
+type RuntimeUpdateTone = "unchecked" | "current" | "available" | "missing";
+
+function RuntimeUpdateRow({
+  label,
+  detail,
+  tone,
+}: {
+  label: string;
+  detail: string;
+  tone: RuntimeUpdateTone;
+}) {
+  const status = tone === "current"
+    ? "Up to date"
+    : tone === "available"
+      ? "Update available"
+      : tone === "missing"
+        ? "Missing files"
+        : "Not checked";
+  return (
+    <div className="runtime-update-row">
+      <div className="runtime-update-copy">
+        <span className="runtime-update-label">{label}</span>
+        <span className="runtime-update-detail">{detail}</span>
+      </div>
+      <span className={`runtime-update-state runtime-update-${tone}`}>{status}</span>
+    </div>
+  );
+}
+
+function RuntimeUpdateCard() {
+  const [checking, setChecking] = useState(false);
+  const [result, setResult] = useState<RuntimeUpdateCheck | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const check = async () => {
+    setChecking(true);
+    setResult(null);
+    setError(null);
+    try {
+      setResult(await invoke<RuntimeUpdateCheck>("runtime_check_updates"));
+    } catch (e: any) {
+      setError(typeof e === "string" ? e : (e?.message ?? String(e)));
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const tone = (installed: boolean, available: boolean): RuntimeUpdateTone => {
+    if (!result) return "unchecked";
+    if (!installed) return "missing";
+    return available ? "available" : "current";
+  };
+
+  const chromiumDetail = result
+    ? result.chromium_installed
+      ? `Installed ${result.chromium_installed_version ?? "unknown"} · Latest ${result.chromium_latest_version ?? "unknown"}`
+      : "The local Chromium runtime is incomplete."
+    : "Compare the installed browser engine with the latest runtime manifest.";
+
+  return (
+    <div className="card runtime-update-card" style={{ marginBottom: 14 }}>
+      <div className="runtime-update-head">
+        <div>
+          <h3>Runtime update check</h3>
+          <p className="muted small">
+            Checks run only when you press the button. ShardX will not download or install updates automatically.
+          </p>
+        </div>
+        <button className="btn-ghost runtime-update-check" onClick={check} disabled={checking}>
+          <Icon.Refresh /> {checking ? "Checking…" : "Check for updates"}
+        </button>
+      </div>
+
+      <div className="runtime-update-list">
+        <RuntimeUpdateRow
+          label="Chromium browser runtime"
+          detail={chromiumDetail}
+          tone={tone(result?.chromium_installed ?? true, result?.chromium_update_available ?? false)}
+        />
+        <RuntimeUpdateRow
+          label="Fingerprint library"
+          detail={result?.fingerprints_installed === false
+            ? "The bundled fingerprint templates are incomplete."
+            : "Bundled multi-platform fingerprint templates."}
+          tone={tone(result?.fingerprints_installed ?? true, result?.fingerprints_update_available ?? false)}
+        />
+        <RuntimeUpdateRow
+          label="Widevine CDM"
+          detail={result?.widevine_installed === false
+            ? "Required Widevine runtime files are incomplete."
+            : "DRM component bundled with the browser runtime."}
+          tone={tone(result?.widevine_installed ?? true, result?.widevine_update_available ?? false)}
+        />
+      </div>
+
+      {error && <div className="runtime-update-error">{error}</div>}
+      <div className="runtime-update-note">
+        ShardX Launcher itself is excluded from update checks. This card never downloads or installs files.
       </div>
     </div>
   );
@@ -5262,6 +5374,8 @@ function SettingsView() {
           <Icon.Download /> {mcpBusy ? "Downloading…" : "Download MCP server"}
         </button>
       </div>
+
+      <RuntimeUpdateCard />
 
       <div className="card-actions">
         <button className="btn-primary" onClick={async () => { await save(); refreshApi(); }}><ShardMini /> Save settings</button>

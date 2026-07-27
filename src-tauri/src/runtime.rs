@@ -72,22 +72,17 @@ struct Manifest {
     browser_etag: Option<String>,
     widevine_etag: Option<String>,
     fingerprints_etag: Option<String>,
-    /// Chromium version the *already-created* profiles were last migrated to.
-    /// Lets us bump saved profiles' UA + client_hints when the engine updates,
-    /// independent of the fingerprint-library seed.
+    /// Chromium version the already-created profiles were last migrated to.
+    /// Written after first-time setup or an explicit repair.
     #[serde(default)]
     applied_chromium_version: Option<String>,
     /// Signature (`<version>|<grease_brand>|<grease_version>`) of the engine
-    /// descriptor the profiles/fingerprints were last migrated against. Migration
-    /// re-runs whenever this changes — so adding grease (or any future field) to
-    /// the manifest auto-triggers a re-migration even for users already on the
-    /// current `applied_chromium_version`. No bump-the-constant ceremony.
+    /// descriptor used by the last setup or explicit repair migration.
     #[serde(default)]
     applied_signature: Option<String>,
     /// Chromium version of the engine binary currently extracted on disk.
-    /// The engine update is detected by comparing THIS to the manifest's
-    /// `chromium_version` — robust where the etag check failed (e.g. a user who
-    /// updated the app but whose stored etag already matched).
+    /// Manual update checks compare this value to the manifest's
+    /// `chromium_version`; startup never performs that comparison.
     #[serde(default)]
     installed_chromium_version: Option<String>,
 }
@@ -160,12 +155,22 @@ fn save_manifest(m: &Manifest) -> Result<()> {
 pub struct RuntimeStatus {
     pub installed: bool,
     pub binary_path: Option<PathBuf>,
-    pub installed_browser_etag: Option<String>,
-    pub remote_browser_etag: Option<String>,
-    pub update_available: bool,
+    pub initialized: bool,
     pub spec: PlatformSpec,
-    /// True once the fingerprint library bundle has been extracted.
     pub fingerprints_installed: bool,
+    pub widevine_installed: bool,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct RuntimeUpdateStatus {
+    pub chromium_installed: bool,
+    pub chromium_installed_version: Option<String>,
+    pub chromium_latest_version: Option<String>,
+    pub chromium_update_available: bool,
+    pub fingerprints_installed: bool,
+    pub fingerprints_update_available: bool,
+    pub widevine_installed: bool,
+    pub widevine_update_available: bool,
 }
 
 fn fingerprints_are_installed(local: &Manifest) -> bool {
@@ -183,25 +188,30 @@ fn fingerprints_are_installed(local: &Manifest) -> bool {
             .unwrap_or(false)
 }
 
-fn status_from_manifest(
-    installed: bool,
-    local: Manifest,
-    manifest: RemoteManifest,
-    update_available: bool,
-) -> RuntimeStatus {
-    let spec = host_spec();
-    let remote = manifest.archives.get(&spec.browser.key).cloned();
-    // Stamp present AND dir has at least one .json (catches user-nuked dir).
-    let fingerprints_installed = fingerprints_are_installed(&local);
+fn widevine_is_installed(local: &Manifest) -> bool {
+    local.widevine_etag.is_some()
+        && runtime_dir()
+            .map(|d| {
+                d.join("ShardX-Windows")
+                    .join("WidevineCdm")
+                    .join("manifest.json")
+                    .is_file()
+            })
+            .unwrap_or(false)
+}
 
+fn local_status(local: &Manifest) -> RuntimeStatus {
+    let installed = binary_path()
+        .ok()
+        .and_then(|p| fs::metadata(&p).ok())
+        .is_some_and(|meta| meta.is_file() && meta.len() > 0);
     RuntimeStatus {
         installed,
         binary_path: if installed { binary_path().ok() } else { None },
-        installed_browser_etag: local.browser_etag,
-        remote_browser_etag: remote,
-        update_available,
-        spec,
-        fingerprints_installed,
+        initialized: local.browser_etag.is_some(),
+        spec: host_spec(),
+        fingerprints_installed: fingerprints_are_installed(local),
+        widevine_installed: widevine_is_installed(local),
     }
 }
 
@@ -221,54 +231,58 @@ fn bundled_manifest() -> RemoteManifest {
     serde_json::from_str(BUNDLED_MANIFEST_JSON).unwrap_or_default()
 }
 
-/// Fetch the version manifest (GitHub raw) — one request yielding every
-/// archive's current etag + the chromium version, so install/status never poll
-/// R2/S3 per-archive. Empty/None when unreachable.
-async fn fetch_manifest() -> RemoteManifest {
-    async fn inner() -> Option<RemoteManifest> {
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(4))
-            .timeout(std::time::Duration::from_secs(8))
-            .build()
-            .ok()?;
-        let resp = client.get(MANIFEST_URL).send().await.ok()?;
-        if !resp.status().is_success() {
-            return None;
-        }
-        let v: serde_json::Value = resp.json().await.ok()?;
-        let archives = v
-            .get("archives")
-            .and_then(|a| a.as_object())
-            .map(|o| {
-                o.iter()
-                    .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let str_field = |k: &str| v.get(k).and_then(|s| s.as_str()).map(String::from);
-        Some(RemoteManifest {
-            archives,
-            chromium_version: str_field("chromium_version"),
-            grease_brand: str_field("grease_brand"),
-            grease_version: str_field("grease_version"),
-        })
+/// Fetch the single remote manifest used for every manually requested update
+/// comparison. Startup integrity checks never call this function.
+async fn fetch_remote_manifest() -> Option<RemoteManifest> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(4))
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .ok()?;
+    let resp = client.get(MANIFEST_URL).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
     }
+    let v: serde_json::Value = resp.json().await.ok()?;
+    let archives = v
+        .get("archives")
+        .and_then(|a| a.as_object())
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let str_field = |k: &str| v.get(k).and_then(|s| s.as_str()).map(String::from);
+    Some(RemoteManifest {
+        archives,
+        chromium_version: str_field("chromium_version"),
+        grease_brand: str_field("grease_brand"),
+        grease_version: str_field("grease_version"),
+    })
+}
+
+fn prefer_newest_manifest(remote: RemoteManifest) -> RemoteManifest {
     let bundled = bundled_manifest();
-    match inner().await {
-        Some(manifest) => {
-            let bundled_is_newer = bundled.chromium_version.as_deref().is_some_and(|candidate| {
-                version_is_newer(candidate, manifest.chromium_version.as_deref())
-            });
-            if bundled_is_newer {
-                eprintln!("[runtime] remote manifest is older than bundled metadata; using bundled");
-                bundled
-            } else {
-                manifest
-            }
-        }
+    let bundled_is_newer = bundled.chromium_version.as_deref().is_some_and(|candidate| {
+        version_is_newer(candidate, remote.chromium_version.as_deref())
+    });
+    if bundled_is_newer {
+        eprintln!("[runtime] remote manifest is older than bundled metadata; using bundled");
+        bundled
+    } else {
+        remote
+    }
+}
+
+/// First-time setup and explicit repair may need CDN metadata. They fall back
+/// to the manifest bundled with the launcher when GitHub is unreachable.
+async fn fetch_manifest() -> RemoteManifest {
+    match fetch_remote_manifest().await {
+        Some(remote) => prefer_newest_manifest(remote),
         None => {
             eprintln!("[runtime] remote manifest unavailable; using bundled metadata");
-            bundled
+            bundled_manifest()
         }
     }
 }
@@ -373,84 +387,53 @@ fn migrate_all_to(
     n
 }
 
-/// Startup hook: migrate saved profiles + the fingerprint library (bundled +
-/// user-added) to the manifest's engine descriptor when not already done. One
-/// GitHub-manifest GET (never S3). Guarded by a signature of
-/// `<version>|<grease_brand>|<grease_version>`, so a change to the grease (or any
-/// future manifest field) re-triggers migration even for users already on the
-/// current version — no version bump or constant needed. Also covers users
-/// whose engine auto-updated via the etag path without an explicit install.
-pub async fn ensure_profiles_migrated() {
-    let m = fetch_manifest().await;
-    let Some(target) = m.chromium_version.clone() else { return };
-    let sig = format!(
-        "{target}|{}|{}",
-        m.grease_brand.as_deref().unwrap_or(""),
-        m.grease_version.as_deref().unwrap_or(""),
-    );
-    let mut local = load_manifest();
-    if local.applied_signature.as_deref() == Some(sig.as_str()) {
-        return;
-    }
-    let n = migrate_all_to(&target, m.grease_brand.as_deref(), m.grease_version.as_deref());
-    if n > 0 {
-        eprintln!("[runtime] migrated {n} profile/fingerprint file(s) to {sig}");
-    }
-    local.applied_chromium_version = Some(target);
-    local.applied_signature = Some(sig);
-    let _ = save_manifest(&local);
+/// Fast startup integrity check. It only reads local files and never contacts
+/// GitHub or compares versions.
+#[tauri::command]
+pub fn runtime_local_status() -> Result<RuntimeStatus, String> {
+    let local = load_manifest();
+    Ok(local_status(&local))
 }
 
+/// User-triggered update check. One manifest request compares Chromium,
+/// fingerprint templates and Widevine without downloading or installing files.
 #[tauri::command]
-pub async fn runtime_status() -> Result<RuntimeStatus, String> {
-    let installed = binary_path().map(|p| p.exists()).unwrap_or(false);
+pub async fn runtime_check_updates() -> Result<RuntimeUpdateStatus, String> {
+    let remote = fetch_remote_manifest()
+        .await
+        .ok_or_else(|| "Unable to reach the runtime update manifest".to_string())?;
+    let manifest = prefer_newest_manifest(remote);
+    let spec = host_spec();
     let local = load_manifest();
-    // A clean install does not need a network round-trip merely to discover
-    // that the browser is absent. The install command fetches fresh metadata
-    // next, with a bounded bundled fallback.
-    let manifest = if installed {
-        fetch_manifest().await
-    } else {
-        bundled_manifest()
-    };
-    // Update is detected by VERSION (a newer manifest version vs the engine on
-    // disk), not by etag — robust for users whose stored etag already matched
-    // but whose binary never actually updated. Manifest unreachable
-    // (chromium_version None) → assume up to date.
-    let update_available = installed
+    let status = local_status(&local);
+    let installed_version = effective_installed_version(&local);
+
+    let chromium_update_available = status.installed
         && manifest
             .chromium_version
             .as_deref()
-            .is_some_and(|candidate| {
-                version_is_newer(candidate, effective_installed_version(&local).as_deref())
-            });
+            .is_some_and(|candidate| version_is_newer(candidate, installed_version.as_deref()));
+    let fingerprints_update_available = status.fingerprints_installed
+        && manifest
+            .archives
+            .get(FINGERPRINTS_ARCHIVE_KEY)
+            .is_some_and(|latest| local.fingerprints_etag.as_deref() != Some(latest.as_str()));
+    let widevine_update_available = status.widevine_installed
+        && manifest
+            .archives
+            .get(&spec.widevine.key)
+            .is_some_and(|latest| local.widevine_etag.as_deref() != Some(latest.as_str()));
 
-    Ok(status_from_manifest(
-        installed,
-        local,
-        manifest,
-        update_available,
-    ))
-}
-
-/// Fast startup check that only reads local files and bundled release metadata.
-/// Remote update discovery is intentionally kept out of the launch-critical path.
-#[tauri::command]
-pub fn runtime_local_status() -> Result<RuntimeStatus, String> {
-    let installed = binary_path().map(|p| p.exists()).unwrap_or(false);
-    let local = load_manifest();
-    let manifest = bundled_manifest();
-    let update_available = installed
-        && manifest.chromium_version.as_deref().is_some_and(|candidate| {
-            version_is_newer(candidate, effective_installed_version(&local).as_deref())
-        });
-
-    Ok(status_from_manifest(
-        installed,
-        local,
-        manifest,
-        update_available,
-    ))
+    Ok(RuntimeUpdateStatus {
+        chromium_installed: status.installed,
+        chromium_installed_version: installed_version,
+        chromium_latest_version: manifest.chromium_version,
+        chromium_update_available,
+        fingerprints_installed: status.fingerprints_installed,
+        fingerprints_update_available,
+        widevine_installed: status.widevine_installed,
+        widevine_update_available,
+    })
 }
 
 #[tauri::command]
@@ -459,25 +442,13 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
     let base = runtime_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
 
-    let installed_now = binary_path().map(|p| p.exists()).unwrap_or(false);
     let local = load_manifest();
+    let installed_now = local_status(&local).installed;
     let manifest = fetch_manifest().await;
 
-    // Re-download the engine when the manifest has a newer chromium_version
-    // (or when missing / forced). VERSION-based, not etag — so the update
-    // actually fires for already-installed users on a bump. Manifest
-    // unreachable (None) → don't force a re-download.
-    let need_browser = if force || !installed_now {
-        true
-    } else {
-        match &manifest.chromium_version {
-            Some(candidate) => version_is_newer(
-                candidate,
-                effective_installed_version(&local).as_deref(),
-            ),
-            None => false,
-        }
-    };
+    // Setup installs a missing engine; repair explicitly forces a coherent
+    // reinstall. A newer remote version alone never triggers installation.
+    let need_browser = force || !installed_now;
     let browser_etag = if need_browser {
         // Wipe the old engine tree first. The archive extracts *over* the
         // existing dir but never deletes files the new version dropped — most
@@ -492,9 +463,10 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
         local.browser_etag.clone().unwrap_or_default()
     };
 
-    // Re-download Widevine only when the browser changed or the manifest lacks
-    // a stamp. Windows x64 always ships the CDM archive.
-    let widevine_etag = if need_browser || local.widevine_etag.is_none() {
+    // Repair Widevine when its required manifest is missing, regardless of the
+    // persisted ETag. This is integrity repair, not an update check.
+    let repair_widevine = !widevine_is_installed(&local);
+    let widevine_etag = if need_browser || repair_widevine {
         let etag = download_and_extract(&window, &spec.widevine, &base)
             .await
             .map_err(|e| e.to_string())?;
