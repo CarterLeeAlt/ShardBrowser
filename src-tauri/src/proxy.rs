@@ -8,8 +8,31 @@ use std::path::PathBuf;
 
 const LATENCY_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const LATENCY_TIMEOUT_ERROR: &str = "proxy latency test timed out after 5 seconds";
+pub const TEST_CANCELLED_ERROR: &str = "proxy test cancelled because the proxy changed";
 const BULK_TEST_CONCURRENCY: usize = 5;
-static TEST_RESULT_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+const BACKGROUND_TEST_CONCURRENCY: usize = 3;
+static TEST_CONCURRENCY: std::sync::OnceLock<tokio::sync::Semaphore> =
+    std::sync::OnceLock::new();
+static BACKGROUND_TEST_LIMIT: std::sync::OnceLock<tokio::sync::Semaphore> =
+    std::sync::OnceLock::new();
+static PROXY_TEST_REVISIONS: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<String, tokio::sync::watch::Sender<u64>>>,
+> = std::sync::OnceLock::new();
+static PROXY_TEST_LOCKS: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::OnceLock::new();
+static MANUAL_TEST_COUNTS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, usize>>> =
+    std::sync::OnceLock::new();
+static MANUAL_TEST_EPOCH: std::sync::OnceLock<tokio::sync::watch::Sender<u64>> =
+    std::sync::OnceLock::new();
+static PROXY_STORE_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+static PROXY_HISTORY_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+#[derive(Clone, Copy)]
+enum TestLane {
+    Manual,
+    Background,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -19,7 +42,7 @@ pub enum ProxyKind {
     Https,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProxyEntry {
     #[serde(default)]
     pub id: String,
@@ -37,6 +60,182 @@ pub struct ProxyEntry {
     /// Free-form note.
     #[serde(default)]
     pub notes: String,
+}
+
+pub struct PreparedProxyTest {
+    entry: ProxyEntry,
+    revision: Option<u64>,
+}
+
+struct TestTicket {
+    expected_revision: u64,
+    receiver: tokio::sync::watch::Receiver<u64>,
+}
+
+struct ManualTestGuard {
+    proxy_id: String,
+}
+
+impl Drop for ManualTestGuard {
+    fn drop(&mut self) {
+        let counts = MANUAL_TEST_COUNTS
+            .get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+        let mut counts = counts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let remove = if let Some(count) = counts.get_mut(&self.proxy_id) {
+            *count = count.saturating_sub(1);
+            *count == 0
+        } else {
+            false
+        };
+        if remove {
+            counts.remove(&self.proxy_id);
+        }
+        drop(counts);
+        let sender = MANUAL_TEST_EPOCH.get_or_init(|| tokio::sync::watch::channel(0).0);
+        let next = (*sender.borrow()).wrapping_add(1);
+        sender.send_replace(next);
+    }
+}
+
+impl TestTicket {
+    fn is_cancelled(&self) -> bool {
+        *self.receiver.borrow() != self.expected_revision
+    }
+}
+
+fn revision_sender(proxy_id: &str) -> tokio::sync::watch::Sender<u64> {
+    let revisions = PROXY_TEST_REVISIONS
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut revisions = revisions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    revisions
+        .entry(proxy_id.to_string())
+        .or_insert_with(|| tokio::sync::watch::channel(0).0)
+        .clone()
+}
+
+fn proxy_test_lock(proxy_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    if proxy_id.is_empty() {
+        return std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    }
+    let locks = PROXY_TEST_LOCKS
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut locks = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks
+        .entry(proxy_id.to_string())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+fn begin_manual_test(proxy_id: &str) -> Option<ManualTestGuard> {
+    if proxy_id.is_empty() {
+        return None;
+    }
+    let counts = MANUAL_TEST_COUNTS
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut counts = counts
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *counts.entry(proxy_id.to_string()).or_insert(0) += 1;
+    Some(ManualTestGuard {
+        proxy_id: proxy_id.to_string(),
+    })
+}
+
+fn manual_test_is_active(proxy_id: &str) -> bool {
+    MANUAL_TEST_COUNTS
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(proxy_id)
+        .is_some_and(|count| *count > 0)
+}
+
+fn current_test_revision(proxy_id: &str) -> Option<u64> {
+    if proxy_id.is_empty() {
+        return None;
+    }
+    let sender = revision_sender(proxy_id);
+    let revision = *sender.borrow();
+    Some(revision)
+}
+
+fn invalidate_proxy_tests(proxy_id: &str) {
+    if proxy_id.is_empty() {
+        return;
+    }
+    let sender = revision_sender(proxy_id);
+    let next = (*sender.borrow()).wrapping_add(1);
+    sender.send_replace(next);
+}
+
+fn test_ticket(request: &PreparedProxyTest) -> Option<TestTicket> {
+    let expected_revision = request.revision?;
+    let sender = revision_sender(&request.entry.id);
+    Some(TestTicket {
+        expected_revision,
+        receiver: sender.subscribe(),
+    })
+}
+
+fn prepare_proxy_tests(entries: Vec<ProxyEntry>) -> Vec<PreparedProxyTest> {
+    entries
+        .into_iter()
+        .map(|entry| PreparedProxyTest {
+            revision: current_test_revision(&entry.id),
+            entry,
+        })
+        .collect()
+}
+
+fn prepare_manual_test_request(request: &mut PreparedProxyTest) -> Result<()> {
+    if request.entry.id.is_empty() {
+        return Ok(());
+    }
+    // Resolve the latest durable entry while edits are excluded. This prevents
+    // a just-closed editor's stale React row from testing old credentials.
+    let _guard = PROXY_STORE_LOCK
+        .read()
+        .map_err(|_| anyhow::anyhow!("proxy store lock poisoned"))?;
+    let stored = load_unlocked()?
+        .proxies
+        .into_iter()
+        .find(|proxy| proxy.id == request.entry.id);
+    let current_revision = current_test_revision(&request.entry.id);
+    if let Some(stored) = stored {
+        request.entry = stored;
+    } else if request.revision != current_revision {
+        // A stored entry disappeared after this request was prepared. Do not
+        // revive it by testing and recording the stale frontend copy.
+        anyhow::bail!(TEST_CANCELLED_ERROR);
+    }
+
+    invalidate_proxy_tests(&request.entry.id);
+    request.revision = current_test_revision(&request.entry.id);
+    Ok(())
+}
+
+fn validate_background_test_request(request: &mut PreparedProxyTest) -> Result<()> {
+    if request.entry.id.is_empty() {
+        anyhow::bail!(TEST_CANCELLED_ERROR);
+    }
+    let _guard = PROXY_STORE_LOCK
+        .read()
+        .map_err(|_| anyhow::anyhow!("proxy store lock poisoned"))?;
+    if request.revision != current_test_revision(&request.entry.id) {
+        anyhow::bail!(TEST_CANCELLED_ERROR);
+    }
+    request.entry = load_unlocked()?
+        .proxies
+        .into_iter()
+        .find(|proxy| proxy.id == request.entry.id)
+        .ok_or_else(|| anyhow::anyhow!(TEST_CANCELLED_ERROR))?;
+    Ok(())
 }
 
 type ProxyDuplicateKey = (ProxyKind, String, u16, String);
@@ -156,13 +355,20 @@ pub struct ProxyStore {
     pub proxies: Vec<ProxyEntry>,
 }
 
-pub fn load() -> Result<ProxyStore> {
+fn load_unlocked() -> Result<ProxyStore> {
     let path = store::proxies_path()?;
     if !path.exists() {
         return Ok(ProxyStore::default());
     }
     let body = fs::read_to_string(&path)?;
     Ok(serde_json::from_str(&body).unwrap_or_default())
+}
+
+pub fn load() -> Result<ProxyStore> {
+    let _guard = PROXY_STORE_LOCK
+        .read()
+        .map_err(|_| anyhow::anyhow!("proxy store lock poisoned"))?;
+    load_unlocked()
 }
 
 fn save(s: &ProxyStore) -> Result<()> {
@@ -175,9 +381,14 @@ pub fn list() -> Result<Vec<ProxyEntry>> {
     Ok(load()?.proxies)
 }
 
-pub fn upsert(mut entry: ProxyEntry) -> Result<ProxyEntry> {
+pub fn upsert_with_status(
+    mut entry: ProxyEntry,
+) -> Result<(ProxyEntry, bool, bool, Option<PreparedProxyTest>)> {
     entry = normalize_entry(entry)?;
-    let mut s = load()?;
+    let _guard = PROXY_STORE_LOCK
+        .write()
+        .map_err(|_| anyhow::anyhow!("proxy store lock poisoned"))?;
+    let mut s = load_unlocked()?;
     let key = duplicate_key(&entry);
     if s.proxies
         .iter()
@@ -188,19 +399,42 @@ pub fn upsert(mut entry: ProxyEntry) -> Result<ProxyEntry> {
     if entry.id.is_empty() {
         entry.id = uuid::Uuid::new_v4().to_string();
     }
-    if let Some(slot) = s.proxies.iter_mut().find(|p| p.id == entry.id) {
-        *slot = entry.clone();
+    let existing_index = s.proxies.iter().position(|proxy| proxy.id == entry.id);
+    let created = existing_index.is_none();
+    let changed = existing_index
+        .map(|index| s.proxies[index] != entry)
+        .unwrap_or(true);
+
+    if let Some(index) = existing_index {
+        if changed {
+            s.proxies[index] = entry.clone();
+        }
     } else {
         s.proxies.push(entry.clone());
     }
-    save(&s)?;
-    Ok(entry)
+    if changed {
+        save(&s)?;
+        if !created {
+            // The edit is now durable. Wake and invalidate any test that was
+            // prepared from the previous configuration before releasing the
+            // short disk-write lock.
+            invalidate_proxy_tests(&entry.id);
+        }
+    }
+    let test = changed.then(|| PreparedProxyTest {
+        revision: current_test_revision(&entry.id),
+        entry: entry.clone(),
+    });
+    Ok((entry, created, changed, test))
 }
 
 /// Upsert that reuses an entry with the same kind/host/port/username.
 pub fn upsert_dedup(mut entry: ProxyEntry) -> Result<ProxyEntry> {
     entry = normalize_entry(entry)?;
-    let mut s = load()?;
+    let _guard = PROXY_STORE_LOCK
+        .write()
+        .map_err(|_| anyhow::anyhow!("proxy store lock poisoned"))?;
+    let mut s = load_unlocked()?;
     let key = duplicate_key(&entry);
     if let Some(existing) = s.proxies.iter().find(|proxy| duplicate_key(proxy) == key) {
         return Ok(existing.clone());
@@ -214,11 +448,19 @@ pub fn upsert_dedup(mut entry: ProxyEntry) -> Result<ProxyEntry> {
 }
 
 pub fn delete(id: &str) -> Result<()> {
-    let mut s = load()?;
+    // Every operation that needs both files acquires history before store.
+    let _history_guard = PROXY_HISTORY_LOCK
+        .write()
+        .map_err(|_| anyhow::anyhow!("proxy history lock poisoned"))?;
+    let _store_guard = PROXY_STORE_LOCK
+        .write()
+        .map_err(|_| anyhow::anyhow!("proxy store lock poisoned"))?;
+    let mut s = load_unlocked()?;
     s.proxies.retain(|p| p.id != id);
     save(&s)?;
+    invalidate_proxy_tests(id);
     // Also wipe persisted test history.
-    let mut hs = load_history()?;
+    let mut hs = load_history_unlocked()?;
     if hs.by_proxy.remove(id).is_some() {
         save_history(&hs)?;
     }
@@ -477,8 +719,11 @@ fn parse_one_checked(line: &str, default_kind: &ProxyKind) -> Result<ProxyEntry>
     })
 }
 
-/// Save many entries; validates the whole batch, then persists unique endpoints.
-pub fn bulk_save(entries: Vec<ProxyEntry>) -> Result<usize> {
+/// Save many entries; validates the whole batch, then returns the entries that
+/// were actually added so callers can schedule post-save work for only those.
+pub fn bulk_save_with_entries(
+    entries: Vec<ProxyEntry>,
+) -> Result<(Vec<ProxyEntry>, Vec<PreparedProxyTest>)> {
     let entries = entries
         .into_iter()
         .enumerate()
@@ -486,10 +731,13 @@ pub fn bulk_save(entries: Vec<ProxyEntry>) -> Result<usize> {
             normalize_entry(entry).with_context(|| format!("entry {} is invalid", index + 1))
         })
         .collect::<Result<Vec<_>>>()?;
-    let mut store_data = load()?;
+    let _guard = PROXY_STORE_LOCK
+        .write()
+        .map_err(|_| anyhow::anyhow!("proxy store lock poisoned"))?;
+    let mut store_data = load_unlocked()?;
     let mut seen: HashSet<ProxyDuplicateKey> =
         store_data.proxies.iter().map(duplicate_key).collect();
-    let mut added = 0usize;
+    let mut added = Vec::new();
     for mut e in entries {
         if !seen.insert(duplicate_key(&e)) {
             continue;
@@ -497,11 +745,19 @@ pub fn bulk_save(entries: Vec<ProxyEntry>) -> Result<usize> {
         if e.id.is_empty() || store_data.proxies.iter().any(|proxy| proxy.id == e.id) {
             e.id = uuid::Uuid::new_v4().to_string();
         }
-        store_data.proxies.push(e);
-        added += 1;
+        store_data.proxies.push(e.clone());
+        added.push(e);
     }
     save(&store_data)?;
-    Ok(added)
+    let tests = prepare_proxy_tests(added.clone());
+    Ok((added, tests))
+}
+
+pub fn prepare_all_proxy_tests() -> Result<Vec<PreparedProxyTest>> {
+    let _guard = PROXY_STORE_LOCK
+        .read()
+        .map_err(|_| anyhow::anyhow!("proxy store lock poisoned"))?;
+    Ok(prepare_proxy_tests(load_unlocked()?.proxies))
 }
 
 #[cfg(test)]
@@ -567,6 +823,18 @@ mod bulk_import_tests {
         let socks = entry(ProxyKind::Socks5, "Proxy.Example.", 1080, "user");
         let http = entry(ProxyKind::Http, "proxy.example", 1080, "user");
         assert_ne!(duplicate_key(&socks), duplicate_key(&http));
+    }
+
+    #[test]
+    fn prepared_test_is_cancelled_when_proxy_revision_changes() {
+        let mut proxy = entry(ProxyKind::Socks5, "proxy.example", 1080, "user");
+        proxy.id = uuid::Uuid::new_v4().to_string();
+        let request = prepare_proxy_tests(vec![proxy]).pop().unwrap();
+        let ticket = test_ticket(&request).unwrap();
+
+        assert!(!ticket.is_cancelled());
+        invalidate_proxy_tests(&request.entry.id);
+        assert!(ticket.is_cancelled());
     }
 }
 
@@ -915,13 +1183,20 @@ fn history_path() -> Result<PathBuf> {
     Ok(store::config_root()?.join("proxies-history.json"))
 }
 
-fn load_history() -> Result<HistoryStore> {
+fn load_history_unlocked() -> Result<HistoryStore> {
     let path = history_path()?;
     if !path.exists() {
         return Ok(HistoryStore::default());
     }
     let body = fs::read_to_string(&path)?;
     Ok(serde_json::from_str(&body).unwrap_or_default())
+}
+
+fn load_history() -> Result<HistoryStore> {
+    let _guard = PROXY_HISTORY_LOCK
+        .read()
+        .map_err(|_| anyhow::anyhow!("proxy history lock poisoned"))?;
+    load_history_unlocked()
 }
 
 fn save_history(s: &HistoryStore) -> Result<()> {
@@ -938,7 +1213,7 @@ fn record_test(proxy_id: &str, mut snap: TestSnapshot) -> Result<TestSnapshot> {
         }
         return Ok(snap);
     }
-    let mut hs = load_history()?;
+    let mut hs = load_history_unlocked()?;
     let entries = hs.by_proxy.entry(proxy_id.into()).or_default();
     if let Some(last) = entries.last_mut() {
         if !snap.ip.is_empty() && last.ip == snap.ip {
@@ -983,17 +1258,31 @@ fn unix_now() -> String {
     format!("@{s}")
 }
 
-fn persist_test_result(entry: &ProxyEntry, snap: TestSnapshot) -> Result<TestSnapshot> {
-    // Parallel batch probes must not overwrite each other's history or
-    // country backfills after their network work completes together.
-    let _guard = TEST_RESULT_WRITE_LOCK
-        .lock()
-        .map_err(|_| anyhow::anyhow!("proxy test result lock poisoned"))?;
+fn persist_test_result(
+    request: &PreparedProxyTest,
+    ticket: Option<&TestTicket>,
+    snap: TestSnapshot,
+) -> Result<TestSnapshot> {
+    if ticket.is_some_and(TestTicket::is_cancelled) {
+        anyhow::bail!(TEST_CANCELLED_ERROR);
+    }
+    // Tests and proxy edits may complete together. Serialize their read/modify/
+    // write cycles, then re-check the revision after waiting for the lock.
+    let _history_guard = PROXY_HISTORY_LOCK
+        .write()
+        .map_err(|_| anyhow::anyhow!("proxy history lock poisoned"))?;
+    let _store_guard = PROXY_STORE_LOCK
+        .write()
+        .map_err(|_| anyhow::anyhow!("proxy store lock poisoned"))?;
+    if ticket.is_some_and(TestTicket::is_cancelled) {
+        anyhow::bail!(TEST_CANCELLED_ERROR);
+    }
+    let entry = &request.entry;
     let recorded = record_test(&entry.id, snap)?;
 
     // Backfill empty country tag on the stored entry.
     if !recorded.country_code.is_empty() {
-        let mut store_data = load()?;
+        let mut store_data = load_unlocked()?;
         if let Some(p) = store_data.proxies.iter_mut().find(|p| p.id == entry.id) {
             if p.country.is_empty() || p.country == "—" {
                 p.country = recorded.country_code.clone();
@@ -1004,8 +1293,28 @@ fn persist_test_result(entry: &ProxyEntry, snap: TestSnapshot) -> Result<TestSna
     Ok(recorded)
 }
 
-/// Run TCP + UDP + geo, persist into history, auto-fill country tag.
-pub async fn full_test(entry: &ProxyEntry) -> Result<TestSnapshot> {
+async fn collect_test_snapshot(entry: &ProxyEntry, lane: TestLane) -> Result<TestSnapshot> {
+    // Background work is capped below the global limit, permanently reserving
+    // capacity for manual tests. Acquiring the background permit first also
+    // prevents a queue of scheduled tests from getting ahead of manual work.
+    let background_limit = BACKGROUND_TEST_LIMIT
+        .get_or_init(|| tokio::sync::Semaphore::new(BACKGROUND_TEST_CONCURRENCY));
+    let _background_permit = match lane {
+        TestLane::Manual => None,
+        TestLane::Background => Some(
+            background_limit
+                .acquire()
+                .await
+                .map_err(|_| anyhow::anyhow!("background proxy test queue closed"))?,
+        ),
+    };
+    let concurrency =
+        TEST_CONCURRENCY.get_or_init(|| tokio::sync::Semaphore::new(BULK_TEST_CONCURRENCY));
+    let _test_permit = concurrency
+        .acquire()
+        .await
+        .map_err(|_| anyhow::anyhow!("proxy test queue closed"))?;
+
     let now = unix_now();
 
     let udp_probe = async {
@@ -1038,7 +1347,7 @@ pub async fn full_test(entry: &ProxyEntry) -> Result<TestSnapshot> {
                   String::new(), 0.0, 0.0, String::new()),
         };
 
-    let snap = TestSnapshot {
+    Ok(TestSnapshot {
         first_seen: String::new(),
         last_seen: now,
         ip,
@@ -1058,22 +1367,179 @@ pub async fn full_test(entry: &ProxyEntry) -> Result<TestSnapshot> {
             .as_ref()
             .and_then(|r| r.as_ref().err().map(|e| e.to_string())),
         provider,
-    };
-
-    persist_test_result(entry, snap)
+    })
 }
 
-/// Test every proxy with a five-worker pool. Each proxy owns its full timeout;
-/// queued entries are never failed merely because the batch is still running.
-pub async fn full_test_batch(entries: Vec<ProxyEntry>) -> Vec<BatchTestResult> {
-    let count = entries.len();
-    let mut queue: VecDeque<(usize, ProxyEntry)> = entries.into_iter().enumerate().collect();
+async fn collect_test_snapshot_or_cancel(
+    request: &PreparedProxyTest,
+    lane: TestLane,
+    ticket: &mut Option<TestTicket>,
+) -> Result<TestSnapshot> {
+    let Some(ticket) = ticket.as_mut() else {
+        return collect_test_snapshot(&request.entry, lane).await;
+    };
+    if ticket.is_cancelled() {
+        anyhow::bail!(TEST_CANCELLED_ERROR);
+    }
+
+    tokio::select! {
+        biased;
+        _ = ticket.receiver.changed() => Err(anyhow::anyhow!(TEST_CANCELLED_ERROR)),
+        result = collect_test_snapshot(&request.entry, lane) => result,
+    }
+}
+
+async fn retry_delay_or_cancel(ticket: &mut Option<TestTicket>) -> Result<()> {
+    let delay = tokio::time::sleep(std::time::Duration::from_secs(1));
+    let Some(ticket) = ticket.as_mut() else {
+        delay.await;
+        return Ok(());
+    };
+    if ticket.is_cancelled() {
+        anyhow::bail!(TEST_CANCELLED_ERROR);
+    }
+
+    tokio::select! {
+        biased;
+        _ = ticket.receiver.changed() => Err(anyhow::anyhow!(TEST_CANCELLED_ERROR)),
+        _ = delay => Ok(()),
+    }
+}
+
+fn test_snapshot_is_complete(snapshot: &TestSnapshot) -> bool {
+    snapshot.tcp_ms.is_some() && !snapshot.ip.is_empty()
+}
+
+async fn acquire_proxy_test_lock_or_cancel(
+    lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    ticket: &mut Option<TestTicket>,
+) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+    let Some(ticket) = ticket.as_mut() else {
+        return Ok(lock.lock_owned().await);
+    };
+    if ticket.is_cancelled() {
+        anyhow::bail!(TEST_CANCELLED_ERROR);
+    }
+
+    tokio::select! {
+        biased;
+        _ = ticket.receiver.changed() => Err(anyhow::anyhow!(TEST_CANCELLED_ERROR)),
+        guard = lock.lock_owned() => Ok(guard),
+    }
+}
+
+async fn wait_for_manual_test_to_finish(
+    proxy_id: &str,
+    ticket: &mut Option<TestTicket>,
+) -> Result<()> {
+    if proxy_id.is_empty() {
+        return Ok(());
+    }
+    let epoch = MANUAL_TEST_EPOCH.get_or_init(|| tokio::sync::watch::channel(0).0);
+    let mut epoch_changes = epoch.subscribe();
+    loop {
+        if !manual_test_is_active(proxy_id) {
+            return Ok(());
+        }
+        let Some(ticket) = ticket.as_mut() else {
+            let _ = epoch_changes.changed().await;
+            continue;
+        };
+        if ticket.is_cancelled() {
+            anyhow::bail!(TEST_CANCELLED_ERROR);
+        }
+        tokio::select! {
+            biased;
+            _ = ticket.receiver.changed() => return Err(anyhow::anyhow!(TEST_CANCELLED_ERROR)),
+            _ = epoch_changes.changed() => {}
+        }
+    }
+}
+
+async fn full_test_with_retry_in_lane(
+    mut request: PreparedProxyTest,
+    max_attempts: usize,
+    lane: TestLane,
+) -> Result<TestSnapshot> {
+    let _manual_guard = matches!(lane, TestLane::Manual)
+        .then(|| begin_manual_test(&request.entry.id))
+        .flatten();
+    if matches!(lane, TestLane::Manual) {
+        // A user-requested test supersedes queued/running automatic work for
+        // this proxy. Other proxies remain fully parallel.
+        prepare_manual_test_request(&mut request)?;
+    } else {
+        let mut waiting_ticket = test_ticket(&request);
+        wait_for_manual_test_to_finish(&request.entry.id, &mut waiting_ticket).await?;
+        validate_background_test_request(&mut request)?;
+    }
+    let attempts = max_attempts.max(1);
+    let mut ticket = test_ticket(&request);
+    let _proxy_guard =
+        acquire_proxy_test_lock_or_cancel(proxy_test_lock(&request.entry.id), &mut ticket).await?;
+    let mut last_snapshot = None;
+    let mut last_error = None;
+
+    for attempt in 0..attempts {
+        match collect_test_snapshot_or_cancel(&request, lane, &mut ticket).await {
+            Ok(snapshot) if test_snapshot_is_complete(&snapshot) => {
+                return persist_test_result(&request, ticket.as_ref(), snapshot);
+            }
+            Ok(snapshot) => last_snapshot = Some(snapshot),
+            Err(error) => last_error = Some(error),
+        }
+
+        if attempt + 1 < attempts {
+            retry_delay_or_cancel(&mut ticket).await?;
+        }
+    }
+
+    if let Some(snapshot) = last_snapshot {
+        persist_test_result(&request, ticket.as_ref(), snapshot)
+    } else {
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("proxy test did not run")))
+    }
+}
+
+/// Run one user-requested TCP + UDP + geo test, persist it into history, and
+/// auto-fill the country tag. Manual tests use the priority lane.
+pub async fn full_test(entry: &ProxyEntry) -> Result<TestSnapshot> {
+    let request = PreparedProxyTest {
+        revision: current_test_revision(&entry.id),
+        entry: entry.clone(),
+    };
+    full_test_with_retry_in_lane(request, 1, TestLane::Manual).await
+}
+
+/// Automatic one-off tests (for API-created profiles) share the capped
+/// background lane so they cannot consume capacity reserved for UI actions.
+pub async fn full_test_background(entry: &ProxyEntry) -> Result<TestSnapshot> {
+    let request = PreparedProxyTest {
+        revision: current_test_revision(&entry.id),
+        entry: entry.clone(),
+    };
+    full_test_with_retry_in_lane(request, 1, TestLane::Background).await
+}
+
+async fn full_test_batch_in_lane(
+    requests: Vec<PreparedProxyTest>,
+    lane: TestLane,
+    max_attempts: usize,
+) -> Vec<BatchTestResult> {
+    let count = requests.len();
+    let mut queue: VecDeque<(usize, PreparedProxyTest)> =
+        requests.into_iter().enumerate().collect();
     let mut tasks = tokio::task::JoinSet::new();
     while tasks.len() < BULK_TEST_CONCURRENCY {
-        let Some((index, entry)) = queue.pop_front() else {
+        let Some((index, request)) = queue.pop_front() else {
             break;
         };
-        tasks.spawn(async move { (index, full_test(&entry).await) });
+        tasks.spawn(async move {
+            (
+                index,
+                full_test_with_retry_in_lane(request, max_attempts, lane).await,
+            )
+        });
     }
 
     let mut results: Vec<Option<BatchTestResult>> = (0..count).map(|_| None).collect();
@@ -1096,10 +1562,15 @@ pub async fn full_test_batch(entries: Vec<ProxyEntry>) -> Vec<BatchTestResult> {
             Err(_) => {}
         }
         while tasks.len() < BULK_TEST_CONCURRENCY {
-            let Some((index, entry)) = queue.pop_front() else {
+            let Some((index, request)) = queue.pop_front() else {
                 break;
             };
-            tasks.spawn(async move { (index, full_test(&entry).await) });
+            tasks.spawn(async move {
+                (
+                    index,
+                    full_test_with_retry_in_lane(request, max_attempts, lane).await,
+                )
+            });
         }
     }
 
@@ -1112,6 +1583,21 @@ pub async fn full_test_batch(entries: Vec<ProxyEntry>) -> Vec<BatchTestResult> {
             error: Some("proxy test task did not complete".to_string()),
         }))
         .collect()
+}
+
+/// Test every proxy with the manual-priority five-worker pool. Each proxy owns
+/// its full timeout; queued entries are never failed because the batch is busy.
+pub async fn full_test_batch(entries: Vec<ProxyEntry>) -> Vec<BatchTestResult> {
+    full_test_batch_in_lane(prepare_proxy_tests(entries), TestLane::Manual, 1).await
+}
+
+/// Run automatic tests without consuming the capacity reserved for manual
+/// tests. Failed TCP checks are retried up to `max_attempts` in total.
+pub async fn full_test_batch_background(
+    requests: Vec<PreparedProxyTest>,
+    max_attempts: usize,
+) -> Vec<BatchTestResult> {
+    full_test_batch_in_lane(requests, TestLane::Background, max_attempts).await
 }
 
 /// Fallback country → IANA timezone for providers that omit timezone.
