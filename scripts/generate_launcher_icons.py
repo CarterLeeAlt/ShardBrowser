@@ -4,9 +4,9 @@ The outer artwork has exactly one source of truth:
 src-tauri/icons/shardx-browser-taskbar-base.png.
 
 The generated browser-base ICO supplies the exact native outer frame consumed
-by Rust before it adds a NAME badge.  The launcher is distinguished only by
-the compact E-style diamond rendered by this script.  Install Pillow and run
-this file from any working directory.
+by Rust before it adds a NAME badge.  The launcher is distinguished only by a
+compact white play symbol aligned to the browser lens' visual center.  Install
+Pillow and run this file from any working directory.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ICON_DIR = ROOT / "src-tauri" / "icons"
 BASE_PATH = ICON_DIR / "shardx-browser-taskbar-base.png"
 BASE_ICO_PATH = ICON_DIR / "shardx-browser-taskbar-base.ico"
+LAUNCHER_MASTER_PATH = ICON_DIR / "launcher-icon-master.png"
 WINDOWS_ICON_SIZES = (16, 20, 24, 30, 32, 40, 48, 64, 128, 256)
 # Tauri 2.11 decodes only the first entry of a configured Windows ICO when it
 # constructs the default window icon. Put the native 96-DPI taskbar size first;
@@ -29,6 +30,9 @@ WINDOWS_ICON_SIZES = (16, 20, 24, 30, 32, 40, 48, 64, 128, 256)
 # the window is created.
 TAURI_LAUNCHER_ICON_ORDER = (24, 16, 20, 30, 32, 40, 48, 64, 128, 256)
 SUPERSAMPLING = 4
+PLAY_WIDTH = 58
+PLAY_HEIGHT = 68
+PLAY_CORNER_RADIUS = 3
 
 
 def assert_canonical_base(base: Image.Image) -> None:
@@ -49,121 +53,164 @@ def assert_canonical_base(base: Image.Image) -> None:
         raise ValueError("canonical browser artwork does not visibly reach every edge")
 
 
-def scaled(value_at_256: float, size: int) -> int:
-    return round(value_at_256 * size * SUPERSAMPLING / 256)
+def detect_lens_center(base: Image.Image) -> tuple[float, float]:
+    """Return the center of the canonical white lens ring in image coordinates."""
+    bright_neutral = Image.new("L", base.size, 0)
+    source = base.load()
+    target = bright_neutral.load()
+    for y in range(base.height):
+        for x in range(base.width):
+            red, green, blue, alpha = source[x, y]
+            if (
+                alpha >= 200
+                and min(red, green, blue) >= 220
+                and max(red, green, blue) - min(red, green, blue) <= 30
+            ):
+                target[x, y] = 255
+
+    bounds = bright_neutral.getbbox()
+    if bounds is None:
+        raise ValueError("canonical browser base has no detectable white lens ring")
+
+    left, top, right, bottom = bounds
+    if not (96 <= right - left <= 160 and 96 <= bottom - top <= 160):
+        raise ValueError(f"unexpected white lens ring bounds: {bounds}")
+
+    return ((left + right) / 2, (top + bottom) / 2)
 
 
-def diamond_points(size: int, radius: int, center_y: int = 122) -> list[tuple[int, int]]:
-    center_x = 128
-    return [
-        (scaled(center_x, size), scaled(center_y - radius, size)),
-        (scaled(center_x + radius, size), scaled(center_y, size)),
-        (scaled(center_x, size), scaled(center_y + radius, size)),
-        (scaled(center_x - radius, size), scaled(center_y, size)),
-    ]
+def mask_centroid(mask: Image.Image) -> tuple[float, float]:
+    bounds = mask.getbbox()
+    if bounds is None:
+        raise ValueError("cannot measure an empty mask")
+
+    pixels = mask.load()
+    left, top, right, bottom = bounds
+    total = 0
+    weighted_x = 0
+    weighted_y = 0
+    for y in range(top, bottom):
+        for x in range(left, right):
+            value = pixels[x, y]
+            total += value
+            weighted_x += x * value
+            weighted_y += y * value
+
+    return (weighted_x / total, weighted_y / total)
 
 
-def diamond_mask(size: int, radius: int, center_y: int = 122, blur: float = 0) -> Image.Image:
-    canvas_size = size * SUPERSAMPLING
-    mask = Image.new("L", (canvas_size, canvas_size), 0)
-    ImageDraw.Draw(mask).polygon(diamond_points(size, radius, center_y), fill=255)
-    if blur:
-        mask = mask.filter(
-            ImageFilter.GaussianBlur(blur * size * SUPERSAMPLING / 256)
-        )
-    return mask
-
-
-def masked_color(size: int, color: tuple[int, int, int, int], mask: Image.Image) -> Image.Image:
-    layer = Image.new(
-        "RGBA",
-        (size * SUPERSAMPLING, size * SUPERSAMPLING),
-        color,
+def translated_mask(mask: Image.Image, offset_x: float, offset_y: float) -> Image.Image:
+    return mask.transform(
+        mask.size,
+        Image.Transform.AFFINE,
+        (1, 0, -offset_x, 0, 1, -offset_y),
+        resample=Image.Resampling.BICUBIC,
+        fillcolor=0,
     )
-    layer.putalpha(mask)
+
+
+def centered_play_mask(
+    size: int,
+    lens_center: tuple[float, float],
+) -> Image.Image:
+    """Draw a rounded play triangle whose alpha centroid matches the lens."""
+    canvas_size = size * SUPERSAMPLING
+    center = canvas_size / 2
+    width = PLAY_WIDTH * size * SUPERSAMPLING / 256
+    height = PLAY_HEIGHT * size * SUPERSAMPLING / 256
+
+    # For a right-pointing triangle with two vertices on the left, positioning
+    # the left edge one third of its width before the target places its area
+    # centroid at the target before rasterization.
+    left = center - width / 3
+    right = center + width * 2 / 3
+    top = center - height / 2
+    bottom = center + height / 2
+
+    raw = Image.new("L", (canvas_size, canvas_size), 0)
+    ImageDraw.Draw(raw).polygon(
+        (
+            (round(left), round(top)),
+            (round(right), round(center)),
+            (round(left), round(bottom)),
+        ),
+        fill=255,
+    )
+
+    corner_radius = PLAY_CORNER_RADIUS * size * SUPERSAMPLING / 256
+    if corner_radius > 0:
+        raw = raw.filter(ImageFilter.GaussianBlur(corner_radius))
+        raw = raw.point(lambda value: 255 if value >= 128 else 0)
+
+    target_x = lens_center[0] * size / 256 - 0.5
+    target_y = lens_center[1] * size / 256 - 0.5
+    offset_x = 0.0
+    offset_y = 0.0
+    final = raw.resize((size, size), Image.Resampling.LANCZOS)
+
+    # Downsampling can introduce a fractional centroid shift. Iterate in the
+    # supersampled space until the emitted frame, not merely its vector source,
+    # is centered to within one hundredth of a pixel.
+    for _ in range(6):
+        shifted = translated_mask(raw, offset_x, offset_y)
+        final = shifted.resize((size, size), Image.Resampling.LANCZOS)
+        centroid_x, centroid_y = mask_centroid(final)
+        error_x = target_x - centroid_x
+        error_y = target_y - centroid_y
+        if abs(error_x) <= 0.01 and abs(error_y) <= 0.01:
+            break
+        offset_x += error_x * SUPERSAMPLING
+        offset_y += error_y * SUPERSAMPLING
+
+    centroid_x, centroid_y = mask_centroid(final)
+    if abs(centroid_x - target_x) > 0.03 or abs(centroid_y - target_y) > 0.03:
+        raise ValueError(
+            f"play triangle centroid is not aligned at {size}px: "
+            f"({centroid_x:.3f}, {centroid_y:.3f}) vs "
+            f"({target_x:.3f}, {target_y:.3f})"
+        )
+    return final
+
+
+def masked_color(
+    mask: Image.Image,
+    color: tuple[int, int, int, int],
+) -> Image.Image:
+    layer = Image.new("RGBA", mask.size, color)
+    if color[3] == 255:
+        layer.putalpha(mask)
+    else:
+        layer.putalpha(mask.point(lambda value: value * color[3] // 255))
     return layer
 
 
-def diagonal_face_gradient(size: int, mask: Image.Image) -> Image.Image:
-    canvas_size = size * SUPERSAMPLING
-    gradient = Image.new("RGBA", (canvas_size, canvas_size))
-    draw = ImageDraw.Draw(gradient)
-    start = (48, 229, 216, 255)
-    end = (0, 82, 161, 255)
-    for y in range(canvas_size):
-        amount = y / max(canvas_size - 1, 1)
-        color = tuple(
-            round(start[channel] * (1 - amount) + end[channel] * amount)
-            for channel in range(4)
-        )
-        draw.line((0, y, canvas_size, y), fill=color)
-    gradient = gradient.rotate(45, resample=Image.Resampling.BICUBIC, expand=False)
-    gradient.putalpha(mask)
-    return gradient
+def launcher_overlay(
+    size: int,
+    lens_center: tuple[float, float],
+) -> Image.Image:
+    overlay = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    play = centered_play_mask(size, lens_center)
+
+    # A centered halo preserves the triangle's visual centroid while separating
+    # the white glyph from both bright cyan and dark blue parts of the lens.
+    halo_radius = max(0.2, 1.4 * size / 256)
+    halo = play.filter(ImageFilter.GaussianBlur(halo_radius))
+    overlay = Image.alpha_composite(overlay, masked_color(halo, (0, 24, 58, 105)))
+    overlay = Image.alpha_composite(overlay, masked_color(play, (250, 250, 248, 255)))
+    return overlay
 
 
-def launcher_overlay(size: int) -> Image.Image:
-    canvas_size = size * SUPERSAMPLING
-    overlay = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
-
-    # Cover the browser lens with the launcher's dark optical plate.  This is
-    # the only central change; the canonical outer swirl remains untouched.
-    plate = Image.new("RGBA", overlay.size, (0, 0, 0, 0))
-    plate_draw = ImageDraw.Draw(plate)
-    plate_draw.ellipse(
-        (
-            scaled(60, size),
-            scaled(54, size),
-            scaled(196, size),
-            scaled(190, size),
-        ),
-        fill=(4, 30, 49, 245),
-    )
-    plate = plate.filter(
-        ImageFilter.GaussianBlur(0.35 * size * SUPERSAMPLING / 256)
-    )
-    overlay = Image.alpha_composite(overlay, plate)
-
-    shadow = diamond_mask(size, 66, center_y=126, blur=4)
-    shadow = shadow.point(lambda value: value * 150 // 255)
-    overlay = Image.alpha_composite(
-        overlay,
-        masked_color(size, (0, 0, 0, 150), shadow),
-    )
-
-    outer = diamond_mask(size, 62)
-    overlay = Image.alpha_composite(
-        overlay,
-        masked_color(size, (111, 39, 235, 255), outer),
-    )
-
-    inner = diamond_mask(size, 43)
-    overlay = Image.alpha_composite(
-        overlay,
-        masked_color(size, (25, 5, 77, 255), inner),
-    )
-
-    face = diamond_mask(size, 34)
-    overlay = Image.alpha_composite(overlay, diagonal_face_gradient(size, face))
-
-    highlight = ImageDraw.Draw(overlay, "RGBA")
-    highlight.line(
-        (
-            (scaled(128, size), scaled(60, size)),
-            (scaled(66, size), scaled(122, size)),
-        ),
-        fill=(209, 161, 255, 255),
-        width=max(1, scaled(2, size)),
-    )
-
-    return overlay.resize((size, size), Image.Resampling.LANCZOS)
-
-
-def render_launcher(base_frame: Image.Image) -> Image.Image:
+def render_launcher(
+    base_frame: Image.Image,
+    lens_center: tuple[float, float],
+) -> Image.Image:
     size = base_frame.width
     if base_frame.size != (size, size):
         raise ValueError("launcher base frame must be square")
-    return Image.alpha_composite(base_frame.copy(), launcher_overlay(size))
+    return Image.alpha_composite(
+        base_frame.copy(),
+        launcher_overlay(size, lens_center),
+    )
 
 
 def png_bytes(image: Image.Image) -> bytes:
@@ -210,6 +257,7 @@ def write_windows_ico(
 def main() -> None:
     base = Image.open(BASE_PATH).convert("RGBA")
     assert_canonical_base(base)
+    lens_center = detect_lens_center(base)
 
     # These are the canonical per-size outer frames shared byte-for-byte by
     # the launcher and browser icon pipelines.
@@ -222,8 +270,14 @@ def main() -> None:
     write_windows_ico(BASE_ICO_PATH, base_frames, WINDOWS_ICON_SIZES)
 
     launcher_frames = {
-        size: render_launcher(base_frames[size]) for size in WINDOWS_ICON_SIZES
+        size: render_launcher(base_frames[size], lens_center)
+        for size in WINDOWS_ICON_SIZES
     }
+    launcher_frames[256].save(
+        LAUNCHER_MASTER_PATH,
+        format="PNG",
+        optimize=True,
+    )
     write_windows_ico(
         ICON_DIR / "icon.ico",
         launcher_frames,
