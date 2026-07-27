@@ -872,6 +872,66 @@ async fn process_kill(profile_id: String) -> Result<bool, String> {
 
 // ---- Proxies ----
 
+const AUTOMATIC_PROXY_TEST_ATTEMPTS: usize = 3;
+const PROXY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
+
+async fn test_proxies_in_background(
+    requests: Vec<proxy::PreparedProxyTest>,
+    max_attempts: usize,
+) {
+    if requests.is_empty() {
+        return;
+    }
+
+    let total = requests.len();
+    let results = proxy::full_test_batch_background(requests, max_attempts).await;
+    let incomplete = results
+        .iter()
+        .filter(|result| {
+            result.snapshot.is_none()
+                && result.error.as_deref() != Some(proxy::TEST_CANCELLED_ERROR)
+        })
+        .count();
+    let failed = results
+        .iter()
+        .filter(|result| {
+            result
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.tcp_ms.is_none() || snapshot.ip.is_empty())
+        })
+        .count();
+    if failed > 0 || incomplete > 0 {
+        eprintln!(
+            "[launcher] automatic proxy test finished: {total} total, {failed} failed, {incomplete} incomplete"
+        );
+    }
+    notify_store_changed("proxies");
+}
+
+fn spawn_automatic_proxy_tests(requests: Vec<proxy::PreparedProxyTest>) {
+    if requests.is_empty() {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        test_proxies_in_background(requests, AUTOMATIC_PROXY_TEST_ATTEMPTS).await;
+    });
+}
+
+fn start_proxy_refresh_loop() {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(PROXY_REFRESH_INTERVAL).await;
+            match proxy::prepare_all_proxy_tests() {
+                Ok(requests) => test_proxies_in_background(requests, 1).await,
+                Err(error) => {
+                    eprintln!("[launcher] automatic proxy list refresh failed: {error}")
+                }
+            }
+        }
+    });
+}
+
 #[tauri::command]
 fn proxy_list() -> Result<Vec<proxy::ProxyEntry>, String> {
     // Newest-first display order; internal paths still read raw on-disk order.
@@ -882,7 +942,12 @@ fn proxy_list() -> Result<Vec<proxy::ProxyEntry>, String> {
 
 #[tauri::command]
 fn proxy_save(entry: proxy::ProxyEntry) -> Result<proxy::ProxyEntry, String> {
-    proxy::upsert(entry).map_err(|e| e.to_string())
+    let (saved, _created, _changed, test) =
+        proxy::upsert_with_status(entry).map_err(|e| e.to_string())?;
+    if let Some(test) = test {
+        spawn_automatic_proxy_tests(vec![test]);
+    }
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -933,7 +998,11 @@ fn proxy_bulk_import(text: String, kind: String) -> Result<usize, String> {
         _ => proxy::ProxyKind::Socks5,
     };
     let parsed = proxy::parse_bulk_strict(&text, default_kind).map_err(|e| e.to_string())?;
-    proxy::bulk_save(parsed).map_err(|e| e.to_string())
+    let (added, tests) =
+        proxy::bulk_save_with_entries(parsed).map_err(|e| e.to_string())?;
+    let count = added.len();
+    spawn_automatic_proxy_tests(tests);
+    Ok(count)
 }
 
 /// Parse bulk-import text without saving (preview list with per-row test).
@@ -950,7 +1019,11 @@ fn proxy_bulk_parse(text: String, kind: String) -> Result<proxy::BulkParsePrevie
 /// Persist pre-tested proxies (bulk dialog).
 #[tauri::command]
 fn proxy_bulk_save(entries: Vec<proxy::ProxyEntry>) -> Result<usize, String> {
-    proxy::bulk_save(entries).map_err(|e| e.to_string())
+    let (added, tests) =
+        proxy::bulk_save_with_entries(entries).map_err(|e| e.to_string())?;
+    let count = added.len();
+    spawn_automatic_proxy_tests(tests);
+    Ok(count)
 }
 
 // ---- Launcher ----
@@ -1116,9 +1189,12 @@ async fn ps_active(order_id: i64) -> Result<Value, String> {
 /// Pull an order's active proxies into the local proxy list. Returns count added.
 #[tauri::command]
 async fn ps_import_order(order_id: i64, kind: String) -> Result<usize, String> {
-    psapi::import_order_proxies(order_id, kind)
+    let (added, tests) = psapi::import_order_proxies(order_id, kind)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let count = added.len();
+    spawn_automatic_proxy_tests(tests);
+    Ok(count)
 }
 
 #[tauri::command]
@@ -1503,6 +1579,10 @@ pub fn run() {
                 Ok(_) => {}
                 Err(e) => eprintln!("[launcher] temporary purge failed: {e}"),
             }
+
+            // Keep stored proxy information fresh while the launcher remains
+            // running (including when its window is hidden to the tray).
+            start_proxy_refresh_loop();
 
             // API task on the shared tokio runtime.
             match settings::ensure_secret() {

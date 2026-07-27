@@ -227,7 +227,7 @@ async fn persist_created(folder_override: Option<String>, body: CreateReq) -> Ap
         let stored = crate::proxy::upsert_dedup(entry)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         // Best-effort full test (UDP + geo); launch re-probes UDP live anyway.
-        let _ = crate::proxy::full_test(&stored).await;
+        let _ = crate::proxy::full_test_background(&stored).await;
         meta["proxy_id"] = json!(stored.id);
         crate::notify_store_changed("proxies");
     }
@@ -360,7 +360,7 @@ async fn edit_profile(Path(id): Path<String>, Json(body): Json<EditReq>) -> ApiR
             .ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("unparseable proxy: {pstr}")))?;
         let s = crate::proxy::upsert_dedup(entry)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let _ = crate::proxy::full_test(&s).await;
+        let _ = crate::proxy::full_test_background(&s).await;
         stored.meta.proxy_id = Some(s.id);
         stored.meta.inline_proxy = None;
         crate::notify_store_changed("proxies");

@@ -104,9 +104,12 @@ pub async fn call(
 }
 
 /// Fetch the active proxies for a Datacenter/ISP order and persist them into
-/// the local proxy list as `kind` ("socks5" | "http"). Returns the number of
-/// new proxies actually added (existing host:port:user pairs are skipped).
-pub async fn import_order_proxies(order_id: i64, kind: String) -> Result<usize> {
+/// the local proxy list as `kind` ("socks5" | "http"). Returns the entries
+/// actually added and their prepared automatic tests.
+pub async fn import_order_proxies(
+    order_id: i64,
+    kind: String,
+) -> Result<(Vec<ProxyEntry>, Vec<proxy::PreparedProxyTest>)> {
     let q = vec![("order_id".to_string(), order_id.to_string())];
     let resp = call("GET", "/user/api/proxies/active", &q, None).await?;
 
@@ -153,5 +156,5 @@ pub async fn import_order_proxies(order_id: i64, kind: String) -> Result<usize> 
         });
     }
 
-    proxy::bulk_save(entries)
+    proxy::bulk_save_with_entries(entries)
 }
