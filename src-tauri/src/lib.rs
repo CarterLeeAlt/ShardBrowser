@@ -1413,8 +1413,8 @@ pub fn run() {
             cookies_export_portable,
             cookies_import,
             mcp_download,
+            runtime::runtime_check_updates,
             runtime::runtime_local_status,
-            runtime::runtime_status,
             runtime::runtime_install,
         ])
         .setup(|app| {
@@ -1496,12 +1496,6 @@ pub fn run() {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_decorations(false);
             }
-
-            // Migrate already-created profiles' UA + client_hints to the
-            // current engine version (independent of the fingerprint seed).
-            tauri::async_runtime::spawn(async {
-                runtime::ensure_profiles_migrated().await;
-            });
 
             // Clean up temporary profiles from crashed runs.
             match profile::purge_temporary() {
