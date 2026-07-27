@@ -520,7 +520,13 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   content: ""; flex: 1; height: 1px; background: var(--bd-1);
 }
 
-.page-actions { display: flex; gap: 8px; align-items: center; flex: none; }
+.page-actions {
+  position: relative;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex: none;
+}
 
 /* ===== buttons ===== */
 
@@ -725,6 +731,23 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   border-radius: var(--radius);
   font-size: 12px; color: var(--accent-hi);
 }
+.bulk-bar-floating {
+  position: absolute;
+  right: calc(100% + 8px);
+  bottom: 0;
+  z-index: 2;
+  box-sizing: border-box;
+  min-height: 32px;
+  max-width: clamp(260px, calc(100vw - 900px), 520px);
+  overflow-x: auto;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-1));
+  box-shadow: 0 3px 10px #00000014;
+  scrollbar-width: none;
+}
+.bulk-bar-floating::-webkit-scrollbar { height: 0; }
+.bulk-bar-floating > * { flex: 0 0 auto; }
 
 /* ===== rows ===== */
 
