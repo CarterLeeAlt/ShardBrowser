@@ -1398,6 +1398,28 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .bulk-row > input[type="checkbox"] {
   margin: 0;
 }
+.bulk-parse-errors {
+  padding: 9px 11px;
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--err) 28%, var(--bd-1));
+  border-radius: var(--radius);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.bulk-parse-errors strong { font-size: 12px; }
+.bulk-parse-errors ul {
+  margin: 5px 0 0;
+  padding-left: 18px;
+}
+.bulk-dedupe-note {
+  padding: 7px 9px;
+  color: var(--tx-3);
+  background: var(--bg-2);
+  border: 1px solid var(--bd-1);
+  border-radius: var(--radius);
+  font-size: 11.5px;
+}
 .bulk-preview-list {
   max-height: 380px;
   overflow-y: auto;

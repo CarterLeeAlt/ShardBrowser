@@ -932,19 +932,19 @@ fn proxy_bulk_import(text: String, kind: String) -> Result<usize, String> {
         "https" => proxy::ProxyKind::Https,
         _ => proxy::ProxyKind::Socks5,
     };
-    let parsed = proxy::parse_bulk(&text, default_kind);
+    let parsed = proxy::parse_bulk_strict(&text, default_kind).map_err(|e| e.to_string())?;
     proxy::bulk_save(parsed).map_err(|e| e.to_string())
 }
 
 /// Parse bulk-import text without saving (preview list with per-row test).
 #[tauri::command]
-fn proxy_bulk_parse(text: String, kind: String) -> Vec<proxy::ProxyEntry> {
+fn proxy_bulk_parse(text: String, kind: String) -> Result<proxy::BulkParsePreview, String> {
     let default_kind = match kind.as_str() {
         "http" => proxy::ProxyKind::Http,
         "https" => proxy::ProxyKind::Https,
         _ => proxy::ProxyKind::Socks5,
     };
-    proxy::parse_bulk(&text, default_kind)
+    proxy::preview_bulk(&text, default_kind).map_err(|e| e.to_string())
 }
 
 /// Persist pre-tested proxies (bulk dialog).
