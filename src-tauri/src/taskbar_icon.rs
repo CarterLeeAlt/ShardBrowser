@@ -60,7 +60,7 @@ mod windows {
     const BADGE_FONT_HEIGHT_AT_256: i32 = 104;
     const BADGE_FONT_WIDTH_AT_256: i32 = 48;
     const BADGE_LAYOUT_REVISION: &[u8] =
-        b"taskbar-badge-layout-v16-fixed-pixel-baseline-small-cascadia-large";
+        b"taskbar-badge-layout-v17-native-live-window-frame";
     const RT_ICON: *const u16 = 3usize as *const u16;
     const RT_GROUP_ICON: *const u16 = 14usize as *const u16;
     const DIB_RGB_COLORS: u32 = 0;
@@ -405,9 +405,6 @@ mod windows {
             };
             let app_id = profile_app_id(&profile_id, &executable);
             let app_id = wide_null(OsStr::new(&app_id));
-            let mut icon_resource = OsString::from(icon_path.as_os_str());
-            icon_resource.push(",0");
-            let icon_resource = wide_null(&icon_resource);
             let started = Instant::now();
 
             loop {
@@ -420,7 +417,6 @@ mod windows {
                     &executable,
                     &icons,
                     &app_id,
-                    &icon_resource,
                 );
                 let tracked = crate::process::Tracker::shared().is_running_pid(pid);
                 if !tracked
@@ -480,6 +476,13 @@ mod windows {
             let index = nearest_taskbar_icon_index(if dpi == 0 { 96 } else { dpi });
             self.taskbar[index]
         }
+
+        fn profile_window_icons(&self, window: isize) -> (isize, isize) {
+            let dpi = unsafe { GetDpiForWindow(window) };
+            let (big, small) =
+                profile_window_icon_indices(if dpi == 0 { 96 } else { dpi });
+            (self.taskbar[big], self.taskbar[small])
+        }
     }
 
     fn nearest_taskbar_icon_index(dpi: u32) -> usize {
@@ -499,6 +502,11 @@ mod windows {
             }
         }
         best
+    }
+
+    fn profile_window_icon_indices(dpi: u32) -> (usize, usize) {
+        let taskbar = nearest_taskbar_icon_index(dpi);
+        (taskbar, taskbar)
     }
 
     pub(super) fn apply_launcher_taskbar_icon(window: isize, icon_dir: &Path) -> Result<()> {
@@ -561,7 +569,6 @@ mod windows {
         executable: *const PathBuf,
         icons: *const LoadedIcons,
         app_id: *const u16,
-        icon_resource: *const u16,
         matched_windows: usize,
     }
 
@@ -570,14 +577,12 @@ mod windows {
         executable: &PathBuf,
         icons: &LoadedIcons,
         app_id: &[u16],
-        icon_resource: &[u16],
     ) -> usize {
         let mut context = WindowApplyContext {
             pid,
             executable,
             icons,
             app_id: app_id.as_ptr(),
-            icon_resource: icon_resource.as_ptr(),
             matched_windows: 0,
         };
         unsafe {
@@ -603,10 +608,18 @@ mod windows {
             return 1;
         }
 
-        set_window_taskbar_properties(window, context.app_id, context.icon_resource);
+        set_window_app_id(window, context.app_id);
         let icons = &*context.icons;
-        SendMessageW(window, WM_SETICON, 1, icons.taskbar_for_window(window));
-        SendMessageW(window, WM_SETICON, 0, icons.small);
+        let (big_icon, small_icon) = icons.profile_window_icons(window);
+        // Windows 11 can source a live taskbar button from either ICON_BIG or
+        // ICON_SMALL. Supplying a 16px ICON_SMALL made the shell upscale it,
+        // while a RelaunchIconResource let it pick the 32px ICO frame and
+        // downscale it. Both paths blur the native 24px bitmap strike at 96
+        // DPI. Use the same DPI-matched HICON for both live-window slots; the
+        // browser has no native titlebar icon that requires a separate 16px
+        // frame.
+        SendMessageW(window, WM_SETICON, 1, big_icon);
+        SendMessageW(window, WM_SETICON, 0, small_icon);
         (*(param as *mut WindowApplyContext)).matched_windows += 1;
         1
     }
@@ -630,11 +643,7 @@ mod windows {
             .eq_ignore_ascii_case(&expected.to_string_lossy())
     }
 
-    unsafe fn set_window_taskbar_properties(
-        window: isize,
-        app_id: *const u16,
-        icon_resource: *const u16,
-    ) {
+    unsafe fn set_window_app_id(window: isize, app_id: *const u16) {
         let mut store: *mut PropertyStore = null_mut();
         if SHGetPropertyStoreForWindow(window, &IID_PROPERTY_STORE, &mut store) < 0
             || store.is_null()
@@ -646,10 +655,6 @@ mod windows {
             format_id: APP_USER_MODEL_FORMAT,
             property_id: 5,
         };
-        let icon_key = PropertyKey {
-            format_id: APP_USER_MODEL_FORMAT,
-            property_id: 3,
-        };
         let id_value = PropVariant {
             variant_type: VT_LPWSTR,
             reserved1: 0,
@@ -657,16 +662,8 @@ mod windows {
             reserved3: 0,
             string_value: app_id,
         };
-        let icon_value = PropVariant {
-            variant_type: VT_LPWSTR,
-            reserved1: 0,
-            reserved2: 0,
-            reserved3: 0,
-            string_value: icon_resource,
-        };
         let vtable = &*(*store).vtable;
         (vtable.set_value)(store, &id_key, &id_value);
-        (vtable.set_value)(store, &icon_key, &icon_value);
         (vtable.commit)(store);
         (vtable.release)(store);
     }
@@ -1281,9 +1278,9 @@ mod windows {
     mod tests {
         use super::{
             build_badged_icon, nearest_taskbar_icon_index, parse_ico, pixel_text_origin,
-            render_badge, scaled, BASE_ICON_ICO, BADGE_FONT_HEIGHT_AT_256,
-            BADGE_FONT_WIDTH_AT_256, CASCADIA_MONO_REGULAR_TTF, ICON_SIZES,
-            LAUNCHER_ICON_ICO, TASKBAR_ICON_SIZES, inside_rounded_rect,
+            profile_window_icon_indices, render_badge, scaled, BASE_ICON_ICO,
+            BADGE_FONT_HEIGHT_AT_256, BADGE_FONT_WIDTH_AT_256, CASCADIA_MONO_REGULAR_TTF,
+            ICON_SIZES, LAUNCHER_ICON_ICO, TASKBAR_ICON_SIZES, inside_rounded_rect,
         };
         use ico::IconDir;
         use std::io::Cursor;
@@ -1342,6 +1339,13 @@ mod windows {
                 TASKBAR_ICON_SIZES[nearest_taskbar_icon_index(96)],
                 24
             );
+        }
+
+        #[test]
+        fn profile_window_uses_native_taskbar_frame_for_both_slots_at_96_dpi() {
+            let (big, small) = profile_window_icon_indices(96);
+            assert_eq!(TASKBAR_ICON_SIZES[big], 24);
+            assert_eq!(TASKBAR_ICON_SIZES[small], 24);
         }
 
         #[test]
