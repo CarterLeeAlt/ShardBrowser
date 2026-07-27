@@ -1255,16 +1255,19 @@ function BrowsersView() {
     [visible, page],
   );
 
-  // Reuse the most recent persisted proxy test for the exit IP and its real
-  // location. Only bound proxies visible on this page are read, and no geo
-  // service is contacted merely by opening the Browsers page.
+  // Reuse the most recent persisted test for every saved proxy. Browser rows
+  // consume their bound proxy's snapshot, while the bind-proxy dialog can
+  // enrich every option with its exit IP and real location. This only reads
+  // local history; opening the page never contacts a geo service.
   useEffect(() => {
-    const ids = [...new Set(paged.map((p) => p.proxy_id).filter((id): id is string => !!id))];
-    if (ids.length === 0) return;
+    if (proxies.length === 0) {
+      setProxySnapshots({});
+      return;
+    }
     let cancelled = false;
     (async () => {
       const entries = await Promise.all(
-        ids.map(async (id) => {
+        proxies.map(async ({ id }) => {
           try {
             const snap = await invoke<ProxyTestSnapshot | null>("proxy_last_test", { id });
             return [id, snap] as const;
@@ -1274,17 +1277,12 @@ function BrowsersView() {
         }),
       );
       if (cancelled) return;
-      setProxySnapshots((current) => {
-        const next = { ...current };
-        for (const [id, snap] of entries) {
-          if (snap) next[id] = snap;
-          else delete next[id];
-        }
-        return next;
-      });
+      const next: Record<string, ProxyTestSnapshot> = {};
+      for (const [id, snap] of entries) if (snap) next[id] = snap;
+      setProxySnapshots(next);
     })();
     return () => { cancelled = true; };
-  }, [paged, proxies]);
+  }, [proxies]);
 
   // Fall back to "all" when the active folder tab becomes empty.
   useEffect(() => {
@@ -1968,6 +1966,7 @@ function BrowsersView() {
           kind={quickEdit.kind}
           profile={quickEdit.profile}
           proxies={proxies}
+          proxySnapshots={proxySnapshots}
           onClose={() => setQuickEdit(null)}
           onSaved={() => { setQuickEdit(null); reload(); }}
         />
@@ -1976,12 +1975,36 @@ function BrowsersView() {
   );
 }
 
+function proxyBindingLabel(proxy: ProxyEntry, snapshot?: ProxyTestSnapshot) {
+  const primary = proxy.name || `${proxy.host}:${proxy.port}`;
+  const fallbackTag = proxy.country || proxy.kind;
+  if (!snapshot) return `${primary} · ${fallbackTag}`;
+
+  const locationParts = [
+    snapshot.city,
+    snapshot.region,
+    snapshot.country_code || snapshot.country,
+  ]
+    .map((part) => (part || "").trim())
+    .filter((part, index, all) => (
+      !!part
+      && all.findIndex((value) => value.toLowerCase() === part.toLowerCase()) === index
+    ));
+  const location = locationParts.join(", ") || fallbackTag;
+  const exitIp = (snapshot.ip || "").trim();
+
+  return [primary, location, exitIp ? `IP ${exitIp}` : ""]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 function QuickEditDialog({
-  kind, profile, proxies, onClose, onSaved,
+  kind, profile, proxies, proxySnapshots, onClose, onSaved,
 }: {
   kind: "proxy" | "notes";
   profile: ProfileMeta;
   proxies: ProxyEntry[];
+  proxySnapshots: Record<string, ProxyTestSnapshot>;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -2022,7 +2045,7 @@ function QuickEditDialog({
                 <option value="">— direct connection —</option>
                 {proxies.map((px) => (
                   <option key={px.id} value={px.id}>
-                    {px.name || `${px.host}:${px.port}`} · {px.country || px.kind}
+                    {proxyBindingLabel(px, proxySnapshots[px.id])}
                   </option>
                 ))}
               </select>
