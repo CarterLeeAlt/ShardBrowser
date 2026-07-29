@@ -9,7 +9,7 @@
 //   • probeUdp             — decide QUIC + WebRTC policy from a live
 //     SOCKS5 UDP_ASSOCIATE probe.
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { hasAutoFields, resolveAutoFields } from "./autoResolve.js";
@@ -18,6 +18,7 @@ import { Profile, userDataDir, applyEngineVersion } from "./profile.js";
 import { parseProxy, probeUdp, proxyToArg, type ParsedProxy } from "./proxy.js";
 import type { Runtime } from "./runtime.js";
 import { applyScreenStrategy, defaultScreenModeFor, type ScreenStrategy } from "./screen.js";
+import { atomicWriteFileSync } from "./fsUtil.js";
 
 export type WebRtcMode   = "auto" | "block" | "tcp_only";
 /** Legacy alias retained for back-compat; prefer `ScreenStrategy`. */
@@ -141,7 +142,7 @@ export class Browser {
     applyEngineVersion(profile.config, this.runtime.chromiumVersion, this.runtime.greaseBrand, this.runtime.greaseVersion);
     applyNoiseSeeds(profile.config, profile.id);
     const fpFile = join(udd, "fingerprint.json");
-    writeFileSync(fpFile, JSON.stringify(profile.config));
+    atomicWriteFileSync(fpFile, JSON.stringify(profile.config));
 
     const argv: string[] = [
       `--fingerprint-profile=${fpFile}`,
@@ -192,12 +193,33 @@ export class Browser {
       stdio: "ignore",
       detached: process.platform !== "win32",
     });
+    await waitForChildSpawn(child);
 
     const cdpUrl = opts.cdp ? await readCdpEndpoint(udd, 15_000) : null;
     return new BrowserSession(
       child.pid!, udd, cdpUrl, child, proxyUdpMs, quicEnabled, webrtcMode, geo,
     );
   }
+}
+
+async function waitForChildSpawn(child: ChildProcess): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => {
+      child.off("spawn", onSpawn);
+      reject(error);
+    };
+    const onSpawn = () => {
+      child.off("error", onError);
+      // Consume later lifecycle errors as diagnostics instead of allowing an
+      // EventEmitter `error` event to terminate the host Node process.
+      child.on("error", (error) => {
+        console.error(`[shardx] browser process error: ${error.message}`);
+      });
+      resolve();
+    };
+    child.once("error", onError);
+    child.once("spawn", onSpawn);
+  });
 }
 
 async function readCdpEndpoint(udd: string, timeoutMs: number): Promise<string | null> {

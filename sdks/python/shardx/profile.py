@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -14,6 +15,26 @@ from .runtime import Runtime
 _NOISE_VECTORS = ("canvas", "webgl", "audio", "client_rects", "sensors", "fonts")
 # vector -> (soft knob, value applied when the vector is enabled)
 _NOISE_KNOB = {"webgl": ("intensity", 0.0005), "client_rects": ("max_offset", 1)}
+_STORAGE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def validate_storage_id(value: str, label: str = "profile id") -> str:
+    if not isinstance(value, str) or not _STORAGE_ID_RE.fullmatch(value):
+        raise ValueError(f"{label} must contain only ASCII letters, digits, '-' or '_'")
+    return value
+
+
+def storage_child(root: Path, value: str) -> Path:
+    validate_storage_id(value)
+    canonical_root = Path(root).resolve()
+    child = (canonical_root / value).resolve()
+    try:
+        child.relative_to(canonical_root)
+    except ValueError as error:
+        raise ValueError("profile path escaped its storage root") from error
+    if child == canonical_root:
+        raise ValueError("profile path resolved to its storage root")
+    return child
 
 
 class Profile:
@@ -110,6 +131,7 @@ class FingerprintLibrary:
             yield fid
 
     def load(self, fingerprint_id: str) -> Profile:
+        validate_storage_id(fingerprint_id, "fingerprint id")
         path = self._runtime.fingerprints_dir / f"{fingerprint_id}.json"
         if not path.exists():
             raise FileNotFoundError(
@@ -127,6 +149,6 @@ def user_data_dir(runtime: Runtime, profile_id: str, base: Optional[Path] = None
     with `ShardX(profiles_dir=...)`.
     """
     root = base if base is not None else runtime.profiles_root
-    d = Path(root) / profile_id
+    d = storage_child(Path(root), profile_id)
     d.mkdir(parents=True, exist_ok=True)
     return d

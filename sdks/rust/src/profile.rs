@@ -11,6 +11,30 @@ use serde_json::{Map, Value};
 
 use crate::runtime::Runtime;
 
+pub(crate) fn validate_storage_id(value: &str, label: &str) -> Result<()> {
+    if value.is_empty()
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err(anyhow!(
+            "{label} must contain only ASCII letters, digits, '-' or '_'"
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn storage_child(root: &Path, value: &str) -> Result<PathBuf> {
+    validate_storage_id(value, "profile id")?;
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let child = root.join(value);
+    let resolved_child = child.canonicalize().unwrap_or_else(|_| child.clone());
+    if child == root || !resolved_child.starts_with(&root) {
+        return Err(anyhow!("profile path escaped its storage root"));
+    }
+    Ok(child)
+}
+
 #[derive(Clone, Debug)]
 pub struct Profile {
     pub id: String,
@@ -180,6 +204,7 @@ impl FingerprintLibrary {
     }
 
     pub fn load(&self, fingerprint_id: &str) -> Result<Profile> {
+        validate_storage_id(fingerprint_id, "fingerprint id")?;
         let path = self
             .runtime
             .fingerprints_dir()
@@ -254,7 +279,7 @@ pub fn apply_engine_version(
 /// launches. Defaults to `<profiles_root>/<id>/`.
 pub fn user_data_dir(runtime: &Runtime, profile_id: &str, base: Option<&Path>) -> Result<PathBuf> {
     let root = base.map(PathBuf::from).unwrap_or_else(|| runtime.profiles_root());
-    let d = root.join(profile_id);
+    let d = storage_child(&root, profile_id)?;
     fs::create_dir_all(&d)?;
     Ok(d)
 }

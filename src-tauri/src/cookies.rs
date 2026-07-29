@@ -253,7 +253,7 @@ mod win {
         // Merge into existing Local State or create minimal one.
         let mut json: serde_json::Value = if ls_path.exists() {
             serde_json::from_str(&std::fs::read_to_string(ls_path)?)
-                .unwrap_or_else(|_| serde_json::json!({}))
+                .context("parse Local State before installing OSCrypt key")?
         } else {
             if let Some(p) = ls_path.parent() {
                 std::fs::create_dir_all(p).ok();
@@ -264,7 +264,7 @@ mod win {
             json = serde_json::json!({});
         }
         json["os_crypt"]["encrypted_key"] = serde_json::Value::String(b64);
-        std::fs::write(ls_path, serde_json::to_string(&json)?)?;
+        crate::store::atomic_write(ls_path, serde_json::to_string(&json)?.as_bytes())?;
         Ok(())
     }
 }

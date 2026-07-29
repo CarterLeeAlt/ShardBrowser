@@ -1,8 +1,8 @@
 // Profile = a fingerprint JSON + a per-launch working dir. Wraps the
 // bundled fingerprint library and lets callers override fields before
 // launch.
-import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 import type { Runtime } from "./runtime.js";
 
@@ -112,6 +112,7 @@ export class FingerprintLibrary {
   }
 
   load(fingerprintId: string): Profile {
+    validateStorageId(fingerprintId, "fingerprint id");
     const path = join(this.runtime.fingerprintsDir, `${fingerprintId}.json`);
     if (!existsSync(path)) {
       const sample = this.ids().slice(0, 10).join(", ");
@@ -176,7 +177,25 @@ export function applyEngineVersion(
  *  `new ShardX({ profilesDir })`. */
 export function userDataDir(runtime: Runtime, profileId: string, base?: string): string {
   const root = base ?? runtime.profilesRoot;
-  const d = join(root, profileId);
+  const d = storageChild(root, profileId);
   mkdirSync(d, { recursive: true });
   return d;
+}
+
+export function validateStorageId(id: string, label = "profile id"): void {
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) {
+    throw new Error(`${label} must contain only ASCII letters, digits, '-' or '_'`);
+  }
+}
+
+export function storageChild(root: string, id: string): string {
+  validateStorageId(id);
+  const canonicalRoot = existsSync(root) ? realpathSync(root) : resolve(root);
+  const child = resolve(canonicalRoot, id);
+  const canonicalChild = existsSync(child) ? realpathSync(child) : child;
+  const rel = relative(canonicalRoot, canonicalChild);
+  if (!rel || rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(rel)) {
+    throw new Error("profile path escaped its storage root");
+  }
+  return child;
 }

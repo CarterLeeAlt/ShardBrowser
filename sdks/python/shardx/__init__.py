@@ -47,11 +47,12 @@ from .host import (
     host_ram_gb,
     host_screen_size,
 )
-from .profile import FingerprintLibrary, Profile
+from .profile import FingerprintLibrary, Profile, storage_child
 from .proxy import ParsedProxy, parse_proxy, probe_udp
 from .randomize import randomize_hardware, randomize_platform_version
 from .runtime import RUNTIME_DIR, Runtime, apply_engine_version
 from .screen import apply_screen_strategy, default_mode_for
+from .storage import atomic_write, read_json_with_backup
 
 
 class ShardX:
@@ -126,14 +127,14 @@ class ShardX:
         mutating a reopened profile (e.g. `set_noise`) to keep changes."""
         path = self._profile_json_path(profile.id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(profile.config, indent=2))
+        atomic_write(path, json.dumps(profile.config, indent=2))
 
     def open_profile(self, id: str) -> Profile:
         """Reopen a previously created profile by id (same fingerprint + state)."""
         path = self._profile_json_path(id)
         if not path.exists():
             raise FileNotFoundError(f"saved profile {id!r} not found")
-        return Profile(json.loads(path.read_text()), id=id)
+        return Profile(read_json_with_backup(path), id=id)
 
     def list_saved_profiles(self) -> list[str]:
         """Ids of every saved profile, sorted."""
@@ -144,12 +145,12 @@ class ShardX:
 
     def delete_profile(self, id: str) -> None:
         """Delete a saved profile and all its state (cookies, cache, …)."""
-        d = self.runtime.profiles_root / id
+        d = storage_child(self.runtime.profiles_root, id)
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
 
     def _profile_json_path(self, id: str):
-        return self.runtime.profiles_root / id / "profile.json"
+        return storage_child(self.runtime.profiles_root, id) / "profile.json"
 
     def launch(
         self,
@@ -215,7 +216,11 @@ class ShardX:
             raise RuntimeError("CDP endpoint unavailable — engine failed to expose remote-debugging port")
 
         async with async_playwright() as pw:
-            browser: PatchrightBrowser = await pw.chromium.connect_over_cdp(bsess.cdp_url)
+            try:
+                browser: PatchrightBrowser = await pw.chromium.connect_over_cdp(bsess.cdp_url)
+            except Exception:
+                bsess.stop()
+                raise
             browser._shardx = bsess  # type: ignore[attr-defined]
             try:
                 yield browser

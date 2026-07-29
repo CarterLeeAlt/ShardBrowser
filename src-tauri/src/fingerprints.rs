@@ -38,7 +38,11 @@ pub struct LibraryEntry {
 }
 
 fn safe_id(id: &str) -> Result<String> {
-    if id.is_empty() || id.contains(['/', '\\']) || id.contains("..") {
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
         anyhow::bail!("invalid fingerprint id");
     }
     Ok(id.to_string())
@@ -153,7 +157,7 @@ pub fn import(json_text: &str, id_hint: Option<String>) -> Result<LibraryEntry> 
     let id = ensure_unique_id(&raw_id)?;
     let entry = wrap_payload(&id, &payload);
     let path = path_for(&id)?;
-    fs::write(path, serde_json::to_string_pretty(&entry)?)?;
+    crate::store::atomic_write(&path, serde_json::to_string_pretty(&entry)?.as_bytes())?;
     Ok(entry)
 }
 

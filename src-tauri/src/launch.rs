@@ -89,12 +89,19 @@ pub async fn launch_profile(
     };
 
     // Stored proxy by id, else ephemeral inline (quick profiles, not in store).
-    let bound_proxy: Option<proxy::ProxyEntry> = stored
-        .meta
-        .proxy_id
-        .as_deref()
-        .and_then(|pid| proxy::get(pid).ok().flatten())
-        .or_else(|| stored.meta.inline_proxy.clone());
+    let bound_proxy: Option<proxy::ProxyEntry> = if let Some(proxy_id) = stored.meta.proxy_id.as_deref() {
+        Some(
+            proxy::get(proxy_id)
+                .with_context(|| format!("load bound proxy {proxy_id}"))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "This profile is bound to proxy {proxy_id}, but that proxy no longer exists. Launch was blocked to prevent a direct-IP connection."
+                    )
+                })?,
+        )
+    } else {
+        stored.meta.inline_proxy.clone()
+    };
 
     // Live UDP probe; QUIC/WebRTC gating uses current capability not stale cache.
     let proxy_udp_ok = if let Some(p) = bound_proxy.as_ref() {
@@ -279,7 +286,11 @@ pub async fn launch_profile(
         );
     }
 
-    profile::touch_launched(profile_id, None)?;
+    if let Err(error) = profile::touch_launched(profile_id, None) {
+        // The child is already running and tracked. Metadata failure must not
+        // turn a successful launch into a false error that encourages retries.
+        eprintln!("[launcher] browser started but last-run metadata could not be saved for {profile_id}: {error}");
+    }
 
     let cdp = if enable_cdp {
         match read_devtools_endpoint(&udd).await {

@@ -2,8 +2,6 @@ use crate::{profile::ProfileMeta, proxy::ProxyEntry, store};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::io::Write;
 use std::sync::Mutex;
 
 const DISPLAY_ORDER_VERSION: u32 = 1;
@@ -31,28 +29,16 @@ fn load_unlocked() -> Result<DisplayOrder> {
     if !path.exists() {
         return Ok(DisplayOrder::default());
     }
-    let body = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-    serde_json::from_str(&body)
-        .with_context(|| format!("failed to parse {}", path.display()))
+    store::load_json_with_backup(&path)
+        .with_context(|| format!("failed to load {}", path.display()))
 }
 
 fn save_unlocked(order: &DisplayOrder) -> Result<()> {
     let path = store::display_order_path()?;
-    let temp = path.with_extension("json.tmp");
     let mut output = order.clone();
     output.version = DISPLAY_ORDER_VERSION;
     let body = serde_json::to_vec_pretty(&output)?;
-
-    // Keep the temporary file beside the destination so rename is an atomic
-    // same-volume replacement. The process-wide lock prevents two writers
-    // from sharing the fixed temporary name.
-    let mut file = fs::File::create(&temp)
-        .with_context(|| format!("failed to create {}", temp.display()))?;
-    file.write_all(&body)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&temp, &path)
+    store::atomic_write(&path, &body)
         .with_context(|| format!("failed to replace {}", path.display()))?;
     Ok(())
 }
