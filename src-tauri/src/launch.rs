@@ -30,6 +30,10 @@ pub async fn launch_profile(
     enable_cdp: bool,
     headless: bool,
 ) -> Result<LaunchOutcome> {
+    // Reserve before any proxy probes or file writes. Launch preflight can take
+    // several seconds, so a plain running-process check would leave a window
+    // where a second caller could start the same profile or mutate its proxy.
+    let _launch_reservation = Tracker::shared().reserve_launch(profile_id)?;
     let bin = resolve_binary()?;
     let mut stored = profile::load_raw(profile_id)?;
     // Older editor builds reconstructed an existing profile from its donor

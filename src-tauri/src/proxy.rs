@@ -385,6 +385,10 @@ pub fn upsert_with_status(
     mut entry: ProxyEntry,
 ) -> Result<(ProxyEntry, bool, bool, Option<PreparedProxyTest>)> {
     entry = normalize_entry(entry)?;
+    let _resource_guard = crate::process::lock_profile_resources()?;
+    if !entry.id.is_empty() {
+        crate::profile::ensure_proxy_not_active(&entry.id)?;
+    }
     let _guard = PROXY_STORE_LOCK
         .write()
         .map_err(|_| anyhow::anyhow!("proxy store lock poisoned"))?;
@@ -448,6 +452,8 @@ pub fn upsert_dedup(mut entry: ProxyEntry) -> Result<ProxyEntry> {
 }
 
 pub fn delete(id: &str) -> Result<()> {
+    let _resource_guard = crate::process::lock_profile_resources()?;
+    crate::profile::ensure_proxy_not_active(id)?;
     // Every operation that needs both files acquires history before store.
     let _history_guard = PROXY_HISTORY_LOCK
         .write()

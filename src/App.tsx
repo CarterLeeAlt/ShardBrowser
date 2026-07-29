@@ -4,10 +4,33 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
+import {
+  DndContext,
+  DragOverlay,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  pointerWithin,
+  useDroppable,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragOverEvent,
+  type CollisionDetection,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -272,7 +295,14 @@ function ConfirmHost() {
 
 // ---- context menu ----
 
-type ContextItem = { label: string; onClick: () => void; danger?: boolean; sep?: boolean };
+type ContextItem = {
+  label: string;
+  onClick: () => void;
+  danger?: boolean;
+  sep?: boolean;
+  disabled?: boolean;
+  title?: string;
+};
 function useContextMenu() {
   const [menu, setMenu] = useState<{ x: number; y: number; items: ContextItem[] } | null>(null);
   const close = () => setMenu(null);
@@ -318,6 +348,8 @@ function useContextMenu() {
             key={i}
             className={`ctx-item ${it.danger ? "ctx-danger" : ""}`}
             onClick={() => { it.onClick(); close(); }}
+            disabled={it.disabled}
+            title={it.title}
           >
             {it.label}
           </button>
@@ -337,7 +369,6 @@ type ProfileMeta = {
   proxy_id: string | null;
   last_launched_at: string | null;
   created_at: string | null;
-  pinned: boolean;
   folder: string;
   /// Cumulative engine uptime in ms across every launch.  Increased when
   /// the engine exits — for the currently-running session add `running[id]`
@@ -986,14 +1017,6 @@ const IconMoon = () => (
 /// Inline-SVG icon set; stroke-based at 14x14, inherits color, `size` override.
 type IconProps = { size?: number; className?: string };
 const Icon = {
-  Pin: ({ size = 13, className }: IconProps) => (
-    // Upright thumbtack (Lucide "pin").
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className}>
-      <path d="M12 17v5" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-      <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"
-            stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round"/>
-    </svg>
-  ),
   Edit: ({ size = 13, className }: IconProps) => (
     <svg width={size} height={size} viewBox="0 0 14 14" fill="none" className={className}>
       <path d="M10 1.5l2.5 2.5M9 2.5l2.5 2.5M2.5 9l6.5-6.5 2.5 2.5L5 11.5l-3 0.5z"
@@ -1025,6 +1048,13 @@ const Icon = {
   Refresh: ({ size = 13, className }: IconProps) => (
     <svg width={size} height={size} viewBox="0 0 14 14" fill="none" className={className}>
       <path d="M12 7a5 5 0 1 1-1.5-3.5M12 1.5v3h-3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  ),
+  Grip: ({ size = 14, className }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 14 14" fill="currentColor" className={className}>
+      <circle cx="4" cy="3" r="1" /><circle cx="10" cy="3" r="1" />
+      <circle cx="4" cy="7" r="1" /><circle cx="10" cy="7" r="1" />
+      <circle cx="4" cy="11" r="1" /><circle cx="10" cy="11" r="1" />
     </svg>
   ),
   Loader: ({ size = 13, className }: IconProps) => (
@@ -1078,14 +1108,6 @@ const Icon = {
             stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" strokeLinecap="round"/>
     </svg>
   ),
-  Pin2: ({ size = 11, className }: IconProps) => (
-    // Filled inline pin marker (11px).
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className}>
-      <path d="M12 17v5" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-      <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"
-            fill="currentColor" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
-    </svg>
-  ),
   Stop: ({ size = 13, className }: IconProps) => (
     <svg width={size} height={size} viewBox="0 0 14 14" className={className}>
       <rect x="3" y="3" width="8" height="8" rx="1" fill="currentColor"/>
@@ -1097,6 +1119,184 @@ const Icon = {
     </svg>
   ),
 };
+
+type SortKind = "profile" | "proxy";
+type SortPlacement = "before" | "after";
+
+const listCollisionDetection: CollisionDetection = (args) => {
+  const pointerHits = pointerWithin(args);
+  return pointerHits.length > 0 ? pointerHits : closestCenter(args);
+};
+
+function useListSortSensors() {
+  return useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+}
+
+function moveByAnchor<T extends { id: string }>(
+  items: T[],
+  id: string,
+  anchorId: string,
+  placement: SortPlacement,
+): T[] {
+  if (id === anchorId) return items;
+  const sourceIndex = items.findIndex((item) => item.id === id);
+  const anchorIndex = items.findIndex((item) => item.id === anchorId);
+  if (sourceIndex < 0 || anchorIndex < 0) return items;
+  const next = [...items];
+  const [moving] = next.splice(sourceIndex, 1);
+  const shiftedAnchorIndex = next.findIndex((item) => item.id === anchorId);
+  next.splice(shiftedAnchorIndex + (placement === "after" ? 1 : 0), 0, moving);
+  return next;
+}
+
+function dropPlacementFor(
+  event: DragOverEvent | DragEndEvent,
+  orderedIds: string[],
+): SortPlacement {
+  const translated = event.active.rect.current.translated;
+  if (translated && event.over) {
+    const activeCenter = translated.top + translated.height / 2;
+    const overCenter = event.over.rect.top + event.over.rect.height / 2;
+    return activeCenter > overCenter ? "after" : "before";
+  }
+  const activeIndex = orderedIds.indexOf(String(event.active.id));
+  const overIndex = event.over ? orderedIds.indexOf(String(event.over.id)) : -1;
+  return activeIndex >= 0 && overIndex >= 0 && activeIndex < overIndex ? "after" : "before";
+}
+
+function SortableRow({
+  id,
+  kind,
+  disabledReason,
+  className,
+  rowClassName,
+  dropPlacement,
+  onContextMenu,
+  children,
+  footer,
+}: {
+  id: string;
+  kind: SortKind;
+  disabledReason?: string;
+  className: string;
+  rowClassName: string;
+  dropPlacement: SortPlacement | null;
+  onContextMenu?: (event: ReactMouseEvent<HTMLDivElement>) => void;
+  children: ReactNode;
+  footer?: ReactNode;
+}) {
+  const disabled = !!disabledReason;
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({
+    id,
+    disabled,
+    data: { type: "sortable-row", kind, entityId: id },
+  });
+  const style: CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isDragging ? 5 : undefined,
+  };
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`${className} ${isDragging ? "row-sorting" : ""} ${dropPlacement ? `row-drop-${dropPlacement}` : ""}`}
+      onContextMenu={onContextMenu}
+    >
+      <div className={rowClassName}>
+        <div className="sort-handle-cell">
+          <button
+            type="button"
+            className="sort-handle"
+            disabled={disabled}
+            title={disabledReason || "Drag to reorder · Space + arrow keys also work"}
+            aria-label={disabledReason || `Reorder ${kind}`}
+            {...attributes}
+            {...listeners}
+          >
+            <Icon.Grip />
+          </button>
+        </div>
+        {children}
+      </div>
+      {footer}
+    </div>
+  );
+}
+
+function FolderDropTab({
+  dropId,
+  folder,
+  className,
+  title,
+  onClick,
+  onContextMenu,
+  children,
+}: {
+  dropId: string;
+  folder: string;
+  className: string;
+  title?: string;
+  onClick: () => void;
+  onContextMenu?: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  children: ReactNode;
+}) {
+  const { setNodeRef, isOver } = useDroppable({
+    id: dropId,
+    data: { type: "profile-folder", folder },
+  });
+  return (
+    <button
+      ref={setNodeRef}
+      className={`${className} ${isOver ? "folder-tab-drop" : ""}`}
+      title={title}
+      onClick={onClick}
+      onContextMenu={onContextMenu}
+    >
+      {children}
+    </button>
+  );
+}
+
+function PageDropButton({
+  dropId,
+  direction,
+  disabled,
+  onClick,
+  children,
+}: {
+  dropId: string;
+  direction: "previous" | "next";
+  disabled: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  const { setNodeRef, isOver } = useDroppable({
+    id: dropId,
+    disabled,
+    data: { type: "page", direction },
+  });
+  return (
+    <button
+      ref={setNodeRef}
+      className={`btn-ghost btn-sm ${isOver ? "pager-drop-active" : ""}`}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
+}
 
 // Reload when the backend signals an out-of-band store change — a profile or
 // proxy created/edited/removed through the automation API or MCP writes
@@ -1140,6 +1340,7 @@ function BrowsersView() {
   // both as a truthy flag (any number = running) and as the anchor for the
   // ticking uptime display in the Status column.
   const [running, setRunning] = useState<Record<string, number>>({});
+  const [backendActiveIds, setBackendActiveIds] = useState<Set<string>>(new Set());
   // Re-render trigger so the uptime label ticks every second without
   // re-fetching the process list (which polls every 2s).
   const [, setUptimeTick] = useState(0);
@@ -1148,29 +1349,31 @@ function BrowsersView() {
     const h = setInterval(() => setUptimeTick((t) => t + 1), 1000);
     return () => clearInterval(h);
   }, [running]);
+  const [startBusy, setStartBusy] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   const [fingerprints, setFingerprints] = useState<FingerprintEntry[]>([]);
   const [quickEdit, setQuickEdit] = useState<{ kind: "proxy" | "notes"; profile: ProfileMeta } | null>(null);
   // A profile may be launched while one of its editors is already open.
-  // Close stale editors as soon as the process poll marks it running; the
-  // backend guard below remains authoritative during the polling window.
+  // Close stale editors as soon as launch starts; the backend guard remains
+  // authoritative for launches initiated outside this view.
   useEffect(() => {
-    if (expanded && expanded !== "__new__" && running[expanded]) {
+    if (expanded && expanded !== "__new__" && (running[expanded] || startBusy.has(expanded) || backendActiveIds.has(expanded))) {
       setExpanded(null);
       setDraft(null);
     }
-    if (quickEdit && running[quickEdit.profile.id]) setQuickEdit(null);
-  }, [running, expanded, quickEdit]);
+    if (quickEdit && (running[quickEdit.profile.id] || startBusy.has(quickEdit.profile.id) || backendActiveIds.has(quickEdit.profile.id))) setQuickEdit(null);
+  }, [running, startBusy, backendActiveIds, expanded, quickEdit]);
   // Empty folders persist in localStorage until a profile lands in them.
   const [folderRegistry, setFolderRegistry] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem("shardx-folders") || "[]"); }
     catch { return []; }
   });
   const [folderModal, setFolderModal] = useState<{ profileId: string | null } | null>(null);
-  // Folder name currently highlighted as a drag-and-drop target ("__all__"
-  // for the All tab).  Cleared in dragleave/drop.
-  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const sortSensors = useListSortSensors();
+  const [activeSortId, setActiveSortId] = useState<string | null>(null);
+  const [sortIndicator, setSortIndicator] = useState<{ id: string; placement: SortPlacement } | null>(null);
+  const [pageHover, setPageHover] = useState<"previous" | "next" | null>(null);
   const rememberFolder = (f: string) =>
     setFolderRegistry((r) => {
       const next = r.includes(f) ? r : [...r, f];
@@ -1221,8 +1424,12 @@ function BrowsersView() {
     let cancelled = false;
     const tick = async () => {
       try {
-        const list = await invoke<{ profile_id: string; pid: number; uptime_ms: number }[]>("process_list");
+        const [list, activeIds] = await Promise.all([
+          invoke<{ profile_id: string; pid: number; uptime_ms: number }[]>("process_list"),
+          invoke<string[]>("profile_active_ids"),
+        ]);
         if (cancelled) return;
+        setBackendActiveIds(new Set(activeIds));
         const now = Date.now();
         setRunning((prev) => {
           const next: Record<string, number> = {};
@@ -1291,6 +1498,16 @@ function BrowsersView() {
     () => visible.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
     [visible, page],
   );
+  useEffect(() => {
+    if (!pageHover) return;
+    const timer = setTimeout(() => {
+      setPage((current) => pageHover === "previous"
+        ? Math.max(1, current - 1)
+        : Math.min(pageCount, current + 1));
+      setPageHover(null);
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [pageHover, pageCount]);
 
   // Reuse the most recent persisted test for every saved proxy. Browser rows
   // consume their bound proxy's snapshot, while the bind-proxy dialog can
@@ -1327,13 +1544,15 @@ function BrowsersView() {
   }, [folders, folder]);
 
   const runningCount = Object.values(running).filter(Boolean).length;
+  const selectedHasRunning = [...selected].some((id) => !!running[id]);
+  const selectedHasStarting = [...selected].some((id) => startBusy.has(id) || (backendActiveIds.has(id) && !running[id]));
+  const selectedHasActive = selectedHasRunning || selectedHasStarting;
 
   // Block the Start button until `invoke("launch")` returns (success or
   // failure).  The launch includes pre-flight steps that can take real time
   // — UDP probe, geo lookup, Widevine pre-warm — and surfacing the busy
   // state for the whole window is what the user sees as "did it work?".
   // On failure we unlock immediately and toast the error.
-  const [startBusy, setStartBusy] = useState<Set<string>>(new Set());
   const startStop = async (p: ProfileMeta) => {
     if (running[p.id]) {
       try {
@@ -1343,7 +1562,10 @@ function BrowsersView() {
       }
       return;
     }
-    if (startBusy.has(p.id)) return;
+    if (startBusy.has(p.id) || backendActiveIds.has(p.id)) {
+      toast.err("This browser profile is already starting");
+      return;
+    }
     setStartBusy((s) => new Set([...s, p.id]));
     try {
       await invoke<number>("launch", { profileId: p.id });
@@ -1361,7 +1583,7 @@ function BrowsersView() {
   };
 
   const remove = async (id: string) => {
-    if (running[id]) {
+    if (running[id] || startBusy.has(id) || backendActiveIds.has(id)) {
       toast.err("Stop the browser before deleting this profile");
       return;
     }
@@ -1373,7 +1595,7 @@ function BrowsersView() {
   };
 
   const cloneProfile = async (id: string) => {
-    if (running[id]) {
+    if (running[id] || startBusy.has(id) || backendActiveIds.has(id)) {
       toast.err("Stop the browser before cloning this profile");
       return;
     }
@@ -1384,7 +1606,7 @@ function BrowsersView() {
   };
 
   const exportCookies = async (p: ProfileMeta) => {
-    if (running[p.id]) {
+    if (running[p.id] || startBusy.has(p.id) || backendActiveIds.has(p.id)) {
       toast.err("This profile is still running. Close the browser manually before exporting cookies.");
       return;
     }
@@ -1398,7 +1620,7 @@ function BrowsersView() {
   };
 
   const importCookies = async (p: ProfileMeta) => {
-    if (running[p.id]) { toast.err("Stop the profile before importing cookies"); return; }
+    if (running[p.id] || startBusy.has(p.id) || backendActiveIds.has(p.id)) { toast.err("Stop the profile before importing cookies"); return; }
     try {
       const text = await pickJsonText();
       if (text === null) return;
@@ -1414,7 +1636,6 @@ function BrowsersView() {
     { label: running[p.id] ? "Stop" : "Launch", onClick: () => startStop(p) },
     { label: "Edit", onClick: () => expand(p.id) },
     { label: "Clone", onClick: () => cloneProfile(p.id) },
-    { label: p.pinned ? "Unpin" : "Pin to top", onClick: () => togglePin(p) },
     { sep: true, label: "", onClick: () => {} },
     { label: "Move to folder…", onClick: () => setFolderModal({ profileId: p.id }) },
     ...(p.folder
@@ -1427,18 +1648,11 @@ function BrowsersView() {
     { label: "Delete", onClick: () => remove(p.id), danger: true },
   ];
 
-  const togglePin = async (p: ProfileMeta) => {
-    try {
-      await invoke("profile_set_pin", { id: p.id, pinned: !p.pinned });
-      reload();
-    } catch (e) { toast.err(String(e)); }
-  };
-
   const setProfileFolder = async (id: string, f: string) => {
     // Dropping a profile onto the folder it already lives in is a no-op —
     // tell the user instead of silently doing nothing.
     const p = profiles.find((x) => x.id === id);
-    if (running[id]) {
+    if (running[id] || startBusy.has(id) || backendActiveIds.has(id)) {
       toast.err("Stop the browser before moving this profile");
       return;
     }
@@ -1500,11 +1714,36 @@ function BrowsersView() {
   };
 
   const bulkLaunch = async () => {
-    for (const id of selected) {
-      if (running[id]) continue;
-      try { await invoke<number>("launch", { profileId: id }); } catch {}
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    const runningIds = ids.filter((id) => !!running[id]);
+    if (runningIds.length > 0) {
+      toast.err(`Stop the ${runningIds.length} selected running browser${runningIds.length === 1 ? "" : "s"} before launching`);
+      return;
     }
-    setSelected(new Set());
+    const startingIds = ids.filter((id) => startBusy.has(id) || (backendActiveIds.has(id) && !running[id]));
+    if (startingIds.length > 0) {
+      toast.err("Wait for the selected browser to finish starting");
+      return;
+    }
+
+    setStartBusy((state) => new Set([...state, ...ids]));
+    try {
+      for (const id of ids) {
+        try {
+          await invoke<number>("launch", { profileId: id });
+        } catch (e) {
+          toast.err(`Failed to launch ${id.slice(0, 8)}: ${e}`);
+        }
+      }
+      setSelected(new Set());
+    } finally {
+      setStartBusy((state) => {
+        const next = new Set(state);
+        for (const id of ids) next.delete(id);
+        return next;
+      });
+    }
   };
 
   const bulkStop = async () => {
@@ -1517,9 +1756,9 @@ function BrowsersView() {
   const bulkDelete = async () => {
     const ids = [...selected];
     if (ids.length === 0) return;
-    const runningIds = ids.filter((id) => !!running[id]);
-    if (runningIds.length > 0) {
-      toast.err(`Stop the ${runningIds.length} selected running browser${runningIds.length === 1 ? "" : "s"} first`);
+    const activeIds = ids.filter((id) => !!running[id] || startBusy.has(id) || backendActiveIds.has(id));
+    if (activeIds.length > 0) {
+      toast.err(`Stop the ${activeIds.length} selected active browser${activeIds.length === 1 ? "" : "s"} first`);
       return;
     }
     if ((await confirmModal({ title: "Delete profiles", message: `Delete ${ids.length} profile${ids.length === 1 ? "" : "s"}? This wipes their user-data dirs too.`, danger: true })) !== true) return;
@@ -1535,6 +1774,11 @@ function BrowsersView() {
   const bulkExport = async () => {
     const ids = [...selected];
     if (ids.length === 0) return;
+    const activeIds = ids.filter((id) => !!running[id] || startBusy.has(id) || backendActiveIds.has(id));
+    if (activeIds.length > 0) {
+      toast.err(`Stop the ${activeIds.length} selected active browser${activeIds.length === 1 ? "" : "s"} before exporting`);
+      return;
+    }
     try {
       const payloads = await Promise.all(ids.map((id) => invoke<any>("profile_get", { id })));
       await clip.write(JSON.stringify(payloads, null, 2));
@@ -1620,7 +1864,78 @@ function BrowsersView() {
     });
   };
 
+  const resetProfileDrag = () => {
+    setActiveSortId(null);
+    setSortIndicator(null);
+    setPageHover(null);
+  };
+
+  const handleProfileDragOver = (event: DragOverEvent) => {
+    const over = event.over;
+    if (!over) {
+      setSortIndicator(null);
+      setPageHover(null);
+      return;
+    }
+    const overType = over.data.current?.type;
+    if (overType === "page") {
+      setSortIndicator(null);
+      setPageHover(over.data.current?.direction === "previous" ? "previous" : "next");
+      return;
+    }
+    setPageHover(null);
+    if (overType !== "sortable-row" || over.data.current?.kind !== "profile") {
+      setSortIndicator(null);
+      return;
+    }
+    const active = profiles.find((profile) => profile.id === String(event.active.id));
+    const target = profiles.find((profile) => profile.id === String(over.id));
+    if (!active || !target || active.id === target.id) {
+      setSortIndicator(null);
+      return;
+    }
+    setSortIndicator({
+      id: target.id,
+      placement: dropPlacementFor(event, paged.map((profile) => profile.id)),
+    });
+  };
+
+  const handleProfileDragEnd = async (event: DragEndEvent) => {
+    const activeId = String(event.active.id);
+    const over = event.over;
+    resetProfileDrag();
+    if (!over || activeId === String(over.id)) return;
+
+    if (over.data.current?.type === "profile-folder") {
+      await setProfileFolder(activeId, String(over.data.current.folder ?? ""));
+      return;
+    }
+    if (over.data.current?.type !== "sortable-row" || over.data.current?.kind !== "profile") return;
+
+    const anchorId = String(over.id);
+    const moving = profiles.find((profile) => profile.id === activeId);
+    const anchor = profiles.find((profile) => profile.id === anchorId);
+    if (!moving || !anchor) return;
+    const placement = dropPlacementFor(event, paged.map((profile) => profile.id));
+    const previous = profiles;
+    setProfiles(moveByAnchor(profiles, activeId, anchorId, placement));
+    try {
+      await invoke("profile_move_order", { id: activeId, anchorId, placement });
+    } catch (error) {
+      setProfiles(previous);
+      toast.err(`Could not save profile order: ${String(error)}`);
+    }
+  };
+
   return (
+    <DndContext
+      sensors={sortSensors}
+      collisionDetection={listCollisionDetection}
+      onDragStart={(event) => setActiveSortId(String(event.active.id))}
+      onDragOver={handleProfileDragOver}
+      onDragCancel={resetProfileDrag}
+      onDragEnd={handleProfileDragEnd}
+    >
     <section className="page">
       <Topbar crumbs={["Workspace", "Browsers"]} search={search} onSearch={setSearch} />
 
@@ -1635,40 +1950,20 @@ function BrowsersView() {
         <div className="title-with-tabs">
           <h1>Browsers</h1>
           <div className="folder-tabs" ref={folderTabsRef}>
-            <button
-              className={`folder-tab ${folder === "all" ? "active" : ""} ${dropTarget === "__all__" ? "folder-tab-drop" : ""}`}
+            <FolderDropTab
+              dropId="profile-folder:all"
+              folder=""
+              className={`folder-tab ${folder === "all" ? "active" : ""}`}
               onClick={() => setFolder("all")}
-              // Unconditional preventDefault on dragover is the *only* way
-              // HTML5 marks the element as a valid drop target — any extra
-              // logic inside the handler is fine, but the preventDefault
-              // itself must fire on every event or `drop` never lands.
-              onDragOver={(e) => {
-                e.preventDefault();
-                e.dataTransfer.dropEffect = "move";
-                if (dropTarget !== "__all__") setDropTarget("__all__");
-              }}
-              onDragLeave={(e) => {
-                // Ignore enter-into-child events: relatedTarget will be a
-                // descendant of the button, in which case the drag is still
-                // over us — clearing the highlight here would steal the drop.
-                if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-                  setDropTarget(null);
-                }
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                setDropTarget(null);
-                const id = e.dataTransfer.getData("application/x-shardx-profile")
-                        || e.dataTransfer.getData("text/plain");
-                if (id) setProfileFolder(id, "");           // "" = unassign folder
-              }}
             >
               All<span className="tab-count">{profiles.length}</span>
-            </button>
+            </FolderDropTab>
             {folders.map((f) => (
-              <button
+              <FolderDropTab
                 key={f}
-                className={`folder-tab ${folder === f ? "active" : ""} ${dropTarget === f ? "folder-tab-drop" : ""}`}
+                dropId={`profile-folder:${f}`}
+                folder={f}
+                className={`folder-tab ${folder === f ? "active" : ""}`}
                 onClick={() => setFolder(f)}
                 title="Right-click for folder actions · drop profiles to move them"
                 onContextMenu={(e) =>
@@ -1676,29 +1971,12 @@ function BrowsersView() {
                     { label: "Delete folder…", onClick: () => deleteFolder(f), danger: true },
                   ])
                 }
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  e.dataTransfer.dropEffect = "move";
-                  if (dropTarget !== f) setDropTarget(f);
-                }}
-                onDragLeave={(e) => {
-                  if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-                    setDropTarget(null);
-                  }
-                }}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  setDropTarget(null);
-                  const id = e.dataTransfer.getData("application/x-shardx-profile")
-                          || e.dataTransfer.getData("text/plain");
-                  if (id) setProfileFolder(id, f);
-                }}
               >
                 {f}
                 <span className="tab-count">
                   {profiles.filter((p) => p.folder === f).length}
                 </span>
-              </button>
+              </FolderDropTab>
             ))}
             <button
               className="folder-tab folder-tab-add"
@@ -1713,14 +1991,24 @@ function BrowsersView() {
           {selected.size > 0 && (
             <div className="bulk-bar bulk-bar-floating">
               <span>{selected.size} selected</span>
-              <button className="btn-ghost btn-sm" onClick={bulkLaunch}><Icon.Play /> Launch</button>
+              <button
+                className="btn-ghost btn-sm"
+                onClick={bulkLaunch}
+                disabled={selectedHasActive}
+                title={selectedHasRunning ? "Stop selected running browsers before launching" : selectedHasStarting ? "Wait for selected browsers to finish starting" : "Launch selected profiles"}
+              ><Icon.Play /> Launch</button>
               <button className="btn-ghost btn-sm" onClick={bulkStop}><Icon.Stop /> Stop</button>
-              <button className="btn-ghost btn-sm" onClick={bulkExport}><Icon.Upload /> Export</button>
+              <button
+                className="btn-ghost btn-sm"
+                onClick={bulkExport}
+                disabled={selectedHasActive}
+                title={selectedHasActive ? "Stop selected active browsers before exporting" : "Export selected profiles"}
+              ><Icon.Upload /> Export</button>
               <button
                 className="btn-ghost btn-sm"
                 onClick={bulkDelete}
-                disabled={[...selected].some((id) => !!running[id])}
-                title={[...selected].some((id) => !!running[id]) ? "Stop selected running browsers before deleting" : "Delete selected profiles"}
+                disabled={selectedHasActive}
+                title={selectedHasActive ? "Stop selected active browsers before deleting" : "Delete selected profiles"}
               ><Icon.Trash /> Delete</button>
             </div>
           )}
@@ -1774,6 +2062,7 @@ function BrowsersView() {
 
       <div className="rows">
         <div className="rows-head t-cols">
+          <div className="sort-head" title="Drag rows to reorder"><Icon.Grip /></div>
           <div></div>
           <div>
             <input
@@ -1814,6 +2103,7 @@ function BrowsersView() {
             />
           </div>
         )}
+        <SortableContext items={paged.map((profile) => profile.id)} strategy={verticalListSortingStrategy}>
         {paged.map((p) => {
           const px = p.proxy_id ? proxyMap[p.proxy_id] : null;
           const proxySnapshot = px ? proxySnapshots[px.id] : undefined;
@@ -1831,44 +2121,37 @@ function BrowsersView() {
           const proxyDetailLocation = proxyLocation || (!proxySnapshot && proxyIp ? proxyCountry : "");
           const proxyDetailText = [proxyDetailLocation, proxyIp].filter(Boolean).join(" · ");
           const isRunning = !!running[p.id];
-          const isStarting = !isRunning && startBusy.has(p.id);
+          const isStarting = !isRunning && (startBusy.has(p.id) || backendActiveIds.has(p.id));
+          const isActive = isRunning || isStarting;
           const isExpanded = expanded === p.id;
           const isSel = selected.has(p.id);
           return (
-            <div
+            <SortableRow
               key={p.id}
-              className={`row-wrap ${isRunning ? "row-running" : ""} ${isExpanded ? "row-expanded" : ""} ${p.pinned ? "row-pinned" : ""}`}
+              id={p.id}
+              kind="profile"
+              className={`row-wrap ${isRunning ? "row-running" : ""} ${isExpanded ? "row-expanded" : ""}`}
+              rowClassName="row t-cols browser-data-row"
+              dropPlacement={sortIndicator?.id === p.id ? sortIndicator.placement : null}
+              disabledReason={isActive ? "Stop the browser before reordering this profile" : search.trim() ? "Clear search to reorder profiles" : isExpanded ? "Close the editor before reordering" : undefined}
               onContextMenu={(e) => {
-                if (isRunning) {
+                if (isActive) {
                   e.preventDefault();
                   return;
                 }
                 ctx.open(e, profileMenu(p));
               }}
-              draggable={!isExpanded && !isRunning}
-              onDragStart={(e) => {
-                e.dataTransfer.effectAllowed = "move";
-                // Set BOTH a custom MIME (so non-folder drop zones can ignore
-                // it) and text/plain (because Firefox refuses to start a
-                // drag at all without text/plain, and some Chromium variants
-                // hide custom MIME values from `dataTransfer.types` during
-                // dragover for cross-origin reasons).
-                e.dataTransfer.setData("application/x-shardx-profile", p.id);
-                e.dataTransfer.setData("text/plain", p.id);
-                // Replace the default full-row ghost (it obscures the folder
-                // tabs and stops the drop event firing on them) with a tiny
-                // chip that floats next to the cursor.
-                const chip = document.createElement("div");
-                chip.className = "drag-chip";
-                chip.textContent = p.name || p.id.slice(0, 8);
-                document.body.appendChild(chip);
-                e.dataTransfer.setDragImage(chip, 12, 12);
-                // The ghost is rasterised synchronously from the live DOM,
-                // so we can safely remove it on the next tick.
-                setTimeout(() => chip.remove(), 0);
-              }}
+              footer={isExpanded && draft ? (
+                <InlineEditor
+                  draft={draft}
+                  setDraft={setDraft}
+                  proxies={proxies}
+                  fingerprints={fingerprints}
+                  onSave={saveDraft}
+                  onCancel={() => { setExpanded(null); setDraft(null); }}
+                />
+              ) : undefined}
             >
-              <div className="row t-cols browser-data-row">
                 <div className="cell-strip">
                   <span className={`shard ${isRunning ? "shard-on" : "shard-off"}`} />
                 </div>
@@ -1876,12 +2159,11 @@ function BrowsersView() {
                   <input type="checkbox" checked={isSel} onChange={() => toggleSel(p.id)} />
                 </div>
                 <div
-                  className={`cell-name ${isRunning ? "cell-locked" : ""}`}
-                  onClick={isRunning ? undefined : () => expand(p.id)}
-                  title={isRunning ? "Stop browser before editing" : "Edit profile"}
+                  className={`cell-name ${isActive ? "cell-locked" : ""}`}
+                  onClick={isActive ? undefined : () => expand(p.id)}
+                  title={isActive ? "Stop the browser or wait for it to finish starting before editing" : "Edit profile"}
                 >
                   <div className="name-main">
-                    {p.pinned && <span className="pin-mark" title="Pinned"><Icon.Pin2 /></span>}
                     {p.name}
                   </div>
                   <div className="name-sub">{p.id.slice(0, 8)}</div>
@@ -1893,9 +2175,9 @@ function BrowsersView() {
                   </span>
                 </div>
                 <div
-                  className={`cell-proxy cell-click ${isRunning ? "cell-locked" : ""}`}
-                  onClick={isRunning ? undefined : () => setQuickEdit({ kind: "proxy", profile: p })}
-                  title={isRunning ? "Stop browser before changing proxy" : "Change proxy"}
+                  className={`cell-proxy cell-click ${isActive ? "cell-locked" : ""}`}
+                  onClick={isActive ? undefined : () => setQuickEdit({ kind: "proxy", profile: p })}
+                  title={isActive ? "Stop the browser or wait for it to finish starting before changing proxy" : "Change proxy"}
                 >
                   {px ? (
                     <div className="proxy-cell">
@@ -1918,9 +2200,9 @@ function BrowsersView() {
                   ) : <span className="muted small">— direct —</span>}
                 </div>
                 <div
-                  className={`cell-notes cell-click ${isRunning ? "cell-locked" : ""}`}
-                  title={isRunning ? "Stop browser before editing notes" : p.notes || "Click to edit notes"}
-                  onClick={isRunning ? undefined : () => setQuickEdit({ kind: "notes", profile: p })}
+                  className={`cell-notes cell-click ${isActive ? "cell-locked" : ""}`}
+                  title={isActive ? "Stop the browser or wait for it to finish starting before editing notes" : p.notes || "Click to edit notes"}
+                  onClick={isActive ? undefined : () => setQuickEdit({ kind: "notes", profile: p })}
                 >
                   {p.notes || <span className="muted">—</span>}
                 </div>
@@ -1953,38 +2235,20 @@ function BrowsersView() {
                       {isRunning ? <Icon.Stop /> : isStarting ? <Icon.Loader /> : <Icon.Play />}
                     </span>
                   </button>
-                  <button
-                    className={`icon-btn ${p.pinned ? "icon-btn-on" : ""}`}
-                    onClick={() => togglePin(p)}
-                    title={p.pinned ? "Unpin" : "Pin to top"}
-                  >
-                    <Icon.Pin />
-                  </button>
-                  <button className="icon-btn" onClick={() => expand(p.id)} disabled={isRunning} title={isRunning ? "Stop browser before editing" : "Edit"}><Icon.Edit /></button>
-                  <button className="icon-btn" onClick={() => cloneProfile(p.id)} disabled={isRunning} title={isRunning ? "Stop browser before cloning" : "Clone"}><Icon.Clone /></button>
-                  <button className="icon-btn danger" onClick={() => remove(p.id)} disabled={isRunning} title={isRunning ? "Stop browser before deleting" : "Delete"}><Icon.Trash /></button>
+                  <button className="icon-btn" onClick={() => expand(p.id)} disabled={isActive} title={isActive ? "Stop browser before editing" : "Edit"}><Icon.Edit /></button>
+                  <button className="icon-btn" onClick={() => cloneProfile(p.id)} disabled={isActive} title={isActive ? "Stop browser before cloning" : "Clone"}><Icon.Clone /></button>
+                  <button className="icon-btn danger" onClick={() => remove(p.id)} disabled={isActive} title={isActive ? "Stop browser before deleting" : "Delete"}><Icon.Trash /></button>
                   <button
                     className="icon-btn"
                     onClick={(e) => { e.stopPropagation(); ctx.open(e, profileMenu(p)); }}
-                    disabled={isRunning}
-                    title={isRunning ? "Stop browser before using more actions" : "More actions"}
+                    disabled={isActive}
+                    title={isActive ? "Stop browser before using more actions" : "More actions"}
                   ><Icon.More /></button>
                 </div>
-              </div>
-              {isExpanded && draft && (
-                <InlineEditor
-                  draft={draft}
-                  setDraft={setDraft}
-                  proxies={proxies}
-                  fingerprints={fingerprints}
-
-                  onSave={saveDraft}
-                  onCancel={() => { setExpanded(null); setDraft(null); }}
-                />
-              )}
-            </div>
+            </SortableRow>
           );
         })}
+        </SortableContext>
         {visible.length === 0 && !expanded && (
           <div className="empty-rich">
             <div className="empty-shard"><ShardLogo /></div>
@@ -1999,11 +2263,19 @@ function BrowsersView() {
       </div>
       {pageCount > 1 && (
         <div className="pager">
-          <button className="btn-ghost btn-sm" disabled={page <= 1}
-            onClick={() => setPage((p) => Math.max(1, p - 1))}>‹ Prev</button>
+          <PageDropButton
+            dropId="profile-page-previous"
+            direction="previous"
+            disabled={page <= 1}
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+          >‹ Prev</PageDropButton>
           <span className="pager-info">Page {page} of {pageCount} · {visible.length} profiles</span>
-          <button className="btn-ghost btn-sm" disabled={page >= pageCount}
-            onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>Next ›</button>
+          <PageDropButton
+            dropId="profile-page-next"
+            direction="next"
+            disabled={page >= pageCount}
+            onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
+          >Next ›</PageDropButton>
         </div>
       )}
       {ctx.node}
@@ -2018,6 +2290,15 @@ function BrowsersView() {
         />
       )}
     </section>
+    <DragOverlay>
+      {activeSortId && (
+        <div className="sort-overlay">
+          <Icon.Grip />
+          {profiles.find((profile) => profile.id === activeSortId)?.name || activeSortId.slice(0, 8)}
+        </div>
+      )}
+    </DragOverlay>
+    </DndContext>
   );
 }
 
@@ -2766,7 +3047,12 @@ function ProxiesView() {
   const [proxySel, setProxySel] = useState<Set<string>>(new Set());
   const [renaming, setRenaming] = useState<{ id: string; draft: string } | null>(null);
   const [profiles, setProfiles] = useState<ProfileMeta[]>([]);
+  const [lockedProxyIds, setLockedProxyIds] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
+  const proxySortSensors = useListSortSensors();
+  const [activeProxySortId, setActiveProxySortId] = useState<string | null>(null);
+  const [proxySortIndicator, setProxySortIndicator] = useState<{ id: string; placement: SortPlacement } | null>(null);
+  const [proxyPageHover, setProxyPageHover] = useState<"previous" | "next" | null>(null);
   const ctx = useContextMenu();
 
   // Search filter: matches name / host / port / country tag / notes / username
@@ -2806,11 +3092,36 @@ function ProxiesView() {
     () => filteredProxies.slice((proxyPage - 1) * PROXY_PAGE_SIZE, proxyPage * PROXY_PAGE_SIZE),
     [filteredProxies, proxyPage],
   );
+  useEffect(() => {
+    if (!proxyPageHover) return;
+    const timer = setTimeout(() => {
+      setProxyPage((current) => proxyPageHover === "previous"
+        ? Math.max(1, current - 1)
+        : Math.min(proxyPageCount, current + 1));
+      setProxyPageHover(null);
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [proxyPageHover, proxyPageCount]);
+
+  const selectedHasLockedProxy = [...proxySel].some((id) => lockedProxyIds.has(id));
+
+  // If a browser starts while a proxy editor or inline rename is open, close
+  // the stale editor immediately. The backend lock remains authoritative
+  // during the two-second process polling interval.
+  useEffect(() => {
+    if (editing && lockedProxyIds.has(editing.id)) setEditing(null);
+    if (renaming && lockedProxyIds.has(renaming.id)) setRenaming(null);
+  }, [lockedProxyIds, editing, renaming]);
 
   const commitRename = async () => {
     if (!renaming) return;
     const entry = proxies.find((p) => p.id === renaming.id);
     if (!entry) { setRenaming(null); return; }
+    if (lockedProxyIds.has(entry.id)) {
+      setRenaming(null);
+      toast.err("Stop the running browser using this proxy before renaming it");
+      return;
+    }
     const newName = renaming.draft.trim();
     if (newName === entry.name) { setRenaming(null); return; }
     try {
@@ -2830,6 +3141,18 @@ function ProxiesView() {
   useEffect(() => { reload(); }, []);
   // Pick up proxies/profiles added via the automation API or MCP live.
   useStoreChanged(reload);
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const locked = await invoke<string[]>("proxy_active_ids");
+        if (!cancelled) setLockedProxyIds(new Set(locked));
+      } catch {}
+    };
+    tick();
+    const handle = setInterval(tick, 2000);
+    return () => { cancelled = true; clearInterval(handle); };
+  }, []);
 
   // proxy_id → bound-profile count (O(n) tally; n is small).
   const profileCountByProxy = useMemo(() => {
@@ -2878,6 +3201,10 @@ function ProxiesView() {
   };
 
   const remove = async (id: string) => {
+    if (lockedProxyIds.has(id)) {
+      toast.err("Stop the running browser using this proxy before deleting it");
+      return;
+    }
     if ((await confirmModal({ title: "Delete proxy", message: "Delete this proxy?", danger: true })) !== true) return;
     try { await invoke("proxy_delete", { id }); reload(); toast.ok("Proxy deleted"); }
     catch (e) { toast.err(String(e)); }
@@ -2931,6 +3258,11 @@ function ProxiesView() {
   const bulkDelete = async () => {
     const ids = [...proxySel];
     if (ids.length === 0) return;
+    const lockedIds = ids.filter((id) => lockedProxyIds.has(id));
+    if (lockedIds.length > 0) {
+      toast.err(`Stop browsers using the ${lockedIds.length} selected locked prox${lockedIds.length === 1 ? "y" : "ies"} before deleting`);
+      return;
+    }
     if ((await confirmModal({ title: "Delete proxies", message: `Delete ${ids.length} prox${ids.length === 1 ? "y" : "ies"}?`, danger: true })) !== true) return;
     for (const id of ids) {
       try { await invoke("proxy_delete", { id }); } catch (e) { toast.err(String(e)); }
@@ -2968,7 +3300,72 @@ function ProxiesView() {
     } catch (e) { toast.err("Import failed: " + String(e)); }
   };
 
+  const resetProxyDrag = () => {
+    setActiveProxySortId(null);
+    setProxySortIndicator(null);
+    setProxyPageHover(null);
+  };
+
+  const handleProxyDragOver = (event: DragOverEvent) => {
+    const over = event.over;
+    if (!over) {
+      setProxySortIndicator(null);
+      setProxyPageHover(null);
+      return;
+    }
+    if (over.data.current?.type === "page") {
+      setProxySortIndicator(null);
+      setProxyPageHover(over.data.current?.direction === "previous" ? "previous" : "next");
+      return;
+    }
+    setProxyPageHover(null);
+    if (over.data.current?.type !== "sortable-row" || over.data.current?.kind !== "proxy") {
+      setProxySortIndicator(null);
+      return;
+    }
+    const targetId = String(over.id);
+    if (targetId === String(event.active.id)) {
+      setProxySortIndicator(null);
+      return;
+    }
+    setProxySortIndicator({
+      id: targetId,
+      placement: dropPlacementFor(event, pagedProxies.map((proxy) => proxy.id)),
+    });
+  };
+
+  const handleProxyDragEnd = async (event: DragEndEvent) => {
+    const activeId = String(event.active.id);
+    const over = event.over;
+    resetProxyDrag();
+    if (
+      !over
+      || activeId === String(over.id)
+      || over.data.current?.type !== "sortable-row"
+      || over.data.current?.kind !== "proxy"
+    ) return;
+
+    const anchorId = String(over.id);
+    const placement = dropPlacementFor(event, pagedProxies.map((proxy) => proxy.id));
+    const previous = proxies;
+    setProxies(moveByAnchor(proxies, activeId, anchorId, placement));
+    try {
+      await invoke("proxy_move_order", { id: activeId, anchorId, placement });
+    } catch (error) {
+      setProxies(previous);
+      toast.err(`Could not save proxy order: ${String(error)}`);
+    }
+  };
+
   return (
+    <DndContext
+      sensors={proxySortSensors}
+      collisionDetection={listCollisionDetection}
+      onDragStart={(event) => setActiveProxySortId(String(event.active.id))}
+      onDragOver={handleProxyDragOver}
+      onDragCancel={resetProxyDrag}
+      onDragEnd={handleProxyDragEnd}
+    >
     <section className="page">
       <Topbar crumbs={["PROXYLIST", "Proxies"]} search={search} onSearch={setSearch} />
       <div className="page-title">
@@ -2979,7 +3376,12 @@ function ProxiesView() {
               <span>{proxySel.size} selected</span>
               <button className="btn-ghost btn-sm" onClick={bulkTest}><Icon.Refresh /> Test</button>
               <button className="btn-ghost btn-sm" onClick={bulkExport}><Icon.Upload /> Export</button>
-              <button className="btn-ghost btn-sm" onClick={bulkDelete}><Icon.Trash /> Delete</button>
+              <button
+                className="btn-ghost btn-sm"
+                onClick={bulkDelete}
+                disabled={selectedHasLockedProxy}
+                title={selectedHasLockedProxy ? "Stop browsers using selected proxies before deleting" : "Delete selected proxies"}
+              ><Icon.Trash /> Delete</button>
             </div>
           )}
           <button className="btn-ghost" onClick={bulkImportClipboard} title="Import proxies from the clipboard"><Icon.Download /> Import</button>
@@ -2988,6 +3390,7 @@ function ProxiesView() {
       </div>
       <div className="rows">
         <div className="rows-head p-cols">
+          <div className="sort-head" title="Drag rows to reorder"><Icon.Grip /></div>
           <div>
             <input
               type="checkbox"
@@ -3015,26 +3418,43 @@ function ProxiesView() {
           </div>
           <div>Name</div><div>Type</div><div>Host:Port</div><div>Country</div><div>Profiles</div><div>Test result</div><div className="head-actions">ACTIONS</div>
         </div>
+        <SortableContext items={pagedProxies.map((proxy) => proxy.id)} strategy={verticalListSortingStrategy}>
         {pagedProxies.map((p) => {
           const r = snapshots[p.id];
           const isBusy = !!busy[p.id];
           const cc = r?.country_code || p.country || "";
           const isSel = proxySel.has(p.id);
+          const isLocked = lockedProxyIds.has(p.id);
           return (
-            <div
+            <SortableRow
               key={p.id}
+              id={p.id}
+              kind="proxy"
               className="row-wrap"
+              rowClassName="row p-cols proxy-data-row"
+              dropPlacement={proxySortIndicator?.id === p.id ? proxySortIndicator.placement : null}
+              disabledReason={isLocked ? "Stop the browser using this proxy before reordering" : search.trim() ? "Clear search to reorder proxies" : renaming?.id === p.id ? "Finish renaming before reordering" : undefined}
               onContextMenu={(e) =>
                 ctx.open(e, [
                   { label: "Test (TCP/UDP/geo)", onClick: () => fullTest(p) },
                   { label: "View details", onClick: () => setInfoFor({ proxy: p, anchor: { x: e.clientX, y: e.clientY } }) },
-                  { label: "Edit", onClick: () => setEditing(p) },
+                  {
+                    label: "Edit",
+                    onClick: () => setEditing(p),
+                    disabled: isLocked,
+                    title: isLocked ? "Stop the browser using this proxy before editing" : "Edit proxy",
+                  },
                   { sep: true, label: "", onClick: () => {} },
-                  { label: "Delete", onClick: () => remove(p.id), danger: true },
+                  {
+                    label: "Delete",
+                    onClick: () => remove(p.id),
+                    danger: true,
+                    disabled: isLocked,
+                    title: isLocked ? "Stop the browser using this proxy before deleting" : "Delete proxy",
+                  },
                 ])
               }
             >
-              <div className="row p-cols proxy-data-row">
                 <div>
                   <input
                     type="checkbox"
@@ -3063,9 +3483,9 @@ function ProxiesView() {
                     />
                   ) : (
                     <span
-                      className="cell-click"
-                      onClick={() => setRenaming({ id: p.id, draft: p.name })}
-                      title="Click to rename"
+                      className={isLocked ? "cell-locked" : "cell-click"}
+                      onClick={isLocked ? undefined : () => setRenaming({ id: p.id, draft: p.name })}
+                      title={isLocked ? "Stop the browser using this proxy before renaming" : "Click to rename"}
                     >
                       {p.name || "—"}
                     </span>
@@ -3073,7 +3493,11 @@ function ProxiesView() {
                 </div>
                 <div><span className={`badge badge-${p.kind}`}>{p.kind}</span></div>
                 <div className="cell-hostport">
-                  <span className="mono small cell-click" onClick={() => setEditing(p)} title="Edit proxy">
+                  <span
+                    className={`mono small ${isLocked ? "cell-locked" : "cell-click"}`}
+                    onClick={isLocked ? undefined : () => setEditing(p)}
+                    title={isLocked ? "Stop the browser using this proxy before editing" : "Edit proxy"}
+                  >
                     {p.host}:{p.port}
                   </span>
                 </div>
@@ -3139,13 +3563,23 @@ function ProxiesView() {
                     title="Details + history"
                   ><Icon.Info /></button>
                   <button className="icon-btn" onClick={() => fullTest(p)} disabled={isBusy} title="Test TCP + UDP + geo"><Icon.Refresh /></button>
-                  <button className="icon-btn" onClick={() => setEditing(p)} title="Edit"><Icon.Edit /></button>
-                  <button className="icon-btn danger" onClick={() => remove(p.id)} title="Delete"><Icon.Trash /></button>
+                  <button
+                    className="icon-btn"
+                    onClick={() => setEditing(p)}
+                    disabled={isLocked}
+                    title={isLocked ? "Stop the browser using this proxy before editing" : "Edit"}
+                  ><Icon.Edit /></button>
+                  <button
+                    className="icon-btn danger"
+                    onClick={() => remove(p.id)}
+                    disabled={isLocked}
+                    title={isLocked ? "Stop the browser using this proxy before deleting" : "Delete"}
+                  ><Icon.Trash /></button>
                 </div>
-              </div>
-            </div>
+            </SortableRow>
           );
         })}
+        </SortableContext>
         {proxies.length === 0 && (
           <div className="empty-rich">
             <div className="empty-shard"><IconWire /></div>
@@ -3159,11 +3593,19 @@ function ProxiesView() {
       </div>
       {proxyPageCount > 1 && (
         <div className="pager">
-          <button className="btn-ghost btn-sm" disabled={proxyPage <= 1}
-            onClick={() => setProxyPage((p) => Math.max(1, p - 1))}>‹ Prev</button>
+          <PageDropButton
+            dropId="proxy-page-previous"
+            direction="previous"
+            disabled={proxyPage <= 1}
+            onClick={() => setProxyPage((p) => Math.max(1, p - 1))}
+          >‹ Prev</PageDropButton>
           <span className="pager-info">Page {proxyPage} of {proxyPageCount} · {proxies.length} proxies</span>
-          <button className="btn-ghost btn-sm" disabled={proxyPage >= proxyPageCount}
-            onClick={() => setProxyPage((p) => Math.min(proxyPageCount, p + 1))}>Next ›</button>
+          <PageDropButton
+            dropId="proxy-page-next"
+            direction="next"
+            disabled={proxyPage >= proxyPageCount}
+            onClick={() => setProxyPage((p) => Math.min(proxyPageCount, p + 1))}
+          >Next ›</PageDropButton>
         </div>
       )}
       {editing && <ProxyEditor initial={editing} onClose={() => { setEditing(null); reload(); }} />}
@@ -3178,6 +3620,15 @@ function ProxiesView() {
       )}
       {ctx.node}
     </section>
+    <DragOverlay>
+      {activeProxySortId && (
+        <div className="sort-overlay">
+          <Icon.Grip />
+          {proxies.find((proxy) => proxy.id === activeProxySortId)?.name || activeProxySortId.slice(0, 8)}
+        </div>
+      )}
+    </DragOverlay>
+    </DndContext>
   );
 }
 
