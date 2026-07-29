@@ -193,6 +193,12 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   background: #e81123; /* the standard Windows close-button red */
   color: #fff;
 }
+.titlebar-hover-reset .tb-btn:hover {
+  /* A hidden WebView may retain the close button's last :hover state. Keep
+     controls neutral until a real pointer event reaches the restored window. */
+  background: transparent;
+  color: var(--tx-3);
+}
 
 /* ===== layout ===== */
 
