@@ -169,8 +169,9 @@ across iframes, web workers, devtools and headless inspection.
   profiles and get a CDP WebSocket URL programmatically.
 * **MCP server bundled** — drop into Claude Desktop / IDE for
   natural-language profile orchestration.
-* **Cookie I/O** — import / export the profile's Chromium Cookies
-  SQLite using Windows AES-256-GCM + DPAPI decryption.
+* **Cookie I/O** — export the profile's Chromium Cookies, export cookies plus
+  its active fingerprint as two files, or replace cookies atomically from an
+  import, using Windows AES-256-GCM + DPAPI decryption.
 * **Windows x64 portable launcher** — launcher, browser runtime, profiles,
   cookies, MCP downloads and exports all stay beside the executable. Profiles
   may still emulate Windows, macOS or Linux fingerprints inside Chromium.

@@ -1619,6 +1619,18 @@ function BrowsersView() {
     } catch (e) { toast.err(String(e)); }
   };
 
+  const exportAll = async (p: ProfileMeta) => {
+    if (running[p.id] || startBusy.has(p.id) || backendActiveIds.has(p.id)) {
+      toast.err("This profile is still running. Close the browser manually before exporting it.");
+      return;
+    }
+    try {
+      const cookieCount = await invoke<number>("profile_export_all", { profileId: p.id });
+      toast.ok(`Exported fingerprint + ${cookieCount} cookie${cookieCount === 1 ? "" : "s"} as 2 files`);
+      await invoke("open_exports_dir");
+    } catch (e) { toast.err(String(e)); }
+  };
+
   const importCookies = async (p: ProfileMeta) => {
     if (running[p.id] || startBusy.has(p.id) || backendActiveIds.has(p.id)) { toast.err("Stop the profile before importing cookies"); return; }
     try {
@@ -1627,7 +1639,7 @@ function BrowsersView() {
       const cookies = JSON.parse(text);
       if (!Array.isArray(cookies)) { toast.err("Expected a JSON array of cookies"); return; }
       const n = await invoke<number>("cookies_import", { profileId: p.id, cookies });
-      toast.ok(`Imported ${n} cookie${n === 1 ? "" : "s"}`);
+      toast.ok(`Replaced existing cookies with ${n} imported cookie${n === 1 ? "" : "s"}`);
     } catch (e) { toast.err(String(e)); }
   };
 
@@ -1643,7 +1655,8 @@ function BrowsersView() {
       : []),
     { sep: true, label: "", onClick: () => {} },
     { label: "Export cookies", onClick: () => exportCookies(p) },
-    { label: "Import cookies", onClick: () => importCookies(p) },
+    { label: "Export all (cookies + fingerprint)", onClick: () => exportAll(p) },
+    { label: "Replace cookies…", onClick: () => importCookies(p) },
     { sep: true, label: "", onClick: () => {} },
     { label: "Delete", onClick: () => remove(p.id), danger: true },
   ];
