@@ -226,6 +226,16 @@ mod tests {
     }
 
     #[test]
+    fn move_without_anchor_supports_list_edges() {
+        let defaults = ids(&["new", "a", "b"]);
+        let end = move_in_order(&ids(&["a", "b"]), &defaults, "new", None, Placement::After)
+            .unwrap();
+        assert_eq!(end, ids(&["a", "b", "new"]));
+        let start = move_in_order(&end, &defaults, "b", None, Placement::Before).unwrap();
+        assert_eq!(start, ids(&["b", "a", "new"]));
+    }
+
+    #[test]
     fn move_rejects_missing_source_or_anchor() {
         let defaults = ids(&["a", "b"]);
         assert!(move_in_order(&[], &defaults, "missing", Some("a"), Placement::Before).is_err());
