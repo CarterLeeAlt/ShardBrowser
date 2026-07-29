@@ -1043,11 +1043,23 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   row-gap: 2px;
   height: 38px;
 }
+.browser-data-row .cell-proxy,
+.browser-data-row .proxy-cell {
+  width: 100%;
+  text-align: left;
+}
+.browser-data-row .proxy-cell {
+  justify-items: start;
+}
 .browser-data-row .cell-name .name-main,
 .browser-data-row .proxy-main {
   display: flex;
   align-items: center;
   height: 22px;
+}
+.browser-data-row .proxy-main {
+  width: 100%;
+  justify-content: flex-start;
 }
 .browser-data-row .cell-name .name-sub {
   margin-top: 0;
@@ -1068,6 +1080,8 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .browser-data-row .cell-proxy > .muted {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
+  width: 100%;
   height: 22px;
 }
 
