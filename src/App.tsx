@@ -1722,7 +1722,6 @@ function BrowsersView() {
                 disabled={[...selected].some((id) => !!running[id])}
                 title={[...selected].some((id) => !!running[id]) ? "Stop selected running browsers before deleting" : "Delete selected profiles"}
               ><Icon.Trash /> Delete</button>
-              <button className="btn-ghost btn-sm" onClick={() => setSelected(new Set())}>Clear</button>
             </div>
           )}
           <button className="btn-ghost" onClick={bulkImport} title="Create profiles from exported JSON in the clipboard"><Icon.Download /> Import</button>
@@ -2981,7 +2980,6 @@ function ProxiesView() {
               <button className="btn-ghost btn-sm" onClick={bulkTest}><Icon.Refresh /> Test</button>
               <button className="btn-ghost btn-sm" onClick={bulkExport}><Icon.Upload /> Export</button>
               <button className="btn-ghost btn-sm" onClick={bulkDelete}><Icon.Trash /> Delete</button>
-              <button className="btn-ghost btn-sm" onClick={() => setProxySel(new Set())}>Clear</button>
             </div>
           )}
           <button className="btn-ghost" onClick={bulkImportClipboard} title="Import proxies from the clipboard"><Icon.Download /> Import</button>
