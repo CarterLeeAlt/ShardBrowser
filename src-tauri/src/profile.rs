@@ -389,6 +389,30 @@ pub fn delete(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Persist a fully restored profile under its already-assigned fresh id.
+/// Unlike `save_raw`, this deliberately does not derive or fill fingerprint
+/// noise seeds: a complete backup must retain the source browser's exact
+/// canvas/audio/WebGL identity.
+pub fn save_restored(stored: &mut StoredProfile) -> Result<()> {
+    if stored.meta.id.is_empty() {
+        anyhow::bail!("restored profile id is required");
+    }
+    let path = path_for(&stored.meta.id)?;
+    if path.exists() {
+        anyhow::bail!("restored profile id already exists");
+    }
+    if stored.meta.created_at.is_none() {
+        stored.meta.created_at = Some(chrono_now_iso());
+    }
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, serde_json::to_string_pretty(stored)?)?;
+    if let Err(error) = fs::rename(&temporary, &path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
 /// Add `ms` to the persisted total_runtime_ms counter.  Called by the
 /// process Tracker when the engine exits — totals survive launcher restarts.
 pub fn add_runtime(id: &str, ms: u64) -> Result<()> {
