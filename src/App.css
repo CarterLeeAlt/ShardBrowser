@@ -466,27 +466,78 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   outline: 1px dashed var(--accent-hi);
   outline-offset: -2px;
 }
-/* During a drag, swallow pointer events on the tab's children so dragenter /
-   dragleave / drop ALL fire on the button itself.  Without this the
-   .tab-count span steals enter/leave events when the cursor crosses it,
-   the dragleave handler nulls dropTarget mid-drag, and drop never lands
-   on the parent button.  pointer-events: none doesn't affect clicks
-   because folder tabs already handle onClick on the button. */
+/* Keep the folder button itself as the single dnd-kit collision target. */
 .folder-tab > * { pointer-events: none; }
-/* Make every profile row indicate it can be picked up. */
-.row-wrap[draggable="true"] .cell-name { cursor: grab; }
-.row-wrap[draggable="true"]:active .cell-name { cursor: grabbing; }
-/* Drag preview chip — small pill that floats next to the cursor instead of
-   the default full-row ghost (which would obscure drop targets).  Positioned
-   off-screen because the browser rasterises it synchronously then we can
-   delete the node; the rasterised image is what actually follows the cursor. */
-.drag-chip {
-  position: absolute; top: -1000px; left: -1000px;
-  padding: 4px 10px; border-radius: 999px;
-  background: var(--accent); color: var(--bg-1);
-  font-size: 12px; font-weight: var(--font-weight-emphasis); white-space: nowrap;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+/* Manual row ordering. The handle owns pointer/keyboard drag activation so
+   checkboxes, inline editing, and row actions remain normal click targets. */
+.sort-head,
+.sort-handle-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sort-head { color: var(--tx-4); }
+.sort-handle {
+  width: 22px;
+  height: 28px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  color: var(--tx-4);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: grab;
+  touch-action: none;
+  transition: color .12s, background .12s, opacity .12s;
+}
+.sort-handle:hover:not(:disabled),
+.sort-handle:focus-visible {
+  color: var(--accent-hi);
+  background: var(--accent-dim);
+  outline: none;
+}
+.sort-handle:active:not(:disabled) { cursor: grabbing; }
+.sort-handle:disabled { opacity: .28; cursor: not-allowed; }
+.row-sorting { opacity: .32; }
+.row-drop-before::before,
+.row-drop-after::after {
+  content: "";
+  position: absolute;
+  z-index: 8;
+  left: 8px;
+  right: 8px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--accent-hi);
+  box-shadow: 0 0 0 1px var(--bg-1), 0 0 8px #8b5cf680;
   pointer-events: none;
+}
+.row-drop-before::before { top: -1px; }
+.row-drop-after::after { bottom: -1px; }
+.sort-overlay {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 260px;
+  padding: 7px 11px;
+  border: 1px solid #a78bfaaa;
+  border-radius: 999px;
+  color: #fff;
+  background: #7c3aedee;
+  font-size: 12px;
+  font-weight: var(--font-weight-emphasis);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 8px 24px #0006;
+  pointer-events: none;
+}
+.pager-drop-active {
+  color: var(--accent-hi) !important;
+  border-color: var(--accent) !important;
+  background: var(--accent-dim) !important;
+  box-shadow: 0 0 0 3px #8b5cf625;
 }
 /* Spin animation on the dedicated starting-state loader. */
 .btn-launch-ico.spin svg { animation: shardx-spin 0.9s linear infinite; }
@@ -592,18 +643,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   border-color: #fb71855e;
   box-shadow: 0 1px 2px #0006, 0 0 0 3px #fb71851a;
 }
-.icon-btn-on {
-  background: var(--accent-dim);
-  border-color: #8b5cf680;
-  color: var(--accent-hi);
-  box-shadow: inset 0 0 0 1px #8b5cf640;
-}
-.icon-btn-on:hover {
-  background: #8b5cf625;
-  color: var(--accent-hi);
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px #8b5cf625;
-}
 
 /* btn-ghost / btn-sm that contain an icon + label need the SVG to
    align with the text baseline.  Flex layout already does that; this
@@ -616,20 +655,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   padding: 0;
   display: inline-grid; place-items: center;
 }
-.pin-mark {
-  display: inline-flex;
-  align-items: center;
-  margin-right: 6px;
-  color: var(--accent-hi);
-  vertical-align: middle;
-  filter: drop-shadow(0 0 6px #8b5cf680);
-}
-.pin-mark svg { display: block; }
-.row-pinned {
-  background: linear-gradient(90deg, #8b5cf60d 0%, transparent 30%);
-}
-.row-pinned .cell-name .name-main { color: var(--accent-hi); }
-
 .pill {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 30px;
@@ -749,6 +774,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   --t-equal-share: 16.666667%;
   display: grid;
   grid-template-columns:
+    24px      /* sort handle */
     4px       /* shard strip */
     28px      /* checkbox */
     max(140px, calc(var(--t-equal-share) - 40px))  /* name */
@@ -757,7 +783,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
     max(120px, calc(var(--t-equal-share) - 60px))  /* notes */
     max(90px, calc(var(--t-equal-share) - 90px))   /* time */
     max(130px, calc(var(--t-equal-share) - 50px))  /* last run */
-    188px;                                          /* row actions */
+    160px;                                          /* row actions */
   gap: 10px;
   padding: 10px 16px 10px 0;
   align-items: center;
@@ -774,6 +800,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   --p-equal-share: 16.666667%;
   display: grid;
   grid-template-columns:
+    24px                                                /* sort handle */
     28px                                               /* checkbox */
     max(160px, var(--p-equal-share))                   /* name */
     max(80px, calc(var(--p-equal-share) - 80px))       /* type */
@@ -1000,7 +1027,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 
 .row-actions { display: flex; align-items: center; gap: 4px; justify-content: flex-end; }
 .t-cols > .row-actions {
-  min-width: 188px;
+  min-width: 160px;
   flex-wrap: nowrap;
 }
 .t-cols > .row-actions > .icon-btn {
@@ -2172,9 +2199,10 @@ button.status-pill.status-link:active { transform: translateY(1px); }
   border-radius: 5px;
   cursor: pointer;
 }
-.ctx-item:hover { background: var(--accent-dim); color: var(--accent-hi); }
+.ctx-item:hover:not(:disabled) { background: var(--accent-dim); color: var(--accent-hi); }
+.ctx-item:disabled { opacity: 0.45; cursor: not-allowed; }
 .ctx-danger { color: var(--err); }
-.ctx-danger:hover { background: #fb71851f; color: var(--err); }
+.ctx-danger:hover:not(:disabled) { background: #fb71851f; color: var(--err); }
 .ctx-sep {
   height: 1px;
   background: var(--bd-1);

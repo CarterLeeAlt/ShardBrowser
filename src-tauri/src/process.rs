@@ -1,13 +1,30 @@
 // Tracker for launched ShardX child processes; keyed by profile_id.
 
 use anyhow::Result;
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 use tokio::process::Child;
 
 pub struct Tracker {
     inner: Mutex<HashMap<String, ChildEntry>>,
+    launching: Mutex<HashSet<String>>,
+}
+
+/// Keeps a profile reserved while launch preflight is in progress. Dropping
+/// the guard after an error releases the reservation; successful tracking also
+/// clears it once the child process becomes authoritative.
+pub struct LaunchReservation<'a> {
+    tracker: &'a Tracker,
+    profile_id: String,
+}
+
+impl Drop for LaunchReservation<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut launching) = self.tracker.launching.lock() {
+            launching.remove(&self.profile_id);
+        }
+    }
 }
 
 struct ChildEntry {
@@ -32,7 +49,37 @@ impl Tracker {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
+            launching: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Atomically reserve one profile for launch. This blocks both duplicate
+    /// starts and mutations during the potentially slow launch preflight.
+    pub fn reserve_launch(&self, profile_id: &str) -> Result<LaunchReservation<'_>> {
+        // Serialize launch reservation against proxy edits/deletes. Whichever
+        // operation starts first completes its atomic state transition first.
+        let _resource_guard = lock_profile_resources()?;
+        if self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("process tracker lock poisoned"))?
+            .contains_key(profile_id)
+        {
+            anyhow::bail!("This browser profile is already running");
+        }
+
+        let mut launching = self
+            .launching
+            .lock()
+            .map_err(|_| anyhow::anyhow!("launch reservation lock poisoned"))?;
+        if !launching.insert(profile_id.to_string()) {
+            anyhow::bail!("This browser profile is already starting");
+        }
+
+        Ok(LaunchReservation {
+            tracker: self,
+            profile_id: profile_id.to_string(),
+        })
     }
 
     /// Take a spawned child + monitor it; entry removed on exit/kill.
@@ -46,6 +93,9 @@ impl Tracker {
                 profile_id.clone(),
                 ChildEntry { pid, killer: tx, cdp: None, started_at: Instant::now() },
             );
+        }
+        if let Ok(mut launching) = self.launching.lock() {
+            launching.remove(&profile_id);
         }
 
         // Graceful shutdown (taskkill WM_CLOSE) → 5s → hard kill.
@@ -132,6 +182,36 @@ impl Tracker {
             .unwrap_or(false)
     }
 
+    pub fn is_running_profile(&self, profile_id: &str) -> bool {
+        self.inner
+            .lock()
+            .map(|entries| entries.contains_key(profile_id))
+            .unwrap_or(false)
+    }
+
+    /// Running and launch-preflight profiles are both locked against mutation.
+    pub fn is_profile_active(&self, profile_id: &str) -> bool {
+        if self.is_running_profile(profile_id) {
+            return true;
+        }
+        self.launching
+            .lock()
+            .map(|profiles| profiles.contains(profile_id))
+            .unwrap_or(false)
+    }
+
+    pub fn active_profile_ids(&self) -> Vec<String> {
+        let mut active: HashSet<String> = self
+            .inner
+            .lock()
+            .map(|entries| entries.keys().cloned().collect())
+            .unwrap_or_default();
+        if let Ok(launching) = self.launching.lock() {
+            active.extend(launching.iter().cloned());
+        }
+        active.into_iter().collect()
+    }
+
     pub async fn kill(&self, profile_id: &str) -> Result<bool> {
         let killer = {
             let g = self.inner.lock().unwrap();
@@ -148,6 +228,31 @@ impl Tracker {
     pub fn shared() -> &'static Tracker {
         static INSTANCE: std::sync::OnceLock<Tracker> = std::sync::OnceLock::new();
         INSTANCE.get_or_init(Tracker::new)
+    }
+}
+
+pub fn lock_profile_resources() -> Result<MutexGuard<'static, ()>> {
+    static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| anyhow::anyhow!("profile resource lock poisoned"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Tracker;
+
+    #[test]
+    fn launch_reservation_blocks_duplicate_starts_until_released() {
+        let tracker = Tracker::new();
+        let reservation = tracker.reserve_launch("profile-1").unwrap();
+
+        assert!(tracker.is_profile_active("profile-1"));
+        assert!(tracker.reserve_launch("profile-1").is_err());
+
+        drop(reservation);
+        assert!(!tracker.is_profile_active("profile-1"));
+        assert!(tracker.reserve_launch("profile-1").is_ok());
     }
 }
 
