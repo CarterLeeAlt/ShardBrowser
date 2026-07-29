@@ -1819,17 +1819,18 @@ function BrowsersView() {
           const px = p.proxy_id ? proxyMap[p.proxy_id] : null;
           const proxySnapshot = px ? proxySnapshots[px.id] : undefined;
           const proxyCountry = (proxySnapshot?.country_code || px?.country || "").trim().toUpperCase();
-          const locationParts = [proxySnapshot?.city, proxySnapshot?.region]
-            .map((part) => (part || "").trim())
-            .filter((part, index, all) => !!part && all.findIndex((v) => v.toLowerCase() === part.toLowerCase()) === index);
-          const proxyLocation = locationParts.join(", ")
-            || (proxySnapshot?.country || "").trim();
+          const proxyLocation = compactProxyLocation(
+            proxySnapshot?.city,
+            proxySnapshot?.region,
+            proxySnapshot?.country,
+          );
           const hostLooksLikeIp = !!px && (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(px.host) || px.host.includes(":"));
           // Before the first test, an IP-literal endpoint is a useful fallback.
           // Once a test exists (including a failed one), never relabel the
           // endpoint as the detected exit IP.
           const proxyIp = (proxySnapshot?.ip || (!proxySnapshot && hostLooksLikeIp ? px?.host : "") || "").trim();
           const proxyDetailLocation = proxyLocation || (!proxySnapshot && proxyIp ? proxyCountry : "");
+          const proxyDetailText = [proxyDetailLocation, proxyIp].filter(Boolean).join(" · ");
           const isRunning = !!running[p.id];
           const isStarting = !isRunning && startBusy.has(p.id);
           const isExpanded = expanded === p.id;
@@ -1908,11 +1909,11 @@ function BrowsersView() {
                           </>
                         )}
                       </div>
-                      <div className={`proxy-detail ${!proxyDetailLocation && !proxyIp ? "muted" : ""}`}>
-                        {proxyDetailLocation && <span>{proxyDetailLocation}</span>}
-                        {proxyDetailLocation && proxyIp && <span aria-hidden="true">·</span>}
-                        {proxyIp && <span className="mono">{proxyIp}</span>}
-                        {!proxyDetailLocation && !proxyIp && <span>No test data</span>}
+                      <div
+                        className={`proxy-detail ${proxyDetailText ? "" : "muted"}`}
+                        title={proxyDetailText || "No test data"}
+                      >
+                        <span className="proxy-detail-text">{proxyDetailText || "No test data"}</span>
                       </div>
                     </div>
                   ) : <span className="muted small">— direct —</span>}
@@ -2019,6 +2020,23 @@ function BrowsersView() {
       )}
     </section>
   );
+}
+
+/// Keep browser-table proxy metadata compact. If city and region overlap,
+/// retain the more specific value ("Singapore" + "Central Singapore" becomes
+/// "Central Singapore"). Preserve both values when they are distinct, such as
+/// "Los Angeles, California".
+function compactProxyLocation(cityValue?: string, regionValue?: string, countryValue?: string) {
+  const city = (cityValue || "").trim();
+  const region = (regionValue || "").trim();
+  const country = (countryValue || "").trim();
+  if (!city) return region || country;
+  if (!region) return city;
+  const cityKey = city.toLowerCase();
+  const regionKey = region.toLowerCase();
+  if (regionKey.includes(cityKey)) return region;
+  if (cityKey.includes(regionKey)) return city;
+  return `${city}, ${region}`;
 }
 
 function proxyBindingLabel(proxy: ProxyEntry, snapshot?: ProxyTestSnapshot) {
