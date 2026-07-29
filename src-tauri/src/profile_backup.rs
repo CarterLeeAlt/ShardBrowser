@@ -846,7 +846,7 @@ pub(crate) fn import(paths: Vec<String>) -> std::result::Result<ProfileBackupSum
         return Err("at most 100 profiles can be imported at once".into());
     }
     let mut unique_paths = HashSet::new();
-    let mut prepared = Vec::with_capacity(paths.len());
+    let mut prepared: Vec<PreparedImport> = Vec::with_capacity(paths.len());
     let mut backup_ids = HashSet::new();
     for raw_path in paths {
         let path = PathBuf::from(raw_path);
