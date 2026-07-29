@@ -5,7 +5,7 @@ src-tauri/icons/shardx-browser-taskbar-base.png.
 
 The generated browser-base ICO supplies the exact native outer frame consumed
 by Rust before it adds a NAME badge.  The launcher is distinguished only by a
-compact white play symbol aligned to the browser lens' visual center.  Install
+bold aqua chevron aligned to the browser lens' measured visual center. Install
 Pillow and run this file from any working directory.
 """
 
@@ -30,9 +30,10 @@ WINDOWS_ICON_SIZES = (16, 20, 24, 30, 32, 40, 48, 64, 128, 256)
 # the window is created.
 TAURI_LAUNCHER_ICON_ORDER = (24, 16, 20, 30, 32, 40, 48, 64, 128, 256)
 SUPERSAMPLING = 4
-PLAY_WIDTH = 58
-PLAY_HEIGHT = 68
-PLAY_CORNER_RADIUS = 3
+CHEVRON_PATH_WIDTH = 40
+CHEVRON_PATH_HEIGHT = 50
+CHEVRON_STROKE_WIDTH = 18
+CHEVRON_OUTLINE_WIDTH = 1.5
 
 
 def assert_canonical_base(base: Image.Image) -> None:
@@ -109,38 +110,59 @@ def translated_mask(mask: Image.Image, offset_x: float, offset_y: float) -> Imag
     )
 
 
-def centered_play_mask(
+def chevron_outline_mask(mask: Image.Image) -> Image.Image:
+    # Dilate in supersampled space so the 1.5px master outline scales down to
+    # a true subpixel edge instead of being forced to a full pixel in every
+    # small ICO frame. This preserves the chevron notch at 16px and 20px.
+    scaled_size = (mask.width * SUPERSAMPLING, mask.height * SUPERSAMPLING)
+    radius = round(
+        CHEVRON_OUTLINE_WIDTH * mask.width * SUPERSAMPLING / 256
+    )
+    if radius == 0:
+        return mask.copy()
+
+    enlarged = mask.resize(scaled_size, Image.Resampling.LANCZOS)
+    outlined = enlarged.filter(ImageFilter.MaxFilter(radius * 2 + 1))
+    return outlined.resize(mask.size, Image.Resampling.LANCZOS)
+
+
+def centered_chevron_mask(
     size: int,
     lens_center: tuple[float, float],
 ) -> Image.Image:
-    """Draw a rounded play triangle whose alpha centroid matches the lens."""
+    """Draw a rounded chevron whose outlined alpha centroid matches the lens."""
     canvas_size = size * SUPERSAMPLING
     center = canvas_size / 2
-    width = PLAY_WIDTH * size * SUPERSAMPLING / 256
-    height = PLAY_HEIGHT * size * SUPERSAMPLING / 256
+    path_width = CHEVRON_PATH_WIDTH * size * SUPERSAMPLING / 256
+    path_height = CHEVRON_PATH_HEIGHT * size * SUPERSAMPLING / 256
+    stroke_width = max(1, round(CHEVRON_STROKE_WIDTH * size * SUPERSAMPLING / 256))
+    stroke_radius = stroke_width / 2
 
-    # For a right-pointing triangle with two vertices on the left, positioning
-    # the left edge one third of its width before the target places its area
-    # centroid at the target before rasterization.
-    left = center - width / 3
-    right = center + width * 2 / 3
-    top = center - height / 2
-    bottom = center + height / 2
-
-    raw = Image.new("L", (canvas_size, canvas_size), 0)
-    ImageDraw.Draw(raw).polygon(
-        (
-            (round(left), round(top)),
-            (round(right), round(center)),
-            (round(left), round(bottom)),
-        ),
-        fill=255,
+    left = center - path_width / 2
+    right = center + path_width / 2
+    top = center - path_height / 2
+    bottom = center + path_height / 2
+    points = (
+        (round(left), round(top)),
+        (round(right), round(center)),
+        (round(left), round(bottom)),
     )
 
-    corner_radius = PLAY_CORNER_RADIUS * size * SUPERSAMPLING / 256
-    if corner_radius > 0:
-        raw = raw.filter(ImageFilter.GaussianBlur(corner_radius))
-        raw = raw.point(lambda value: 255 if value >= 128 else 0)
+    raw = Image.new("L", (canvas_size, canvas_size), 0)
+    draw = ImageDraw.Draw(raw)
+    draw.line(points, fill=255, width=stroke_width, joint="curve")
+    # Explicit round caps make the endpoints stable across Pillow versions and
+    # keep the glyph readable in the native 16px and 20px ICO frames.
+    for x, y in points:
+        draw.ellipse(
+            (
+                round(x - stroke_radius),
+                round(y - stroke_radius),
+                round(x + stroke_radius),
+                round(y + stroke_radius),
+            ),
+            fill=255,
+        )
 
     target_x = lens_center[0] * size / 256 - 0.5
     target_y = lens_center[1] * size / 256 - 0.5
@@ -148,13 +170,13 @@ def centered_play_mask(
     offset_y = 0.0
     final = raw.resize((size, size), Image.Resampling.LANCZOS)
 
-    # Downsampling can introduce a fractional centroid shift. Iterate in the
-    # supersampled space until the emitted frame, not merely its vector source,
-    # is centered to within one hundredth of a pixel.
+    # Downsampling and the white outline can both introduce a fractional shift.
+    # Iterate in supersampled space until the complete emitted glyph, not just
+    # its centerline, is aligned to the lens.
     for _ in range(6):
         shifted = translated_mask(raw, offset_x, offset_y)
         final = shifted.resize((size, size), Image.Resampling.LANCZOS)
-        centroid_x, centroid_y = mask_centroid(final)
+        centroid_x, centroid_y = mask_centroid(chevron_outline_mask(final))
         error_x = target_x - centroid_x
         error_y = target_y - centroid_y
         if abs(error_x) <= 0.01 and abs(error_y) <= 0.01:
@@ -162,10 +184,10 @@ def centered_play_mask(
         offset_x += error_x * SUPERSAMPLING
         offset_y += error_y * SUPERSAMPLING
 
-    centroid_x, centroid_y = mask_centroid(final)
+    centroid_x, centroid_y = mask_centroid(chevron_outline_mask(final))
     if abs(centroid_x - target_x) > 0.03 or abs(centroid_y - target_y) > 0.03:
         raise ValueError(
-            f"play triangle centroid is not aligned at {size}px: "
+            f"chevron centroid is not aligned at {size}px: "
             f"({centroid_x:.3f}, {centroid_y:.3f}) vs "
             f"({target_x:.3f}, {target_y:.3f})"
         )
@@ -189,14 +211,16 @@ def launcher_overlay(
     lens_center: tuple[float, float],
 ) -> Image.Image:
     overlay = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    play = centered_play_mask(size, lens_center)
+    chevron = centered_chevron_mask(size, lens_center)
+    outline = chevron_outline_mask(chevron)
 
-    # A centered halo preserves the triangle's visual centroid while separating
-    # the white glyph from both bright cyan and dark blue parts of the lens.
+    # A restrained halo and white outline separate the pale aqua glyph from
+    # both bright cyan and dark blue parts of the lens.
     halo_radius = max(0.2, 1.4 * size / 256)
-    halo = play.filter(ImageFilter.GaussianBlur(halo_radius))
+    halo = outline.filter(ImageFilter.GaussianBlur(halo_radius))
     overlay = Image.alpha_composite(overlay, masked_color(halo, (0, 24, 58, 105)))
-    overlay = Image.alpha_composite(overlay, masked_color(play, (250, 250, 248, 255)))
+    overlay = Image.alpha_composite(overlay, masked_color(outline, (250, 252, 252, 255)))
+    overlay = Image.alpha_composite(overlay, masked_color(chevron, (207, 252, 255, 255)))
     return overlay
 
 
