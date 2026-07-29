@@ -2129,7 +2129,7 @@ function BrowsersView() {
               }}
             />
           </div>
-          <div>Name</div><div>Status</div><div>Proxy</div><div>Notes</div><div className="head-time">Time</div><div className="head-lastrun">Last run</div><div className="head-actions">ACTIONS</div>
+          <div>Name</div><div>Status</div><div className="head-proxy">Proxy</div><div>Notes</div><div className="head-time">Time</div><div className="head-lastrun">Last run</div><div className="head-actions">ACTIONS</div>
         </div>
         {expanded === "__new__" && draft && (
           <div className="row-wrap row-expanded row-new">
@@ -2234,7 +2234,7 @@ function BrowsersView() {
                   title={isActive ? "Stop the browser or wait for it to finish starting before changing proxy" : "Change proxy"}
                 >
                   {px ? (
-                    <div className="proxy-cell">
+                    <>
                       <div className="proxy-main">
                         <span className={`badge badge-${px.kind}`}>{px.kind}</span>
                         {proxyCountry && (
@@ -2250,7 +2250,7 @@ function BrowsersView() {
                       >
                         <span className="proxy-detail-text">{proxyDetailText || "No test data"}</span>
                       </div>
-                    </div>
+                    </>
                   ) : <span className="muted small">— direct —</span>}
                 </div>
                 <div
