@@ -437,11 +437,13 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
     post:
       tags: [Profiles]
-      summary: Import cookies
+      summary: Replace cookies
       description: |
-        Writes cookies into the profile's cookie store (re-encrypting to
-        Chromium's v10 scheme). The profile **must be stopped** — a running
-        browser rewrites the store on exit and would clobber the import.
+        Deletes every existing cookie, then writes the supplied cookies into
+        the profile's cookie store (re-encrypting to Chromium's v10 scheme).
+        The delete and insert run in one transaction, so a failed import rolls
+        back to the previous cookie set. The profile **must be stopped** — a
+        running browser rewrites the store on exit and would clobber the import.
       parameters:
         - $ref: "#/components/parameters/ProfileId"
       requestBody:
@@ -457,7 +459,7 @@ paths:
                   items: { $ref: "#/components/schemas/Cookie" }
       responses:
         "200":
-          description: Imported.
+          description: Existing cookies replaced.
           content:
             application/json:
               schema:

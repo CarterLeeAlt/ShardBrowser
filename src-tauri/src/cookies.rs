@@ -347,7 +347,8 @@ pub fn export(profile_id: &str) -> Result<Vec<Cookie>> {
     Ok(out)
 }
 
-/// Import cookies (v10-encrypted). Caller MUST stop the profile first.
+/// Replace all cookies with the supplied v10-encrypted set.
+/// Caller MUST stop the profile first.
 pub fn import(profile_id: &str, cookies: &[Cookie]) -> Result<usize> {
     let udd = profile::user_data_dir(profile_id)?;
     let path = cookies_db_path(&udd);
@@ -361,6 +362,10 @@ pub fn import(profile_id: &str, cookies: &[Cookie]) -> Result<usize> {
 
     let now = now_chromium();
     let tx = conn.unchecked_transaction()?;
+    // Clearing and inserting share one transaction: any encryption/database
+    // failure rolls the deletion back, so the previous cookie store remains
+    // intact instead of being left empty or partially imported.
+    tx.execute("DELETE FROM cookies", [])?;
     {
         let mut stmt = tx.prepare(
             "INSERT OR REPLACE INTO cookies (\

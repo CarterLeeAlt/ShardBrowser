@@ -1133,9 +1133,7 @@ fn cookies_export(profile_id: String) -> Result<Vec<cookies::Cookie>, String> {
     cookies::export(&profile_id).map_err(|e| e.to_string())
 }
 
-/// Export cookies to a generated file under the portable exports directory.
-#[tauri::command]
-fn cookies_export_portable(profile_id: String) -> Result<usize, String> {
+fn validate_export_profile_id(profile_id: &str) -> Result<(), String> {
     if profile_id.is_empty()
         || !profile_id
             .chars()
@@ -1143,6 +1141,13 @@ fn cookies_export_portable(profile_id: String) -> Result<usize, String> {
     {
         return Err("invalid profile id".into());
     }
+    Ok(())
+}
+
+/// Export cookies to a generated file under the portable exports directory.
+#[tauri::command]
+fn cookies_export_portable(profile_id: String) -> Result<usize, String> {
+    validate_export_profile_id(&profile_id)?;
     let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
     profile::ensure_stopped(&profile_id).map_err(|e| e.to_string())?;
     let cookies = cookies::export(&profile_id).map_err(|e| e.to_string())?;
@@ -1155,6 +1160,51 @@ fn cookies_export_portable(profile_id: String) -> Result<usize, String> {
         .map_err(|e| e.to_string())?
         .join(format!("{profile_id}-cookies-{stamp}.json"));
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    Ok(cookies.len())
+}
+
+/// Export the profile's decrypted cookies and its current FingerprintConfig as
+/// two generated JSON files under the portable exports directory.
+#[tauri::command]
+fn profile_export_all(profile_id: String) -> Result<usize, String> {
+    validate_export_profile_id(&profile_id)?;
+    let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
+    profile::ensure_stopped(&profile_id).map_err(|e| e.to_string())?;
+
+    let cookies = cookies::export(&profile_id).map_err(|e| e.to_string())?;
+    let stored = profile::load_raw(&profile_id).map_err(|e| e.to_string())?;
+    let cookies_json = serde_json::to_string_pretty(&cookies).map_err(|e| e.to_string())?;
+    // Export only the verbatim FingerprintConfig. Launcher-owned _meta fields
+    // such as id, proxy binding, folder, and runtime must not leak into a
+    // fingerprint-library import.
+    let fingerprint_json =
+        serde_json::to_string_pretty(&stored.config).map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis();
+    let directory = store::exports_dir().map_err(|e| e.to_string())?;
+    let cookies_path = directory.join(format!("{profile_id}-cookies-{stamp}.json"));
+    let fingerprint_path = directory.join(format!("{profile_id}-fingerprint-{stamp}.json"));
+    let cookies_temp = cookies_path.with_extension("json.tmp");
+    let fingerprint_temp = fingerprint_path.with_extension("json.tmp");
+
+    std::fs::write(&cookies_temp, cookies_json).map_err(|e| e.to_string())?;
+    if let Err(error) = std::fs::write(&fingerprint_temp, fingerprint_json) {
+        let _ = std::fs::remove_file(&cookies_temp);
+        return Err(error.to_string());
+    }
+    if let Err(error) = std::fs::rename(&cookies_temp, &cookies_path) {
+        let _ = std::fs::remove_file(&cookies_temp);
+        let _ = std::fs::remove_file(&fingerprint_temp);
+        return Err(error.to_string());
+    }
+    if let Err(error) = std::fs::rename(&fingerprint_temp, &fingerprint_path) {
+        // Do not report a successful pair when only one file became visible.
+        let _ = std::fs::remove_file(&cookies_path);
+        let _ = std::fs::remove_file(&fingerprint_temp);
+        return Err(error.to_string());
+    }
     Ok(cookies.len())
 }
 
@@ -1330,6 +1380,7 @@ pub fn run() {
             api_regenerate_token,
             cookies_export,
             cookies_export_portable,
+            profile_export_all,
             cookies_import,
             mcp_download,
             runtime::runtime_check_updates,
