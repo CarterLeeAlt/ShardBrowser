@@ -39,6 +39,7 @@ mod proxy;
 mod randomize;
 mod runtime;
 mod screen;
+mod storage;
 
 use std::fs;
 use std::path::PathBuf;
@@ -169,21 +170,21 @@ impl ShardX {
     /// Persist a profile's current config to its on-disk folder. Call this
     /// after mutating a reopened profile (e.g. `set_noise`) to keep changes.
     pub fn save_profile(&self, profile: &Profile) -> Result<()> {
-        let path = self.profile_json_path(&profile.id);
+        let path = self.profile_json_path(&profile.id)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&path, serde_json::to_string_pretty(&profile.config)?)?;
+        storage::atomic_write(&path, serde_json::to_string_pretty(&profile.config)?.as_bytes())?;
         Ok(())
     }
 
     /// Reopen a previously created profile by id (same fingerprint + state).
     pub fn open_profile(&self, id: &str) -> Result<Profile> {
-        let path = self.profile_json_path(id);
+        let path = self.profile_json_path(id)?;
         if !path.exists() {
             return Err(anyhow!("saved profile '{id}' not found"));
         }
-        let config: Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
+        let config: Value = storage::read_json_with_backup(&path)?;
         Ok(Profile::new(config, Some(id.to_string())))
     }
 
@@ -207,15 +208,15 @@ impl ShardX {
 
     /// Delete a saved profile and all its state (cookies, cache, …).
     pub fn delete_profile(&self, id: &str) -> Result<()> {
-        let dir = self.runtime.profiles_root().join(id);
+        let dir = profile::storage_child(&self.runtime.profiles_root(), id)?;
         if dir.exists() {
             fs::remove_dir_all(&dir)?;
         }
         Ok(())
     }
 
-    fn profile_json_path(&self, id: &str) -> PathBuf {
-        self.runtime.profiles_root().join(id).join("profile.json")
+    fn profile_json_path(&self, id: &str) -> Result<PathBuf> {
+        Ok(profile::storage_child(&self.runtime.profiles_root(), id)?.join("profile.json"))
     }
 
     /// Launch a `Profile`. Get one from [`ShardX::create_profile`] (the

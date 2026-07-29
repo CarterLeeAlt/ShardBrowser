@@ -16,6 +16,18 @@ const MANIFEST_URL: &str =
 const BUNDLED_MANIFEST_JSON: &str = include_str!("../../runtime.json");
 /// Chromium version baked into the current Windows runtime bundle.
 const CHROMIUM_VERSION: &str = "149.0.7827.103";
+const MAX_RUNTIME_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+const MAX_RUNTIME_EXTRACTED_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+const MAX_RUNTIME_ARCHIVE_ENTRIES: usize = 250_000;
+const RUNTIME_STAGE_DIR: &str = ".runtime-stage";
+const ENGINE_ROLLBACK_DIR: &str = ".ShardX-Windows.rollback";
+const WIDEVINE_ROLLBACK_DIR: &str = ".WidevineCdm.rollback";
+static RUNTIME_INSTALL_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+fn runtime_install_lock() -> &'static tokio::sync::Mutex<()> {
+    RUNTIME_INSTALL_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ArchiveSpec {
@@ -139,16 +151,22 @@ fn version_is_newer(candidate: &str, installed: Option<&str>) -> bool {
 
 fn load_manifest() -> Manifest {
     let Ok(p) = manifest_path() else { return Manifest::default() };
-    fs::read_to_string(p)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    if !p.exists() {
+        return Manifest::default();
+    }
+    match crate::store::load_json_with_backup(&p) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            eprintln!("[runtime] manifest recovery failed: {error}");
+            Manifest::default()
+        }
+    }
 }
 
 fn save_manifest(m: &Manifest) -> Result<()> {
     let p = manifest_path()?;
     fs::create_dir_all(p.parent().unwrap())?;
-    fs::write(p, serde_json::to_string_pretty(m)?)?;
+    crate::store::atomic_write(&p, serde_json::to_string_pretty(m)?.as_bytes())?;
     Ok(())
 }
 #[derive(Serialize, Clone, Debug)]
@@ -361,7 +379,7 @@ fn migrate_dir_to(
         }
 
         if changed {
-            fs::write(&p, serde_json::to_string_pretty(&cfg)?)?;
+            crate::store::atomic_write(&p, serde_json::to_string_pretty(&cfg)?.as_bytes())?;
             n += 1;
         }
     }
@@ -391,6 +409,11 @@ fn migrate_all_to(
 /// GitHub or compares versions.
 #[tauri::command]
 pub fn runtime_local_status() -> Result<RuntimeStatus, String> {
+    let base = runtime_dir().map_err(|error| error.to_string())?;
+    fs::create_dir_all(&base).map_err(|error| error.to_string())?;
+    if let Ok(_guard) = runtime_install_lock().try_lock() {
+        recover_interrupted_runtime_swap(&base).map_err(|error| error.to_string())?;
+    }
     let local = load_manifest();
     Ok(local_status(&local))
 }
@@ -438,9 +461,11 @@ pub async fn runtime_check_updates() -> Result<RuntimeUpdateStatus, String> {
 
 #[tauri::command]
 pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatus, String> {
+    let _install_guard = runtime_install_lock().lock().await;
     let spec = host_spec();
     let base = runtime_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+    recover_interrupted_runtime_swap(&base).map_err(|error| error.to_string())?;
 
     let local = load_manifest();
     let installed_now = local_status(&local).installed;
@@ -449,31 +474,37 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
     // Setup installs a missing engine; repair explicitly forces a coherent
     // reinstall. A newer remote version alone never triggers installation.
     let need_browser = force || !installed_now;
-    let browser_etag = if need_browser {
-        // Wipe the old engine tree first. The archive extracts *over* the
-        // existing dir but never deletes files the new version dropped — most
-        // critically the previous `<version>.manifest`, which lingers beside the
-        // new one and poisons version detection into an endless re-download;
-        // stale DLLs could also be loaded.
-        let _ = fs::remove_dir_all(base.join(engine_root_dir()));
-        download_and_extract(&window, &spec.browser, &base)
-            .await
-            .map_err(|e| e.to_string())?
-    } else {
-        local.browser_etag.clone().unwrap_or_default()
-    };
 
     // Repair Widevine when its required manifest is missing, regardless of the
     // persisted ETag. This is integrity repair, not an update check.
     let repair_widevine = !widevine_is_installed(&local);
-    let widevine_etag = if need_browser || repair_widevine {
-        let etag = download_and_extract(&window, &spec.widevine, &base)
-            .await
-            .map_err(|e| e.to_string())?;
-        place_widevine(&base).map_err(|e| e.to_string())?;
-        Some(etag)
+    if (need_browser || repair_widevine)
+        && !crate::process::Tracker::shared().active_profile_ids().is_empty()
+    {
+        return Err(
+            "Stop all running or starting browsers before repairing the portable Runtime".into(),
+        );
+    }
+    let (browser_etag, widevine_etag) = if need_browser {
+        let (browser_etag, widevine_etag) =
+            install_complete_runtime_transactionally(&window, &spec, &base)
+                .await
+                .map_err(|error| error.to_string())?;
+        (browser_etag, Some(widevine_etag))
     } else {
-        local.widevine_etag.clone()
+        let widevine_etag = if repair_widevine {
+            Some(
+                install_widevine_transactionally(&window, &spec.widevine, &base)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            )
+        } else {
+            local.widevine_etag.clone()
+        };
+        (
+            local.browser_etag.clone().unwrap_or_default(),
+            widevine_etag,
+        )
     };
 
     // Fingerprint seed: overwrites bundled templates, leaves user-added files;
@@ -529,6 +560,152 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
 
     let _ = window.emit("runtime:done", ());
     runtime_local_status()
+}
+
+async fn install_complete_runtime_transactionally(
+    window: &Window,
+    spec: &PlatformSpec,
+    base: &Path,
+) -> Result<(String, String)> {
+    let stage = base.join(RUNTIME_STAGE_DIR);
+    let _ = fs::remove_dir_all(&stage);
+    fs::create_dir_all(&stage)?;
+    let prepared = async {
+        let browser_etag = download_and_extract(window, &spec.browser, &stage).await?;
+        let widevine_etag = download_and_extract(window, &spec.widevine, &stage).await?;
+        place_widevine(&stage)?;
+        validate_runtime_tree(&stage)?;
+        Ok::<_, anyhow::Error>((browser_etag, widevine_etag))
+    }
+    .await;
+    let (browser_etag, widevine_etag) = match prepared {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&stage);
+            return Err(error);
+        }
+    };
+
+    replace_directory_transactionally(
+        &stage.join(engine_root_dir()),
+        &base.join(engine_root_dir()),
+        &base.join(ENGINE_ROLLBACK_DIR),
+    )?;
+    let _ = fs::remove_dir_all(&stage);
+    Ok((browser_etag, widevine_etag))
+}
+
+async fn install_widevine_transactionally(
+    window: &Window,
+    spec: &ArchiveSpec,
+    base: &Path,
+) -> Result<String> {
+    let stage = base.join(RUNTIME_STAGE_DIR);
+    let _ = fs::remove_dir_all(&stage);
+    fs::create_dir_all(&stage)?;
+    let result = async {
+        let etag = download_and_extract(window, spec, &stage).await?;
+        let staged = stage.join("ShardX-Widevine-Win").join("WidevineCdm");
+        validate_widevine_tree(&staged)?;
+        replace_directory_transactionally(
+            &staged,
+            &base.join(engine_root_dir()).join("WidevineCdm"),
+            &base.join(WIDEVINE_ROLLBACK_DIR),
+        )?;
+        Ok::<_, anyhow::Error>(etag)
+    }
+    .await;
+    let _ = fs::remove_dir_all(&stage);
+    result
+}
+
+fn replace_directory_transactionally(staged: &Path, live: &Path, rollback: &Path) -> Result<()> {
+    if !staged.is_dir() {
+        anyhow::bail!("staged Runtime directory is missing: {}", staged.display());
+    }
+    if rollback.exists() {
+        fs::remove_dir_all(rollback).with_context(|| {
+            format!("remove stale Runtime rollback directory {}", rollback.display())
+        })?;
+    }
+    let had_live = live.exists();
+    if had_live {
+        fs::rename(live, rollback)
+            .with_context(|| format!("move current Runtime {} to rollback", live.display()))?;
+    }
+    if let Err(error) = fs::rename(staged, live) {
+        if had_live {
+            if let Err(rollback_error) = fs::rename(rollback, live) {
+                return Err(anyhow::anyhow!(
+                    "failed to publish staged Runtime {}: {error}; restoring the previous Runtime also failed: {rollback_error}",
+                    live.display()
+                ));
+            }
+        }
+        return Err(error)
+            .with_context(|| format!("publish staged Runtime {}", live.display()));
+    }
+    if rollback.exists() {
+        if let Err(error) = fs::remove_dir_all(rollback) {
+            eprintln!(
+                "[runtime] installed successfully but could not remove rollback {}: {error}",
+                rollback.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn recover_interrupted_runtime_swap(base: &Path) -> Result<()> {
+    let live_engine = base.join(engine_root_dir());
+    let engine_rollback = base.join(ENGINE_ROLLBACK_DIR);
+    if engine_rollback.exists() {
+        if live_engine.exists() {
+            if let Err(error) = fs::remove_dir_all(&engine_rollback) {
+                eprintln!(
+                    "[runtime] current engine is valid but old rollback cleanup is still pending: {error}"
+                );
+            }
+        } else {
+            fs::rename(&engine_rollback, &live_engine)?;
+        }
+    }
+    let live_widevine = live_engine.join("WidevineCdm");
+    let widevine_rollback = base.join(WIDEVINE_ROLLBACK_DIR);
+    if widevine_rollback.exists() {
+        if live_widevine.exists() {
+            if let Err(error) = fs::remove_dir_all(&widevine_rollback) {
+                eprintln!(
+                    "[runtime] current Widevine is valid but old rollback cleanup is still pending: {error}"
+                );
+            }
+        } else {
+            fs::rename(&widevine_rollback, &live_widevine)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_runtime_tree(root: &Path) -> Result<()> {
+    let engine = root.join(engine_root_dir());
+    for required in ["chrome.exe", "chrome.dll", "resources.pak"] {
+        let path = engine.join(required);
+        let metadata = fs::metadata(&path)
+            .with_context(|| format!("staged Runtime is missing {required}"))?;
+        if !metadata.is_file() || metadata.len() == 0 {
+            anyhow::bail!("staged Runtime file is empty or invalid: {}", path.display());
+        }
+    }
+    validate_widevine_tree(&engine.join("WidevineCdm"))
+}
+
+fn validate_widevine_tree(root: &Path) -> Result<()> {
+    let manifest = root.join("manifest.json");
+    let metadata = fs::metadata(&manifest).context("staged Widevine manifest is missing")?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        anyhow::bail!("staged Widevine manifest is empty");
+    }
+    Ok(())
 }
 
 /// Download + seed fingerprint library. Bundled templates are always
@@ -600,6 +777,13 @@ async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) 
         .build()?;
     let mut resp = client.get(&url).send().await?.error_for_status()?;
     let total = resp.content_length().unwrap_or(0);
+    if total > MAX_RUNTIME_ARCHIVE_BYTES {
+        anyhow::bail!(
+            "{} exceeds the {} GiB portable Runtime download limit",
+            spec.key,
+            MAX_RUNTIME_ARCHIVE_BYTES / 1024 / 1024 / 1024
+        );
+    }
     let etag = resp
         .headers()
         .get("etag")
@@ -608,13 +792,19 @@ async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) 
         .unwrap_or_default();
 
     let tmp = base.join(format!("{}.tmp", spec.key));
-    {
+    let operation = async {
         let mut out = tokio::fs::File::create(&tmp).await?;
         let mut received: u64 = 0;
         let mut last_pct: u64 = u64::MAX;
         while let Some(chunk) = resp.chunk().await? {
             out.write_all(&chunk).await?;
             received += chunk.len() as u64;
+            if received > MAX_RUNTIME_ARCHIVE_BYTES {
+                anyhow::bail!(
+                    "{} exceeded the portable Runtime download limit",
+                    spec.key
+                );
+            }
             // Emit once per integer percent.
             let pct = if total > 0 { received * 100 / total } else { 0 };
             if pct != last_pct {
@@ -632,32 +822,81 @@ async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) 
             }
         }
         out.flush().await?;
+        drop(out);
+
+        let _ = window.emit(
+            "runtime:progress",
+            serde_json::json!({
+                "label": spec.label,
+                "phase": "extract",
+                "received": total,
+                "total": total,
+                "percent": 100,
+            }),
+        );
+
+        let zip_path = tmp.clone();
+        let dest = base.to_path_buf();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let f = fs::File::open(&zip_path)?;
+            let mut archive = zip::ZipArchive::new(f)?;
+            if archive.len() > MAX_RUNTIME_ARCHIVE_ENTRIES {
+                anyhow::bail!("Runtime archive contains too many entries");
+            }
+            let mut extracted_bytes = 0u64;
+            for index in 0..archive.len() {
+                let entry = archive.by_index(index)?;
+                if entry.enclosed_name().is_none() {
+                    anyhow::bail!("Runtime archive contains an unsafe path: {}", entry.name());
+                }
+                if entry
+                    .unix_mode()
+                    .is_some_and(|mode| mode & 0o170000 == 0o120000)
+                {
+                    anyhow::bail!("Runtime archive contains an unsupported symbolic link");
+                }
+                extracted_bytes = extracted_bytes
+                    .checked_add(entry.size())
+                    .context("Runtime archive size overflow")?;
+                if extracted_bytes > MAX_RUNTIME_EXTRACTED_BYTES {
+                    anyhow::bail!("Runtime archive expands beyond the 32 GiB safety limit");
+                }
+            }
+            let available = crate::store::available_space(&dest)?;
+            if available < extracted_bytes.saturating_add(512 * 1024 * 1024) {
+                anyhow::bail!(
+                    "Not enough free disk space to extract the portable Runtime (need at least {} bytes plus reserve)",
+                    extracted_bytes
+                );
+            }
+            for index in 0..archive.len() {
+                let mut entry = archive.by_index(index)?;
+                let relative = entry
+                    .enclosed_name()
+                    .context("Runtime archive contains an unsafe path")?;
+                let output_path = dest.join(relative);
+                if entry.is_dir() {
+                    fs::create_dir_all(&output_path)?;
+                    continue;
+                }
+                if let Some(parent) = output_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let mut output = fs::File::create(&output_path)?;
+                std::io::copy(&mut entry, &mut output)?;
+                output.sync_all()?;
+            }
+            Ok(())
+        })
+        .await??;
+
+        Ok::<_, anyhow::Error>(etag)
     }
-
-    let _ = window.emit(
-        "runtime:progress",
-        serde_json::json!({
-            "label": spec.label,
-            "phase": "extract",
-            "received": total,
-            "total": total,
-            "percent": 100,
-        }),
-    );
-
-    let zip_path = tmp.clone();
-    let dest = base.to_path_buf();
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        let f = fs::File::open(&zip_path)?;
-        let mut archive = zip::ZipArchive::new(f)?;
-        archive.extract(&dest)?;
-        Ok(())
-    })
-    .await??;
+    .await;
 
     let _ = fs::remove_file(&tmp);
 
-    Ok(etag)
+    operation
 }
 
 /// Windows flat layout: WidevineCdm/ sits beside chrome.exe.

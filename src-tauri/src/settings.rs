@@ -1,7 +1,6 @@
 use crate::store;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::fs;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
@@ -62,8 +61,7 @@ pub fn load() -> Result<Settings> {
             api_secret: String::new(),
         });
     }
-    let body = fs::read_to_string(&path)?;
-    Ok(serde_json::from_str(&body).unwrap_or_default())
+    store::load_json_with_backup(&path)
 }
 
 /// Load settings, generating + persisting the API JWT secret if it's
@@ -83,6 +81,6 @@ pub fn ensure_secret() -> Result<Settings> {
 
 pub fn save(s: &Settings) -> Result<()> {
     let body = serde_json::to_string_pretty(s)?;
-    fs::write(store::settings_path()?, body)?;
+    store::atomic_write(&store::settings_path()?, body.as_bytes())?;
     Ok(())
 }

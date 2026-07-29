@@ -1,16 +1,17 @@
 // Top-level façade — bundles the runtime, fingerprint library, and
 // browser launcher. Mirrors the Python `ShardX` class.
 import { chromium, type Browser as PatchrightBrowser } from "patchright";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { Runtime, type ProgressCb } from "./runtime.js";
-import { FingerprintLibrary, Profile } from "./profile.js";
+import { FingerprintLibrary, Profile, storageChild } from "./profile.js";
 import { Browser, type LaunchOptions, type BrowserSession } from "./browser.js";
 import { randomizeHardware, randomizePlatformVersion } from "./randomize.js";
 import { parseProxy, probeUdp } from "./proxy.js";
 import { geoCheckVia, type GeoInfo } from "./geo.js";
+import { atomicWriteFileSync, readJsonWithBackupSync } from "./fsUtil.js";
 
 export interface ShardXOptions {
   /** Where the engine, Widevine, and bundled fingerprint library live
@@ -90,15 +91,15 @@ export class ShardX {
   /** Persist a profile's current config to its on-disk folder. Call after
    *  mutating a reopened profile (e.g. `setNoise`) to keep changes. */
   saveProfile(profile: Profile): void {
-    mkdirSync(join(this.runtime.profilesRoot, profile.id), { recursive: true });
-    writeFileSync(this.profileJsonPath(profile.id), JSON.stringify(profile.config, null, 2));
+    mkdirSync(storageChild(this.runtime.profilesRoot, profile.id), { recursive: true });
+    atomicWriteFileSync(this.profileJsonPath(profile.id), JSON.stringify(profile.config, null, 2));
   }
 
   /** Reopen a previously created profile by id (same fingerprint + state). */
   openProfile(id: string): Profile {
     const path = this.profileJsonPath(id);
     if (!existsSync(path)) throw new Error(`saved profile '${id}' not found`);
-    return new Profile(JSON.parse(readFileSync(path, "utf8")), id);
+    return new Profile(readJsonWithBackupSync<Record<string, unknown>>(path), id);
   }
 
   /** Ids of every saved profile, sorted. */
@@ -113,12 +114,12 @@ export class ShardX {
 
   /** Delete a saved profile and all its state (cookies, cache, …). */
   deleteProfile(id: string): void {
-    const d = join(this.runtime.profilesRoot, id);
+    const d = storageChild(this.runtime.profilesRoot, id);
     if (existsSync(d)) rmSync(d, { recursive: true, force: true });
   }
 
   private profileJsonPath(id: string): string {
-    return join(this.runtime.profilesRoot, id, "profile.json");
+    return join(storageChild(this.runtime.profilesRoot, id), "profile.json");
   }
 
   /**
@@ -183,7 +184,13 @@ export class ShardX {
       await sess.stop();
       throw new Error("CDP endpoint unavailable — engine failed to expose remote-debugging port");
     }
-    const browser = await chromium.connectOverCDP(sess.cdpUrl);
+    let browser: PatchrightBrowser;
+    try {
+      browser = await chromium.connectOverCDP(sess.cdpUrl);
+    } catch (error) {
+      await sess.stop();
+      throw error;
+    }
     return {
       browser,
       session: sess,

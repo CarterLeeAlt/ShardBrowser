@@ -18,32 +18,64 @@ import { chromium } from "patchright";
 
 const API = (process.env.SHARDX_API || "http://127.0.0.1:40325").replace(/\/+$/, "");
 const TOKEN = process.env.SHARDX_TOKEN || "";
+const API_TIMEOUT_MS = 30_000;
+const MAX_HTTP_BODY_BYTES = 4 * 1024 * 1024;
+const MAX_CAPTURE_LOG_ENTRIES = 5_000;
 
 // ---------- HTTP API helper ----------
 
 async function api(path, { method = "GET", body } = {}) {
-  const res = await fetch(API + path, {
-    method,
-    headers: {
-      ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
-      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  let data;
-  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
-  if (!res.ok) {
-    const msg = data && data.error ? data.error : `HTTP ${res.status}`;
-    throw new Error(`${method} ${path} → ${msg}`);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+  try {
+    const res = await fetch(API + path, {
+      method,
+      headers: {
+        ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+    const responseText = await res.text();
+    let data;
+    try { data = responseText ? JSON.parse(responseText) : null; } catch { data = responseText; }
+    if (!res.ok) {
+      const msg = data && data.error ? data.error : `HTTP ${res.status}`;
+      throw new Error(`${method} ${path} → ${msg}`);
+    }
+    return data;
+  } finally {
+    clearTimeout(timer);
   }
-  return data;
 }
 
 // ---------- CDP (patchright) connection cache ----------
 
 const browsers = new Map(); // profile_id → patchright Browser
 const activePage = new Map(); // profile_id → active Page
+const dialogHandlers = new Map(); // profile_id → { page, handler }
+const captures = new Map(); // profile_id → { page, handler, log }
+const mocks = new Map(); // profile_id → Map(pattern → { page, handler })
+
+async function cleanupProfileState(profileId) {
+  const capture = captures.get(profileId);
+  if (capture) capture.page.off("requestfinished", capture.handler);
+  captures.delete(profileId);
+
+  const dialog = dialogHandlers.get(profileId);
+  if (dialog) dialog.page.off("dialog", dialog.handler);
+  dialogHandlers.delete(profileId);
+
+  const routes = mocks.get(profileId);
+  if (routes) {
+    for (const [pattern, route] of routes) {
+      await route.page.unroute(pattern, route.handler).catch(() => {});
+    }
+  }
+  mocks.delete(profileId);
+  activePage.delete(profileId);
+}
 
 async function cdpEndpoint(profileId, { autostart = true, headless = false } = {}) {
   const running = await api("/running");
@@ -197,6 +229,7 @@ server.tool(
   "Stop a profile's browser (graceful).",
   { id: z.string() },
   async ({ id }) => {
+    await cleanupProfileState(id);
     const b = browsers.get(id);
     if (b) { try { await b.close(); } catch {} browsers.delete(id); }
     return text(await api(`/profiles/${id}/stop`, { method: "POST" }));
@@ -862,8 +895,6 @@ server.tool(
   },
 );
 
-const dialogHandlers = new Map(); // profile_id → dialog listener
-
 server.tool(
   "browser_dialog",
   "Auto-handle native dialogs (alert/confirm/prompt). action: accept | dismiss | off.",
@@ -871,13 +902,13 @@ server.tool(
   async ({ profile_id, action, prompt_text }) => {
     const page = await pageFor(profile_id);
     const prev = dialogHandlers.get(profile_id);
-    if (prev) { page.off("dialog", prev); dialogHandlers.delete(profile_id); }
+    if (prev) { prev.page.off("dialog", prev.handler); dialogHandlers.delete(profile_id); }
     if (action !== "off") {
       const handler = async (d) => {
         try { action === "accept" ? await d.accept(prompt_text) : await d.dismiss(); } catch {}
       };
       page.on("dialog", handler);
-      dialogHandlers.set(profile_id, handler);
+      dialogHandlers.set(profile_id, { page, handler });
     }
     return text(`dialog handling: ${action}`);
   },
@@ -977,8 +1008,6 @@ server.tool(
   },
 );
 
-const captures = new Map(); // profile_id → { handler, log }
-
 server.tool(
   "browser_capture_start",
   "Start logging finished network requests for the profile.",
@@ -986,16 +1015,17 @@ server.tool(
   async ({ profile_id }) => {
     const page = await pageFor(profile_id);
     const prev = captures.get(profile_id);
-    if (prev) page.off("requestfinished", prev.handler);
+    if (prev) prev.page.off("requestfinished", prev.handler);
     const log = [];
     const handler = async (req) => {
       try {
         const r = await req.response();
         log.push({ method: req.method(), url: req.url(), status: r ? r.status() : null, type: req.resourceType() });
+        if (log.length > MAX_CAPTURE_LOG_ENTRIES) log.shift();
       } catch {}
     };
     page.on("requestfinished", handler);
-    captures.set(profile_id, { handler, log });
+    captures.set(profile_id, { page, handler, log });
     return text("capturing network");
   },
 );
@@ -1005,16 +1035,13 @@ server.tool(
   "Stop logging and return the captured requests.",
   { profile_id: z.string() },
   async ({ profile_id }) => {
-    const page = await pageFor(profile_id);
     const c = captures.get(profile_id);
     if (!c) return text([]);
-    page.off("requestfinished", c.handler);
+    c.page.off("requestfinished", c.handler);
     captures.delete(profile_id);
     return text(c.log);
   },
 );
-
-const mocks = new Map(); // profile_id → Map(pattern → handler)
 
 server.tool(
   "browser_mock",
@@ -1037,7 +1064,9 @@ server.tool(
     await page.route(url_pattern, handler);
     let m = mocks.get(profile_id);
     if (!m) { m = new Map(); mocks.set(profile_id, m); }
-    m.set(url_pattern, handler);
+    const previous = m.get(url_pattern);
+    if (previous) await previous.page.unroute(url_pattern, previous.handler).catch(() => {});
+    m.set(url_pattern, { page, handler });
     return text(`mocking ${url_pattern}`);
   },
 );
@@ -1050,10 +1079,14 @@ server.tool(
     const page = await pageFor(profile_id);
     const m = mocks.get(profile_id);
     if (url_pattern) {
-      await page.unroute(url_pattern).catch(() => {});
+      const route = m?.get(url_pattern);
+      if (route) await route.page.unroute(url_pattern, route.handler).catch(() => {});
+      else await page.unroute(url_pattern).catch(() => {});
       m?.delete(url_pattern);
     } else {
-      for (const p of m?.keys() ?? []) await page.unroute(p).catch(() => {});
+      for (const [pattern, route] of m ?? []) {
+        await route.page.unroute(pattern, route.handler).catch(() => {});
+      }
       mocks.delete(profile_id);
     }
     return text("unmocked");
@@ -1107,7 +1140,9 @@ server.tool(
     await page.route(url_pattern, handler);
     let m = mocks.get(profile_id);
     if (!m) { m = new Map(); mocks.set(profile_id, m); }
-    m.set(url_pattern, handler);
+    const previous = m.get(url_pattern);
+    if (previous) await previous.page.unroute(url_pattern, previous.handler).catch(() => {});
+    m.set(url_pattern, { page, handler });
     return text(`intercepting ${url_pattern}`);
   },
 );
@@ -1162,9 +1197,30 @@ if (httpPort) {
 
   http
     .createServer((req, res) => {
+      const declaredLength = Number(req.headers["content-length"] ?? 0);
+      if (Number.isFinite(declaredLength) && declaredLength > MAX_HTTP_BODY_BYTES) {
+        res.writeHead(413, { "Content-Type": "application/json", Connection: "close" });
+        res.end(JSON.stringify({ error: "request body exceeds the 4 MiB limit" }));
+        req.resume();
+        return;
+      }
       const chunks = [];
-      req.on("data", (c) => chunks.push(c));
+      let received = 0;
+      let rejected = false;
+      req.on("data", (c) => {
+        if (rejected) return;
+        received += c.length;
+        if (received > MAX_HTTP_BODY_BYTES) {
+          rejected = true;
+          chunks.length = 0;
+          res.writeHead(413, { "Content-Type": "application/json", Connection: "close" });
+          res.end(JSON.stringify({ error: "request body exceeds the 4 MiB limit" }));
+          return;
+        }
+        chunks.push(c);
+      });
       req.on("end", async () => {
+        if (rejected) return;
         let parsed;
         try {
           const raw = Buffer.concat(chunks).toString("utf8");
