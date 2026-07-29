@@ -85,6 +85,49 @@ const pickJsonText = () => new Promise<string | null>((resolve, reject) => {
   input.click();
 });
 
+type ProfileBackupImportFile = { name: string; text: string };
+type ProfileBackupSummary = { profileCount: number; cookieCount: number };
+const MAX_PROFILE_BACKUP_BYTES = 64 * 1024 * 1024;
+const MAX_PROFILE_BACKUP_BATCH = 100;
+
+/// Select one or more complete profile backups. The filename is retained so
+/// Rust can enforce the custom extension as well as the versioned file body.
+const pickProfileBackupFiles = () => new Promise<ProfileBackupImportFile[] | null>((resolve, reject) => {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = ".shardx-backup";
+  input.multiple = true;
+  input.style.display = "none";
+  input.addEventListener("change", async () => {
+    const selected = [...(input.files ?? [])];
+    if (selected.length === 0) {
+      input.remove();
+      resolve(null);
+      return;
+    }
+    try {
+      if (selected.length > MAX_PROFILE_BACKUP_BATCH) {
+        throw new Error("At most 100 profiles can be imported at once");
+      }
+      const invalid = selected.find((file) => !file.name.toLowerCase().endsWith(".shardx-backup"));
+      if (invalid) throw new Error(`${invalid.name} is not a .shardx-backup file`);
+      const oversized = selected.find((file) => file.size > MAX_PROFILE_BACKUP_BYTES);
+      if (oversized) throw new Error(`${oversized.name} exceeds the 64 MB backup limit`);
+      resolve(await Promise.all(selected.map(async (file) => ({ name: file.name, text: await file.text() }))));
+    } catch (e) {
+      reject(e);
+    } finally {
+      input.remove();
+    }
+  }, { once: true });
+  input.addEventListener("cancel", () => {
+    input.remove();
+    resolve(null);
+  }, { once: true });
+  document.body.appendChild(input);
+  input.click();
+});
+
 // Single UTM tag appended to every outbound proxyshard.com link.
 const UTM_QS = "utm_source=shardx&utm_medium=referral&utm_campaign=shardx-launcher";
 const withUtm = (url: string) => url + (url.includes("?") ? "&" : "?") + UTM_QS;
@@ -1606,41 +1649,21 @@ function BrowsersView() {
     } catch (e) { toast.err(String(e)); }
   };
 
-  const exportCookies = async (p: ProfileMeta) => {
-    if (running[p.id] || startBusy.has(p.id) || backendActiveIds.has(p.id)) {
-      toast.err("This profile is still running. Close the browser manually before exporting cookies.");
+  const exportProfiles = async (ids: string[]) => {
+    if (ids.length === 0) return;
+    const activeIds = ids.filter((id) => running[id] || startBusy.has(id) || backendActiveIds.has(id));
+    if (activeIds.length > 0) {
+      toast.err(`Stop the ${activeIds.length} active browser${activeIds.length === 1 ? "" : "s"} before exporting`);
       return;
     }
     try {
-      const count = await invoke<number>("cookies_export_portable", { profileId: p.id });
-      toast.ok(`Exported ${count} cookie${count === 1 ? "" : "s"}`);
-      // The backend opens only the fixed portable exports directory; no file
-      // system path crosses the frontend trust boundary.
+      const summary = await invoke<ProfileBackupSummary>("profile_backup_export", { profileIds: ids });
+      toast.ok(
+        `Exported ${summary.profileCount} profile${summary.profileCount === 1 ? "" : "s"} + ${summary.cookieCount} cookie${summary.cookieCount === 1 ? "" : "s"}. Keep backup files private.`,
+      );
+      // Backups are written only inside the launcher's fixed portable exports
+      // directory; no arbitrary destination path crosses the trust boundary.
       await invoke("open_exports_dir");
-    } catch (e) { toast.err(String(e)); }
-  };
-
-  const exportAll = async (p: ProfileMeta) => {
-    if (running[p.id] || startBusy.has(p.id) || backendActiveIds.has(p.id)) {
-      toast.err("This profile is still running. Close the browser manually before exporting it.");
-      return;
-    }
-    try {
-      const cookieCount = await invoke<number>("profile_export_all", { profileId: p.id });
-      toast.ok(`Exported fingerprint + ${cookieCount} cookie${cookieCount === 1 ? "" : "s"} as 2 files`);
-      await invoke("open_exports_dir");
-    } catch (e) { toast.err(String(e)); }
-  };
-
-  const importCookies = async (p: ProfileMeta) => {
-    if (running[p.id] || startBusy.has(p.id) || backendActiveIds.has(p.id)) { toast.err("Stop the profile before importing cookies"); return; }
-    try {
-      const text = await pickJsonText();
-      if (text === null) return;
-      const cookies = JSON.parse(text);
-      if (!Array.isArray(cookies)) { toast.err("Expected a JSON array of cookies"); return; }
-      const n = await invoke<number>("cookies_import", { profileId: p.id, cookies });
-      toast.ok(`Replaced existing cookies with ${n} imported cookie${n === 1 ? "" : "s"}`);
     } catch (e) { toast.err(String(e)); }
   };
 
@@ -1655,9 +1678,11 @@ function BrowsersView() {
       ? [{ label: "Remove from folder", onClick: () => setProfileFolder(p.id, "") }]
       : []),
     { sep: true, label: "", onClick: () => {} },
-    { label: "Export cookies", onClick: () => exportCookies(p) },
-    { label: "Export all (cookies + fingerprint)", onClick: () => exportAll(p) },
-    { label: "Replace cookies…", onClick: () => importCookies(p) },
+    {
+      label: "Export profile",
+      onClick: () => exportProfiles([p.id]),
+      title: "Export fingerprint and sensitive cookies as one .shardx-backup file",
+    },
     { sep: true, label: "", onClick: () => {} },
     { label: "Delete", onClick: () => remove(p.id), danger: true },
   ];
@@ -1820,38 +1845,22 @@ function BrowsersView() {
     toast.ok(`Deleted ${ids.length}`);
   };
 
-  /// Dump selected profile FingerprintConfigs as a JSON array to clipboard.
   const bulkExport = async () => {
     const ids = [...selected];
-    if (ids.length === 0) return;
-    const activeIds = ids.filter((id) => !!running[id] || startBusy.has(id) || backendActiveIds.has(id));
-    if (activeIds.length > 0) {
-      toast.err(`Stop the ${activeIds.length} selected active browser${activeIds.length === 1 ? "" : "s"} before exporting`);
-      return;
-    }
-    try {
-      const payloads = await Promise.all(ids.map((id) => invoke<any>("profile_get", { id })));
-      await clip.write(JSON.stringify(payloads, null, 2));
-      toast.ok(`Copied ${payloads.length} to clipboard`);
-    } catch (e) { toast.err(String(e)); }
+    await exportProfiles(ids);
   };
 
-  // Paste profile JSON from clipboard → fresh profiles.
   const bulkImport = async () => {
     try {
-      const text = await clip.read();
-      if (!text.trim()) { toast.err("Clipboard is empty"); return; }
-      const data = JSON.parse(text);
-      const arr = Array.isArray(data) ? data : [data];
-      const n = await invoke<number>("profile_import", { payloads: arr });
-      reload();
-      toast.ok(`Imported ${n} profile${n === 1 ? "" : "s"}`);
-    } catch (e) {
-      toast.err(
-        e instanceof SyntaxError
-          ? "Import failed: Clipboard does not contain valid ShardX profile JSON"
-          : "Import failed: " + String(e),
+      const files = await pickProfileBackupFiles();
+      if (!files) return;
+      const summary = await invoke<ProfileBackupSummary>("profile_backup_import", { files });
+      await reload();
+      toast.ok(
+        `Imported ${summary.profileCount} profile${summary.profileCount === 1 ? "" : "s"} + ${summary.cookieCount} cookie${summary.cookieCount === 1 ? "" : "s"}`,
       );
+    } catch (e) {
+      toast.err("Import failed: " + String(e));
     }
   };
 
@@ -2054,7 +2063,7 @@ function BrowsersView() {
                 className="btn-ghost btn-sm"
                 onClick={bulkExport}
                 disabled={selectedHasActive}
-                title={selectedHasActive ? "Stop selected active browsers before exporting" : "Export selected profiles"}
+                title={selectedHasActive ? "Stop selected active browsers before exporting" : "Export selected profiles with their sensitive cookies"}
               ><Icon.Upload /> Export</button>
               <button
                 className="btn-ghost btn-sm"
@@ -2064,7 +2073,7 @@ function BrowsersView() {
               ><Icon.Trash /> Delete</button>
             </div>
           )}
-          <button className="btn-ghost profile-page-action" onClick={bulkImport} title="Create profiles from exported JSON in the clipboard"><Icon.Download /> Import profile</button>
+          <button className="btn-ghost profile-page-action" onClick={bulkImport} title="Import one or more .shardx-backup files"><Icon.Download /> Import profile</button>
           <button className="btn-primary profile-page-action" onClick={newProfile}>+ New profile</button>
         </div>
       </div>
