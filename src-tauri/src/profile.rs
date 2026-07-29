@@ -1,6 +1,7 @@
 use crate::store;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -144,8 +145,12 @@ pub fn list_all() -> Result<Vec<ProfileMeta>> {
                 .map(|d| format!("@{}", d.as_secs()));
             if let Some(ts) = mtime {
                 stored.meta.created_at = Some(ts);
-                if let Ok(body) = serde_json::to_string_pretty(&stored) {
-                    let _ = fs::write(&path, body);
+                // Listing profiles must remain read-only for an active browser.
+                // Persist the legacy backfill after it stops instead.
+                if !crate::is_profile_active(&stored.meta.id) {
+                    if let Ok(body) = serde_json::to_string_pretty(&stored) {
+                        let _ = fs::write(&path, body);
+                    }
                 }
             }
         }
@@ -173,13 +178,9 @@ pub fn list_all() -> Result<Vec<ProfileMeta>> {
             total_runtime_ms: stored.meta.total_runtime_ms,
         });
     }
-    // Pinned first, then newest-first by created_at; name fallback for same-second ties.
+    // Newest-first by created_at; name fallback for same-second ties. Manual
+    // display order is applied by the UI-facing Tauri command afterwards.
     out.sort_by(|a, b| {
-        match (a.pinned, b.pinned) {
-            (true, false) => return std::cmp::Ordering::Less,
-            (false, true) => return std::cmp::Ordering::Greater,
-            _ => {}
-        }
         match (&b.created_at, &a.created_at) {
             (Some(bv), Some(av)) => bv.cmp(av),
             (Some(_), None) => std::cmp::Ordering::Less,
@@ -279,8 +280,52 @@ fn clear_noise_seeds(config: &mut serde_json::Map<String, serde_json::Value>) {
 /// directly, and temporary cleanup calls `delete` only after the tracker entry
 /// is removed, so lifecycle persistence keeps working normally.
 pub fn ensure_stopped(id: &str) -> Result<()> {
-    if crate::is_profile_running(id) {
-        anyhow::bail!("Stop the running browser before modifying this profile");
+    if crate::is_profile_active(id) {
+        anyhow::bail!("Stop the running or starting browser before modifying this profile");
+    }
+    Ok(())
+}
+
+/// Reject proxy endpoint mutations while any active browser depends on it.
+/// Reading the active ids from the tracker also covers temporary API profiles,
+/// which are intentionally hidden from the normal profile list.
+fn active_proxy_bindings() -> Vec<(String, String)> {
+    crate::process::Tracker::shared()
+        .active_profile_ids()
+        .into_iter()
+        .filter_map(|profile_id| {
+            load_raw(&profile_id)
+                .ok()
+                .and_then(|stored| stored.meta.proxy_id)
+                .map(|proxy_id| (profile_id, proxy_id))
+        })
+        .collect()
+}
+
+pub fn active_proxy_ids() -> Vec<String> {
+    active_proxy_bindings()
+        .into_iter()
+        .map(|(_, proxy_id)| proxy_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+pub fn ensure_proxy_not_active(proxy_id: &str) -> Result<()> {
+    if proxy_id.is_empty() {
+        return Ok(());
+    }
+
+    let active_count = active_proxy_bindings()
+        .into_iter()
+        .filter(|(_, active_proxy_id)| active_proxy_id == proxy_id)
+        .count();
+
+    if active_count > 0 {
+        anyhow::bail!(
+            "Stop the {active_count} running or starting browser{} using this proxy before modifying or deleting it",
+            if active_count == 1 { "" } else { "s" }
+        );
     }
     Ok(())
 }
@@ -290,8 +335,9 @@ pub fn save_raw(stored: &mut StoredProfile) -> Result<()> {
     if is_new {
         stored.meta.id = uuid::Uuid::new_v4().to_string();
     }
-    // Carry created_at/pinned/folder/last_launched_at through edits.
-    // pinned and folder are owned by set_pin/set_folder respectively.
+    // Carry created_at/folder/last_launched_at and the legacy pinned value
+    // through edits. Pinning is no longer exposed; preserving the old field
+    // keeps existing profile JSON round-trippable.
     if !is_new {
         if let Ok(existing) = load_raw(&stored.meta.id) {
             if stored.meta.created_at.is_none() {
@@ -325,6 +371,7 @@ pub fn save_raw(stored: &mut StoredProfile) -> Result<()> {
 }
 
 pub fn delete(id: &str) -> Result<()> {
+    let _resource_guard = crate::process::lock_profile_resources()?;
     ensure_stopped(id)?;
     let path = path_for(id)?;
     if path.exists() {
@@ -363,6 +410,7 @@ pub fn touch_launched(id: &str, proxy_id: Option<String>) -> Result<()> {
 }
 
 pub fn clone_profile(id: &str) -> Result<ProfileMeta> {
+    let _resource_guard = crate::process::lock_profile_resources()?;
     ensure_stopped(id)?;
     let mut src = load_raw(id)?;
     let new_id = uuid::Uuid::new_v4().to_string();
@@ -403,16 +451,6 @@ pub fn clone_profile(id: &str) -> Result<ProfileMeta> {
         folder: src.meta.folder,
         total_runtime_ms: 0,
     })
-}
-
-/// Flip pin flag.
-pub fn set_pin(id: &str, pinned: bool) -> Result<()> {
-    let mut p = load_raw(id)?;
-    p.meta.pinned = pinned;
-    let path = path_for(&p.meta.id)?;
-    let body = serde_json::to_string_pretty(&p)?;
-    fs::write(path, body)?;
-    Ok(())
 }
 
 /// Assign folder tag (empty string clears).

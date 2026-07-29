@@ -5,6 +5,7 @@ compile_error!("ShardX Launcher supports only Windows x64 (x86_64-pc-windows-msv
 
 mod api;
 mod cookies;
+mod display_order;
 mod fingerprints;
 mod launch;
 mod mcp_setup;
@@ -65,11 +66,36 @@ async fn mcp_download() -> Result<String, String> {
 
 #[tauri::command]
 fn profile_list() -> Result<Vec<profile::ProfileMeta>, String> {
-    profile::list_all().map_err(|e| e.to_string())
+    let profiles = profile::list_all().map_err(|e| e.to_string())?;
+    display_order::sort_profiles(profiles).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn profile_move_order(
+    id: String,
+    anchor_id: Option<String>,
+    placement: display_order::Placement,
+) -> Result<(), String> {
+    let profiles = profile::list_all().map_err(|e| e.to_string())?;
+    if !profiles.iter().any(|profile| profile.id == id) {
+        return Err("profile no longer exists".to_string());
+    }
+    let default_ids: Vec<String> = profiles.into_iter().map(|profile| profile.id).collect();
+    display_order::move_profile(
+        &default_ids,
+        &id,
+        anchor_id.as_deref(),
+        placement,
+    )
+    .map_err(|e| e.to_string())?;
+    notify_store_changed("profiles");
+    Ok(())
 }
 
 #[tauri::command]
 fn profile_get(id: String) -> Result<Value, String> {
+    let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
+    profile::ensure_stopped(&id).map_err(|e| e.to_string())?;
     let mut stored = profile::load_raw(&id).map_err(|e| e.to_string())?;
     // Backfill gpu_preset_id for legacy profiles by matching webgl.renderer.
     if stored.meta.gpu_preset_id.is_none() {
@@ -496,6 +522,7 @@ pub fn save_profile_core(
     payload: Value,
     enrich: bool,
 ) -> Result<profile::ProfileMeta, String> {
+    let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
     let mut payload = payload;
 
     let is_new = payload
@@ -571,6 +598,7 @@ fn profile_delete(id: String) -> Result<(), String> {
 
 #[tauri::command]
 fn profile_bind_proxy(profile_id: String, proxy_id: Option<String>) -> Result<(), String> {
+    let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
     profile::ensure_stopped(&profile_id).map_err(|e| e.to_string())?;
     let mut p = profile::load_raw(&profile_id).map_err(|e| e.to_string())?;
     p.meta.proxy_id = proxy_id;
@@ -624,12 +652,8 @@ fn clipboard_read(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn profile_set_pin(id: String, pinned: bool) -> Result<(), String> {
-    profile::set_pin(&id, pinned).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 fn profile_set_folder(id: String, folder: String) -> Result<(), String> {
+    let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
     profile::set_folder(&id, &folder).map_err(|e| e.to_string())
 }
 
@@ -884,6 +908,11 @@ fn process_list() -> Vec<process::RunningProfile> {
 }
 
 #[tauri::command]
+fn profile_active_ids() -> Vec<String> {
+    process::Tracker::shared().active_profile_ids()
+}
+
+#[tauri::command]
 async fn process_kill(profile_id: String) -> Result<bool, String> {
     process::Tracker::shared()
         .kill(&profile_id)
@@ -958,7 +987,34 @@ fn proxy_list() -> Result<Vec<proxy::ProxyEntry>, String> {
     // Newest-first display order; internal paths still read raw on-disk order.
     let mut list = proxy::list().map_err(|e| e.to_string())?;
     list.reverse();
-    Ok(list)
+    display_order::sort_proxies(list).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn proxy_active_ids() -> Vec<String> {
+    profile::active_proxy_ids()
+}
+
+#[tauri::command]
+fn proxy_move_order(
+    id: String,
+    anchor_id: Option<String>,
+    placement: display_order::Placement,
+) -> Result<(), String> {
+    // Match proxy_list's current display default without changing the raw
+    // proxy store order used by launch and automation paths.
+    let mut proxies = proxy::list().map_err(|e| e.to_string())?;
+    proxies.reverse();
+    let default_ids: Vec<String> = proxies.into_iter().map(|proxy| proxy.id).collect();
+    display_order::move_proxy(
+        &default_ids,
+        &id,
+        anchor_id.as_deref(),
+        placement,
+    )
+    .map_err(|e| e.to_string())?;
+    notify_store_changed("proxies");
+    Ok(())
 }
 
 #[tauri::command]
@@ -1062,14 +1118,18 @@ async fn launch(profile_id: String) -> Result<u32, String> {
 
 /// True if profile has a running browser process.
 pub fn is_profile_running(profile_id: &str) -> bool {
-    process::Tracker::shared()
-        .running()
-        .iter()
-        .any(|r| r.profile_id == profile_id)
+    process::Tracker::shared().is_running_profile(profile_id)
+}
+
+/// True during launch preflight as well as after the browser process starts.
+pub fn is_profile_active(profile_id: &str) -> bool {
+    process::Tracker::shared().is_profile_active(profile_id)
 }
 
 #[tauri::command]
 fn cookies_export(profile_id: String) -> Result<Vec<cookies::Cookie>, String> {
+    let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
+    profile::ensure_stopped(&profile_id).map_err(|e| e.to_string())?;
     cookies::export(&profile_id).map_err(|e| e.to_string())
 }
 
@@ -1083,6 +1143,8 @@ fn cookies_export_portable(profile_id: String) -> Result<usize, String> {
     {
         return Err("invalid profile id".into());
     }
+    let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
+    profile::ensure_stopped(&profile_id).map_err(|e| e.to_string())?;
     let cookies = cookies::export(&profile_id).map_err(|e| e.to_string())?;
     let json = serde_json::to_string_pretty(&cookies).map_err(|e| e.to_string())?;
     let stamp = std::time::SystemTime::now()
@@ -1098,8 +1160,9 @@ fn cookies_export_portable(profile_id: String) -> Result<usize, String> {
 
 #[tauri::command]
 fn cookies_import(profile_id: String, cookies: Vec<cookies::Cookie>) -> Result<usize, String> {
+    let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
     // Running browser would clobber the import on exit.
-    if is_profile_running(&profile_id) {
+    if is_profile_active(&profile_id) {
         return Err("stop the profile before importing cookies".into());
     }
     cookies::import(&profile_id, &cookies).map_err(|e| e.to_string())
@@ -1221,6 +1284,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             profile_list,
+            profile_move_order,
             profile_get,
             profile_save,
             profile_delete,
@@ -1229,7 +1293,6 @@ pub fn run() {
             profile_import,
             clipboard_write,
             clipboard_read,
-            profile_set_pin,
             profile_set_folder,
             folder_rename,
             folder_delete,
@@ -1243,8 +1306,11 @@ pub fn run() {
             open_fingerprint_dir,
             open_exports_dir,
             process_list,
+            profile_active_ids,
             process_kill,
             proxy_list,
+            proxy_active_ids,
+            proxy_move_order,
             proxy_save,
             proxy_delete,
             proxy_check,

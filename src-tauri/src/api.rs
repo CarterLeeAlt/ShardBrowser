@@ -366,6 +366,13 @@ async fn edit_profile(Path(id): Path<String>, Json(body): Json<EditReq>) -> ApiR
         crate::notify_store_changed("proxies");
     }
 
+    // Re-check under the same resource lock used by launch reservation. The
+    // optional proxy test above awaits network I/O and therefore cannot safely
+    // hold a synchronous mutex guard across it.
+    let _resource_guard = crate::process::lock_profile_resources()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::profile::ensure_stopped(&id)
+        .map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
     crate::profile::save_raw(&mut stored)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     // set_folder handles unfile; save_raw keeps the existing folder when empty.
@@ -418,6 +425,12 @@ struct StartReq {
 
 /// Launch with CDP; body `{ "headless": true }` opt-in.
 async fn start_profile(Path(id): Path<String>, body: Option<Json<StartReq>>) -> ApiResult {
+    if crate::is_profile_active(&id) {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "this browser profile is already running or starting",
+        ));
+    }
     let headless = body.map(|Json(b)| b.headless).unwrap_or(false);
     let outcome = crate::launch::launch_profile(&id, true, headless)
         .await
@@ -439,6 +452,10 @@ async fn stop_profile(Path(id): Path<String>) -> ApiResult {
 }
 
 async fn export_cookies(Path(id): Path<String>) -> ApiResult {
+    let _resource_guard = crate::process::lock_profile_resources()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::profile::ensure_stopped(&id)
+        .map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
     let cookies = crate::cookies::export(&id)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(json!({ "cookies": cookies })))
@@ -450,8 +467,10 @@ struct ImportCookiesReq {
 }
 
 async fn import_cookies(Path(id): Path<String>, Json(body): Json<ImportCookiesReq>) -> ApiResult {
+    let _resource_guard = crate::process::lock_profile_resources()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     // Running browser would clobber imports on exit.
-    if crate::is_profile_running(&id) {
+    if crate::is_profile_active(&id) {
         return Err(err(
             StatusCode::CONFLICT,
             "stop the profile before importing cookies",
@@ -554,6 +573,8 @@ async fn add_proxy(Json(body): Json<AddProxyReq>) -> ApiResult {
 }
 
 async fn delete_proxy(Path(id): Path<String>) -> ApiResult {
+    crate::profile::ensure_proxy_not_active(&id)
+        .map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
     crate::proxy::delete(&id).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     crate::notify_store_changed("proxies");
     Ok(Json(json!({ "deleted": true, "id": id })))

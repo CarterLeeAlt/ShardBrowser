@@ -60,3 +60,7 @@ pub fn proxies_path() -> Result<PathBuf> {
 pub fn settings_path() -> Result<PathBuf> {
     Ok(config_root()?.join("settings.json"))
 }
+
+pub fn display_order_path() -> Result<PathBuf> {
+    Ok(config_root()?.join("display-order.json"))
+}
