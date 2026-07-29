@@ -14,6 +14,7 @@ mod profile;
 mod proxy;
 mod runtime;
 mod settings;
+mod startup_path;
 mod store;
 mod taskbar_icon;
 
@@ -1189,6 +1190,8 @@ fn block_exit_if_browsers_running(app: &tauri::AppHandle) -> bool {
 }
 
 pub fn run() {
+    startup_path::enforce_valid_launcher_directory_or_exit();
+
     tauri::Builder::default()
         // Must be the first plugin: a second launch focuses the running window.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
