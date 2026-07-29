@@ -1500,6 +1500,18 @@ fn profile_backup_import(
         cookie_count = cookie_count.saturating_add(current_cookie_count);
     }
 
+    let default_profile_ids: Vec<String> = match profile::list_all() {
+        Ok(profiles) => profiles.into_iter().map(|profile| profile.id).collect(),
+        Err(error) => return Err(backup_import_failure(error.to_string(), &imported)),
+    };
+    let imported_profile_ids: Vec<String> = imported
+        .iter()
+        .map(|artifacts| artifacts.profile_id.clone())
+        .collect();
+    if let Err(error) = display_order::append_profiles(&default_profile_ids, &imported_profile_ids) {
+        return Err(backup_import_failure(error.to_string(), &imported));
+    }
+
     notify_store_changed("profiles");
     Ok(ProfileBackupSummary {
         profile_count: imported.len(),

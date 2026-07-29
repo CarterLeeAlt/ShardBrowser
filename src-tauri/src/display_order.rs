@@ -180,6 +180,34 @@ pub fn move_profile(
     save_unlocked(&saved)
 }
 
+/// Append a batch of newly-created profiles to the saved order in one atomic
+/// write. The caller's id order is preserved.
+pub fn append_profiles(default_ids: &[String], ids: &[String]) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let valid: HashSet<&str> = default_ids.iter().map(String::as_str).collect();
+    let mut seen = HashSet::new();
+    for id in ids {
+        if !valid.contains(id.as_str()) {
+            anyhow::bail!("profile no longer exists");
+        }
+        if !seen.insert(id.as_str()) {
+            anyhow::bail!("duplicate profile id");
+        }
+    }
+
+    let _guard = DISPLAY_ORDER_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("display order lock poisoned"))?;
+    let mut saved = load_unlocked()?;
+    let mut order = reconcile_order(&saved.profiles, default_ids);
+    order.retain(|current| !seen.contains(current.as_str()));
+    order.extend(ids.iter().cloned());
+    saved.profiles = order;
+    save_unlocked(&saved)
+}
+
 pub fn move_proxy(
     default_ids: &[String],
     id: &str,
