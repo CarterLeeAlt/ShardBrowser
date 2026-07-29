@@ -1997,7 +1997,7 @@ function BrowsersView() {
       onDragCancel={resetProfileDrag}
       onDragEnd={handleProfileDragEnd}
     >
-    <section className="page">
+    <section className="page workspace-page">
       <Topbar crumbs={["Workspace", "Browsers"]} search={search} onSearch={setSearch} />
 
       <div className="metric-strip">
@@ -3419,7 +3419,7 @@ function ProxiesView() {
       onDragCancel={resetProxyDrag}
       onDragEnd={handleProxyDragEnd}
     >
-    <section className="page">
+    <section className="page workspace-page">
       <Topbar crumbs={["PROXYLIST", "Proxies"]} search={search} onSearch={setSearch} />
       <div className="page-title">
         <h1>Proxies</h1>
@@ -4200,7 +4200,7 @@ function FingerprintsView() {
   };
 
   return (
-    <section className="page">
+    <section className="page workspace-page">
       <Topbar crumbs={["Library", "Fingerprints"]} search="" onSearch={() => {}} />
       <div className="page-title">
         <h1>Fingerprint Library</h1>
