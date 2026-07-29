@@ -729,6 +729,10 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 }
 .bulk-bar-floating::-webkit-scrollbar { height: 0; }
 .bulk-bar-floating > * { flex: 0 0 auto; }
+.bulk-bar-floating > .btn-sm {
+  width: 80px;
+  justify-content: center;
+}
 
 /* ===== rows ===== */
 
