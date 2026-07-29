@@ -1351,7 +1351,7 @@ function BrowsersView() {
   }, [running]);
   const [startBusy, setStartBusy] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
+  const [renaming, setRenaming] = useState<{ id: string; draft: string } | null>(null);
   const [fingerprints, setFingerprints] = useState<FingerprintEntry[]>([]);
   const [quickEdit, setQuickEdit] = useState<{ kind: "proxy" | "notes"; profile: ProfileMeta } | null>(null);
   // A profile may be launched while one of its editors is already open.
@@ -1363,7 +1363,8 @@ function BrowsersView() {
       setDraft(null);
     }
     if (quickEdit && (running[quickEdit.profile.id] || startBusy.has(quickEdit.profile.id) || backendActiveIds.has(quickEdit.profile.id))) setQuickEdit(null);
-  }, [running, startBusy, backendActiveIds, expanded, quickEdit]);
+    if (renaming && (running[renaming.id] || startBusy.has(renaming.id) || backendActiveIds.has(renaming.id))) setRenaming(null);
+  }, [running, startBusy, backendActiveIds, expanded, quickEdit, renaming]);
   // Empty folders persist in localStorage until a profile lands in them.
   const [folderRegistry, setFolderRegistry] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem("shardx-folders") || "[]"); }
@@ -1661,6 +1662,42 @@ function BrowsersView() {
     { label: "Delete", onClick: () => remove(p.id), danger: true },
   ];
 
+  const beginRename = (p: ProfileMeta) => {
+    if (running[p.id] || startBusy.has(p.id) || backendActiveIds.has(p.id)) return;
+    if (expanded === p.id) {
+      setExpanded(null);
+      setDraft(null);
+    }
+    setRenaming({ id: p.id, draft: p.name });
+  };
+
+  const commitRename = async (id: string, draftName: string) => {
+    const profile = profiles.find((p) => p.id === id);
+    if (!profile) {
+      setRenaming((current) => current?.id === id ? null : current);
+      return;
+    }
+    if (running[id] || startBusy.has(id) || backendActiveIds.has(id)) {
+      setRenaming((current) => current?.id === id ? null : current);
+      toast.err("Stop the browser or wait for it to finish starting before renaming");
+      return;
+    }
+
+    const name = draftName.trim();
+    if (name === profile.name) {
+      setRenaming((current) => current?.id === id ? null : current);
+      return;
+    }
+
+    try {
+      await invoke("profile_rename", { id, name });
+      setRenaming((current) => current?.id === id ? null : current);
+      await reload();
+    } catch (e) {
+      toast.err(String(e));
+    }
+  };
+
   const setProfileFolder = async (id: string, f: string) => {
     // Dropping a profile onto the folder it already lives in is a no-op —
     // tell the user instead of silently doing nothing.
@@ -1823,6 +1860,7 @@ function BrowsersView() {
       toast.err("Stop the browser before editing this profile");
       return;
     }
+    setRenaming(null);
     if (expanded === id) { setExpanded(null); setDraft(null); return; }
     const stored = await invoke<any>("profile_get", { id });
     setDraft(fromStored(stored));
@@ -1830,6 +1868,7 @@ function BrowsersView() {
   };
 
   const newProfile = async () => {
+    setRenaming(null);
     setDraft(defaultForm());
     setExpanded("__new__");
   };
@@ -2025,31 +2064,10 @@ function BrowsersView() {
               ><Icon.Trash /> Delete</button>
             </div>
           )}
-          <button className="btn-ghost" onClick={bulkImport} title="Create profiles from exported JSON in the clipboard"><Icon.Download /> Import</button>
-          <button className="btn-ghost" onClick={() => setTemplatePickerOpen(true)}><ShardMini /> From template</button>
-          <button className="btn-primary" onClick={newProfile}>+ New profile</button>
+          <button className="btn-ghost profile-page-action" onClick={bulkImport} title="Create profiles from exported JSON in the clipboard"><Icon.Download /> Import profile</button>
+          <button className="btn-primary profile-page-action" onClick={newProfile}>+ New profile</button>
         </div>
       </div>
-      {templatePickerOpen && (
-        <TemplatePicker
-          fingerprints={fingerprints}
-          onPick={async (tplId) => {
-            try {
-              const meta = await invoke<ProfileMeta>("profile_create_from_template", { templateId: tplId });
-              setTemplatePickerOpen(false);
-              reload();
-              toast.ok(`Profile "${meta.name}" created`);
-              // Auto-open the new profile in editor
-              setTimeout(async () => {
-                const stored = await invoke<any>("profile_get", { id: meta.id });
-                setDraft(fromStored(stored));
-                setExpanded(meta.id);
-              }, 50);
-            } catch (e) { toast.err(String(e)); }
-          }}
-          onClose={() => setTemplatePickerOpen(false)}
-        />
-      )}
       {folderModal && (() => {
         const moving = folderModal.profileId
           ? profiles.find((p) => p.id === folderModal!.profileId) ?? null
@@ -2173,12 +2191,26 @@ function BrowsersView() {
                 </div>
                 <div
                   className={`cell-name ${isActive ? "cell-locked" : ""}`}
-                  onClick={isActive ? undefined : () => expand(p.id)}
-                  title={isActive ? "Stop the browser or wait for it to finish starting before editing" : "Edit profile"}
+                  onClick={isActive || renaming?.id === p.id ? undefined : () => beginRename(p)}
+                  title={isActive ? "Stop the browser or wait for it to finish starting before renaming" : "Click to rename"}
                 >
-                  <div className="name-main">
-                    {p.name}
-                  </div>
+                  {renaming?.id === p.id ? (
+                    <input
+                      autoFocus
+                      className="inline-rename profile-inline-rename"
+                      value={renaming.draft}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => setRenaming({ id: p.id, draft: e.target.value })}
+                      onBlur={(e) => commitRename(p.id, e.currentTarget.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") e.currentTarget.blur();
+                        else if (e.key === "Escape") setRenaming(null);
+                      }}
+                      aria-label={`Rename ${p.name}`}
+                    />
+                  ) : (
+                    <div className="name-main">{p.name}</div>
+                  )}
                   <div className="name-sub">{p.id.slice(0, 8)}</div>
                 </div>
                 <div>
@@ -2266,10 +2298,9 @@ function BrowsersView() {
           <div className="empty-rich">
             <div className="empty-shard"><ShardLogo /></div>
             <h3>No profiles yet</h3>
-            <p>Pick a fingerprint template to start from a curated real-Chrome snapshot, or build one from scratch.</p>
+            <p>Create a browser profile to get started.</p>
             <div className="empty-cta">
-              <button className="btn-ghost" onClick={() => setTemplatePickerOpen(true)}><ShardMini /> From template</button>
-              <button className="btn-primary" onClick={newProfile}>+ New profile</button>
+              <button className="btn-primary profile-page-action" onClick={newProfile}>+ New profile</button>
             </div>
           </div>
         )}
@@ -4345,61 +4376,6 @@ function FolderModal({
               {showList ? "Create & move" : "Create"}
             </button>
           </div>
-        </div>
-      </div>
-    </DialogBackdrop>
-  );
-}
-
-function TemplatePicker({
-  fingerprints,
-  onPick,
-  onClose,
-}: {
-  /** When passed in, skip the fingerprint_list IO and the visible mount
-   *  flash that used to happen while the 170-entry list streamed back. */
-  fingerprints?: FingerprintEntry[];
-  onPick: (id: string) => void;
-  onClose: () => void;
-}) {
-  const [lib, setLib] = useState<FingerprintEntry[]>(fingerprints ?? []);
-  const [host, setHost] = useState<string>("");
-  useEffect(() => {
-    if (!fingerprints) {
-      invoke<FingerprintEntry[]>("fingerprint_list").then(setLib).catch(() => {});
-    }
-    invoke<string>("host_platform").then(setHost).catch(() => {});
-  }, [fingerprints]);
-  // Only host-matching fingerprints (UA/fonts/WebGL renderer are host-coupled).
-  const tpls = host ? lib.filter((e) => e.platform === host) : [];
-  return (
-    <DialogBackdrop onClose={onClose}>
-      <div className="dialog dialog-wide">
-        <header className="dialog-head">
-          <h2><ShardMini /> Pick a {host || ""} fingerprint</h2>
-          <button className="icon-btn" onClick={onClose}>✕</button>
-        </header>
-        <div className="dialog-body">
-          {tpls.length === 0 ? (
-            <div className="empty">
-              No {host} fingerprints in the library yet. Add some on the
-              Fingerprints page (or drop JSONs into the library folder).
-            </div>
-          ) : (
-            <div className="tpl-grid">
-              {tpls.map((t) => (
-                <button key={t.id} className="tpl-card" onClick={() => onPick(t.id)} style={{ ['--accent' as any]: t.tag_color }}>
-                  <div className="tpl-accent" />
-                  <div className="tpl-head">
-                    <span className="tpl-platform">{t.platform}</span>
-                    <span className="tpl-chrome">Chrome {t.chrome}</span>
-                  </div>
-                  <div className="tpl-label">{t.label}</div>
-                  <div className="tpl-gpu">{t.gpu}</div>
-                </button>
-              ))}
-            </div>
-          )}
         </div>
       </div>
     </DialogBackdrop>
