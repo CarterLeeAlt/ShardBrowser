@@ -768,24 +768,26 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   overflow: hidden;
 }
 .t-cols {
-  /* Six data columns share the same surplus width. At the 1080px minimum
-     track area each expression resolves to its explicit floor; every extra
-     6px of table width then adds exactly 1px to each data column. */
-  --t-equal-share: 16.666667%;
+  /* Keep the utility and action tracks fixed, then distribute only the
+     remaining room between data columns. minmax() preserves every existing
+     column floor without letting percentage tracks overrun the container. */
   display: grid;
   grid-template-columns:
-    24px      /* sort handle */
-    4px       /* shard strip */
-    28px      /* checkbox */
-    max(140px, calc(var(--t-equal-share) - 40px))  /* name */
-    max(100px, calc(var(--t-equal-share) - 80px))  /* status */
-    max(200px, calc(var(--t-equal-share) + 20px))  /* proxy */
-    max(120px, calc(var(--t-equal-share) - 60px))  /* notes */
-    max(90px, calc(var(--t-equal-share) - 90px))   /* time */
-    max(130px, calc(var(--t-equal-share) - 50px))  /* last run */
-    160px;                                          /* row actions */
+    24px                    /* sort handle */
+    4px                     /* shard strip */
+    28px                    /* checkbox */
+    minmax(140px, 1fr)      /* name */
+    minmax(100px, 1fr)      /* status */
+    minmax(200px, 1fr)      /* proxy */
+    minmax(120px, 1fr)      /* notes */
+    minmax(90px, 1fr)       /* time */
+    minmax(130px, 1fr)      /* last run */
+    160px;                  /* row actions */
   gap: 10px;
-  padding: 10px 16px 10px 0;
+  /* The configured 1400px Windows minimum yields a 1384px webview after the
+     native frame. Eight pixels here let all column floors fit at that exact
+     client width while retaining a visible action-edge inset. */
+  padding: 10px 8px 10px 0;
   align-items: center;
 }
 /* Grid tracks default each cell's min-width to auto (= content
@@ -794,21 +796,20 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .t-cols > *,
 .p-cols > * { min-width: 0; }
 .p-cols {
-  /* Proxy data columns use the same equal-surplus model as browser rows.
-     At the 960px minimum track area each column is at its explicit floor;
-     every additional 6px adds exactly 1px to all six data columns. */
-  --p-equal-share: 16.666667%;
+  /* Match the browser table: percentages based on the full table ignore the
+     fixed controls, gaps, and padding. Flexible tracks share only the room
+     that is actually left, so the action column stays inside the card. */
   display: grid;
   grid-template-columns:
-    24px                                                /* sort handle */
-    28px                                               /* checkbox */
-    max(160px, var(--p-equal-share))                   /* name */
-    max(80px, calc(var(--p-equal-share) - 80px))       /* type */
-    max(140px, calc(var(--p-equal-share) - 20px))      /* host:port */
-    max(110px, calc(var(--p-equal-share) - 50px))      /* country */
-    max(68px, calc(var(--p-equal-share) - 92px))       /* profiles */
-    max(180px, calc(var(--p-equal-share) + 20px))      /* test result */
-    124px;                                              /* row actions */
+    24px                    /* sort handle */
+    28px                    /* checkbox */
+    minmax(160px, 1fr)      /* name */
+    minmax(80px, 1fr)       /* type */
+    minmax(140px, 1fr)      /* host:port */
+    minmax(110px, 1fr)      /* country */
+    minmax(68px, 1fr)       /* profiles */
+    minmax(180px, 1fr)      /* test result */
+    124px;                  /* row actions */
   gap: 10px;
   padding: 10px 16px;
   align-items: center;
