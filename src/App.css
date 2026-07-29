@@ -198,13 +198,13 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 
 .app {
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: 240px minmax(0, 1fr);
   height: 100vh;
   padding-top: var(--titlebar-h);
   overflow: hidden;
 }
 @media (min-width: 1700px) {
-  .app { grid-template-columns: 280px 1fr; }
+  .app { grid-template-columns: 280px minmax(0, 1fr); }
 }
 
 .sidebar {
@@ -343,13 +343,20 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 /* ===== main ===== */
 
 .main {
+  min-width: 0;
   padding: 14px 24px 24px 24px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   background:
     radial-gradient(circle at 100% 0%, #8b5cf614 0, transparent 36%),
     var(--bg-0);
 }
 .page { display: flex; flex-direction: column; }
+.workspace-page {
+  width: min(100%, 1440px);
+  min-width: 0;
+  margin-inline: auto;
+}
 
 .topbar {
   display: flex; align-items: center; justify-content: space-between;
@@ -788,7 +795,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
     minmax(90px, 1fr)       /* time */
     minmax(130px, 1fr)      /* last run */
     160px;                  /* row actions */
-  gap: 10px;
+  gap: 8px;
   /* The configured 1400px Windows minimum yields a 1384px webview after the
      native frame. Eight pixels here let all column floors fit at that exact
      client width while retaining a visible action-edge inset. */
@@ -815,7 +822,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
     minmax(68px, 1fr)       /* profiles */
     minmax(180px, 1fr)      /* test result */
     124px;                  /* row actions */
-  gap: 10px;
+  gap: 8px;
   padding: 10px 16px;
   align-items: center;
 }
