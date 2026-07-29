@@ -126,16 +126,19 @@ impl Tracker {
                     }
                 }
             }
-            if let Ok(mut g) = Self::shared().inner.lock() {
-                g.remove(&profile_id);
-            }
             // Bump the persisted total runtime; non-temporary only (temp
-            // profiles get deleted next line so their counter is moot).
+            // profiles get deleted below so their counter is moot). Keep the
+            // tracker entry authoritative until this read/modify/write is
+            // finished, preventing a newly-opened editor from being overwritten
+            // by the stale post-exit profile snapshot.
             if !temporary {
                 let elapsed_ms = started_at.elapsed().as_millis() as u64;
                 if let Err(e) = crate::profile::add_runtime(&profile_id, elapsed_ms) {
                     eprintln!("[launcher] add_runtime({profile_id}) failed: {e}");
                 }
+            }
+            if let Ok(mut g) = Self::shared().inner.lock() {
+                g.remove(&profile_id);
             }
             // Tear down temporary profile (config + udd) on close.
             if temporary {

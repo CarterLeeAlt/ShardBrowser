@@ -6,7 +6,7 @@
 #   * pushing a tag like `v1.2.3`  → release named "ShardX Launcher v1.2.3"
 #   * manual dispatch via the Actions tab (handy for ad-hoc builds)
 #
-# Artifacts attached to the Release: Windows x64 .msi + portable .exe.
+# Artifact attached to the Release: Windows x64 portable .exe only.
 # No Authenticode certificate is configured, so SmartScreen may warn.
 
 name: Release
@@ -85,27 +85,7 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      # `src-tauri/target` is cached for fast Rust rebuilds, but Tauri's bundle
-      # directory contains versioned release artifacts. Remove only that output
-      # so an older MSI restored from the cache can never enter this release.
-      - name: Clean stale cached bundles
-        shell: pwsh
-        run: |
-          $targetRoot = [System.IO.Path]::GetFullPath(
-            (Join-Path $env:GITHUB_WORKSPACE "src-tauri/target")
-          )
-          $bundle = [System.IO.Path]::GetFullPath(
-            (Join-Path $targetRoot "x86_64-pc-windows-msvc/release/bundle")
-          )
-          $targetPrefix = $targetRoot + [System.IO.Path]::DirectorySeparatorChar
-          if (-not $bundle.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-            throw "Refusing to clean bundle directory outside Cargo target: $bundle"
-          }
-          if (Test-Path -LiteralPath $bundle) {
-            Remove-Item -LiteralPath $bundle -Recurse -Force
-          }
-
-      - name: Build Tauri bundle (unsigned)
+      - name: Build portable Tauri executable (unsigned)
         shell: pwsh
         env:
           APP_VERSION: ${{ needs.prepare.outputs.version }}
@@ -120,32 +100,12 @@ jobs:
             $config,
             [System.Text.UTF8Encoding]::new($false)
           )
-          npx tauri build --target x86_64-pc-windows-msvc --config $configPath
+          npx tauri build --no-bundle --target x86_64-pc-windows-msvc --config $configPath
 
-      - name: Collect Windows MSI
-        shell: pwsh
-        env:
-          APP_VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          New-Item -ItemType Directory -Force staging | Out-Null
-          $bundle = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle"
-          $allMsi = @(Get-ChildItem -Path $bundle -Recurse -File -Filter *.msi)
-          $versionMarker = "_$($env:APP_VERSION)_x64_"
-          $msi = @($allMsi | Where-Object { $_.Name.Contains($versionMarker) })
-          if ($msi.Count -ne 1) {
-            $found = if ($allMsi.Count -eq 0) { "none" } else { $allMsi.FullName -join "; " }
-            throw "Expected exactly one Windows x64 MSI for version $($env:APP_VERSION), found $($msi.Count). All MSI files: $found"
-          }
-          Copy-Item -LiteralPath $msi[0].FullName -Destination staging -Verbose
-          Get-ChildItem staging
-
-      # The raw compiled binary (one level above bundle/) is a standalone,
-      # installer-free executable — no MSI/NSIS, no admin, just run it. It uses
-      # the system's Evergreen WebView2 (preinstalled on Windows 10/11). Ship it
-      # as the portable build alongside the installers.
       - name: Collect Windows portable binary
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force staging | Out-Null
           $rel = "src-tauri/target/x86_64-pc-windows-msvc/release"
           # Tauri renames the binary to the product name; fall back to the
           # cargo package name in case that changes.
@@ -174,7 +134,7 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: List collected bundles
+      - name: List collected portable binaries
         shell: pwsh
         run: Get-ChildItem -Path dist -Recurse
 
@@ -190,7 +150,7 @@ jobs:
           body: |
             ## Install
 
-            **Windows x64 only** — use the `.msi` installer or the installer-free `ShardX-Launcher-portable-${{ needs.prepare.outputs.version }}-win-x64.exe`. The portable build uses the Evergreen WebView2 runtime included with Windows 10/11. Because the binaries are not Authenticode-signed, SmartScreen may require **More info → Run anyway**.
+            **Windows x64 only** — run `ShardX-Launcher-portable-${{ needs.prepare.outputs.version }}-win-x64.exe` directly. No installer is produced. All launcher state is stored in the adjacent `shardx-launcher` directory, so keep that directory with the EXE when moving or backing up the launcher. The portable build uses the Evergreen WebView2 runtime included with Windows 10/11. Because the binary is not Authenticode-signed, SmartScreen may require **More info → Run anyway**.
 
             On first launch the launcher downloads the patched ShardX browser, Widevine CDM and a starter library of 170 device profiles from our CDN.  After that it boots straight to the workspace.
           files: dist/*

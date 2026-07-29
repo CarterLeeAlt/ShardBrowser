@@ -8,15 +8,19 @@ import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
+import threading
 import zipfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
 import httpx
+
+from .storage import atomic_write, read_json_with_backup
 
 PUB_BASE = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev"
 CHROMIUM_VERSION = "149.0.7827.103"
@@ -84,6 +88,10 @@ def host_spec() -> HostSpec:
 
 FINGERPRINTS_ARCHIVE = Archive("ShardX-Fingerprints.zip", "Fingerprint library")
 FINGERPRINTS_TOP_DIR = "shardx-fingerprints"
+MAX_ARCHIVE_BYTES = 16 * 1024 * 1024 * 1024
+MAX_EXTRACTED_BYTES = 32 * 1024 * 1024 * 1024
+MAX_ARCHIVE_ENTRIES = 250_000
+DOWNLOAD_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=10.0)
 
 
 ProgressCb = Callable[[str, int, int], None]   # (label, received, total)
@@ -164,6 +172,7 @@ class Runtime:
         # derived from the version number). Applied to profiles on launch.
         self._grease_brand: Optional[str] = None
         self._grease_version: Optional[str] = None
+        self._install_lock = threading.Lock()
         # Set to True after a successful in-process install() so subsequent
         # launches in the same process skip the R2 HEAD round-trip (~1 s
         # over a clean connection).  Cleared by `install(force=True)`.
@@ -243,13 +252,12 @@ class Runtime:
     # ---- manifest ----
 
     def _load_manifest(self) -> dict:
-        try:
-            return json.loads(self.manifest_path.read_text())
-        except Exception:
+        if not self.manifest_path.exists():
             return {}
+        return read_json_with_backup(self.manifest_path)
 
     def _save_manifest(self, m: dict) -> None:
-        self.manifest_path.write_text(json.dumps(m, indent=2))
+        atomic_write(self.manifest_path, json.dumps(m, indent=2))
 
     # ---- install ----
 
@@ -257,8 +265,13 @@ class Runtime:
         """Idempotent — re-checks remote etag, skips when nothing changed.
         Within a single process, subsequent calls are no-ops unless `force=True`.
         """
+        with self._install_lock:
+            self._install_locked(force)
+
+    def _install_locked(self, force: bool) -> None:
         if self._checked_in_process and not force:
             return
+        self._recover_interrupted_swaps()
         local = self._load_manifest()
         manifest = self._fetch_manifest()
         remote = manifest.get("archives") if isinstance(manifest.get("archives"), dict) else {}
@@ -274,16 +287,11 @@ class Runtime:
         if not need_browser and manifest.get("chromium_version"):
             need_browser = self._effective_installed_version(local) != manifest["chromium_version"]
         if need_browser:
-            # Wipe the old engine tree first so a leftover `<old>.manifest` /
-            # stale libs can't linger beside the new ones (that pinned the
-            # detected version → endless re-download). binary_subpath[0] is the
-            # engine root dir.
-            shutil.rmtree(self.root / self._spec.binary_subpath[0], ignore_errors=True)
-            local["browser_etag"] = self._download_and_extract(self._spec.browser, self.root)
-        # Widevine — only re-pull when browser changed (versions must match).
-        if self._spec.widevine and (need_browser or not local.get("widevine_etag")):
-            local["widevine_etag"] = self._download_and_extract(self._spec.widevine, self.root)
-            self._place_widevine()
+            browser_etag, widevine_etag = self._install_complete_runtime()
+            local["browser_etag"] = browser_etag
+            local["widevine_etag"] = widevine_etag
+        elif self._spec.widevine and not local.get("widevine_etag"):
+            local["widevine_etag"] = self._install_widevine()
         # Fingerprints — additive seed (etag changed → re-extract, never
         # overwrites user-renamed files).
         fp_remote = remote.get(FINGERPRINTS_ARCHIVE.key)
@@ -320,83 +328,204 @@ class Runtime:
         except Exception:
             return {}
 
+    def _install_complete_runtime(self) -> tuple[str, Optional[str]]:
+        stage = self.root / ".runtime-stage"
+        shutil.rmtree(stage, ignore_errors=True)
+        stage.mkdir(parents=True)
+        try:
+            browser_etag = self._download_and_extract(self._spec.browser, stage)
+            widevine_etag = None
+            if self._spec.widevine:
+                widevine_etag = self._download_and_extract(self._spec.widevine, stage)
+                self._place_widevine(stage)
+            self._validate_runtime(stage, self._spec.widevine is not None)
+            if sys.platform != "win32":
+                _fix_unix_exec_bits(stage)
+            self._replace_directory(
+                stage / self._spec.binary_subpath[0],
+                self.root / self._spec.binary_subpath[0],
+                self.root / f".{self._spec.binary_subpath[0]}.rollback",
+            )
+            return browser_etag, widevine_etag
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+
+    def _install_widevine(self) -> str:
+        if not self._spec.widevine:
+            raise RuntimeError("Widevine is unavailable on this host")
+        stage = self.root / ".runtime-stage"
+        shutil.rmtree(stage, ignore_errors=True)
+        stage.mkdir(parents=True)
+        try:
+            etag = self._download_and_extract(self._spec.widevine, stage)
+            self._place_widevine(stage)
+            staged = stage.joinpath(*self._spec.widevine_subpath)
+            self._validate_widevine(staged)
+            self._replace_directory(
+                staged,
+                self.root.joinpath(*self._spec.widevine_subpath),
+                self.root / ".WidevineCdm.rollback",
+            )
+            return etag
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+
+    @staticmethod
+    def _replace_directory(staged: Path, live: Path, rollback: Path) -> None:
+        if not staged.is_dir():
+            raise RuntimeError(f"staged Runtime directory is missing: {staged}")
+        shutil.rmtree(rollback, ignore_errors=True)
+        had_live = live.exists()
+        if had_live:
+            live.rename(rollback)
+        try:
+            staged.rename(live)
+        except Exception:
+            if had_live and rollback.exists() and not live.exists():
+                rollback.rename(live)
+            raise
+        try:
+            shutil.rmtree(rollback)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            print(f"[shardx] installed Runtime but could not remove rollback {rollback}: {error}", file=sys.stderr)
+
+    def _recover_interrupted_swaps(self) -> None:
+        engine = self.root / self._spec.binary_subpath[0]
+        pairs = (
+            (engine, self.root / f".{self._spec.binary_subpath[0]}.rollback"),
+            (self.root.joinpath(*self._spec.widevine_subpath), self.root / ".WidevineCdm.rollback"),
+        )
+        for live, rollback in pairs:
+            if not rollback.exists():
+                continue
+            if live.exists():
+                try:
+                    shutil.rmtree(rollback)
+                except OSError as error:
+                    print(f"[shardx] old Runtime cleanup is still pending for {rollback}: {error}", file=sys.stderr)
+            else:
+                rollback.rename(live)
+        shutil.rmtree(self.root / ".runtime-stage", ignore_errors=True)
+
+    def _validate_runtime(self, root: Path, require_widevine: bool) -> None:
+        binary = root.joinpath(*self._spec.binary_subpath)
+        if not binary.is_file() or binary.stat().st_size == 0:
+            raise RuntimeError(f"staged Runtime binary is missing or empty: {binary}")
+        if sys.platform == "win32":
+            engine = root / self._spec.binary_subpath[0]
+            for name in ("chrome.dll", "resources.pak"):
+                path = engine / name
+                if not path.is_file() or path.stat().st_size == 0:
+                    raise RuntimeError(f"staged Runtime file is missing or empty: {path}")
+        if require_widevine:
+            self._validate_widevine(root.joinpath(*self._spec.widevine_subpath))
+
+    @staticmethod
+    def _validate_widevine(root: Path) -> None:
+        manifest = root / "manifest.json"
+        if not manifest.is_file() or manifest.stat().st_size == 0:
+            raise RuntimeError(f"staged Widevine manifest is missing or empty: {manifest}")
+
     def _download_and_extract(self, arch: Archive, dest: Path) -> str:
         url = f"{PUB_BASE}/{arch.key}"
         tmp = dest / f".{arch.key}.tmp"
         tmp.parent.mkdir(parents=True, exist_ok=True)
-        etag = ""
-        with httpx.stream("GET", url, timeout=None, follow_redirects=True) as r:
-            r.raise_for_status()
-            etag = r.headers.get("etag", "").strip('"')
-            total = int(r.headers.get("content-length", 0))
-            received = 0
-            with tmp.open("wb") as f:
-                for chunk in r.iter_bytes(chunk_size=1 << 16):
-                    f.write(chunk)
-                    received += len(chunk)
-                    if self._progress:
-                        self._progress(arch.label, received, total)
-        # Extract.  IMPORTANT: on macOS/Linux we shell out to the system
-        # `unzip` instead of Python's `zipfile` because zipfile cannot
-        # restore symlinks (every `Versions/Current/...` link in a `.app`
-        # framework gets written as a 24-byte text file) and drops the
-        # +x permission bits on every helper executable.  The result
-        # extracts cleanly but fails to launch — GPU helper can't find
-        # the framework dylib and the engine FATALs on first child.
-        if sys.platform == "win32":
-            with zipfile.ZipFile(tmp) as z:
-                z.extractall(dest)
-        else:
-            _system_unzip(tmp, dest)
-        tmp.unlink(missing_ok=True)
-        return etag
+        try:
+            with httpx.stream("GET", url, timeout=DOWNLOAD_TIMEOUT, follow_redirects=True) as r:
+                r.raise_for_status()
+                etag = r.headers.get("etag", "").strip('"')
+                total = int(r.headers.get("content-length", 0))
+                if total > MAX_ARCHIVE_BYTES:
+                    raise RuntimeError(f"{arch.key} exceeds the 16 GiB archive limit")
+                received = 0
+                with tmp.open("wb") as f:
+                    for chunk in r.iter_bytes(chunk_size=1 << 16):
+                        received += len(chunk)
+                        if received > MAX_ARCHIVE_BYTES:
+                            raise RuntimeError(f"{arch.key} exceeds the 16 GiB archive limit")
+                        f.write(chunk)
+                        if self._progress:
+                            self._progress(arch.label, received, total)
+                    f.flush()
+                    os.fsync(f.fileno())
+            _validate_archive(tmp, dest)
+            if sys.platform == "win32":
+                with zipfile.ZipFile(tmp) as z:
+                    z.extractall(dest)
+            else:
+                _system_unzip(tmp, dest)
+            return etag
+        finally:
+            tmp.unlink(missing_ok=True)
 
-    def _place_widevine(self) -> None:
+    def _place_widevine(self, root: Path) -> None:
         if not self._spec.widevine:
             return
         # Source dir inside the extracted Widevine archive (mirrors the
         # `ShardX-Widevine-<plat>/WidevineCdm` layout from the launcher).
         wrapper_name = self._spec.widevine.key.removesuffix(".zip")
-        src = self.root / wrapper_name / "WidevineCdm"
+        src = root / wrapper_name / "WidevineCdm"
         if not src.exists():
-            return
-        dst = self.root.joinpath(*self._spec.widevine_subpath)
+            raise RuntimeError(f"staged Widevine directory is missing: {src}")
+        dst = root.joinpath(*self._spec.widevine_subpath)
         if dst.exists():
             shutil.rmtree(dst)
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dst))
-        shutil.rmtree(self.root / wrapper_name, ignore_errors=True)
+        shutil.rmtree(root / wrapper_name, ignore_errors=True)
 
     def _install_fingerprints(self) -> None:
-        url = f"{PUB_BASE}/{FINGERPRINTS_ARCHIVE.key}"
         staging = self.fingerprints_dir / ".staging"
         if staging.exists():
             shutil.rmtree(staging)
         staging.mkdir(parents=True, exist_ok=True)
-        tmp = staging / "bundle.zip"
-        with httpx.stream("GET", url, timeout=None, follow_redirects=True) as r:
-            r.raise_for_status()
-            total = int(r.headers.get("content-length", 0))
-            received = 0
-            with tmp.open("wb") as f:
-                for chunk in r.iter_bytes(chunk_size=1 << 16):
-                    f.write(chunk)
-                    received += len(chunk)
-                    if self._progress:
-                        self._progress(FINGERPRINTS_ARCHIVE.label, received, total)
-        # Fingerprints bundle is plain JSON files — `zipfile` is fine
-        # everywhere (no symlinks / exec bits to preserve).
-        with zipfile.ZipFile(tmp) as z:
-            z.extractall(staging)
-        # Move *.json from the wrapper dir into fingerprints/, additive
-        # Always overwrite bundled templates so engine-version bumps reach
-        # existing libraries; user-added files (other names) are never iterated.
-        src_dir = staging / FINGERPRINTS_TOP_DIR
-        walk = src_dir if src_dir.exists() else staging
-        for p in walk.iterdir():
-            if p.suffix == ".json":
-                shutil.copy(p, self.fingerprints_dir / p.name)
-        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            self._download_and_extract(FINGERPRINTS_ARCHIVE, staging)
+            src_dir = staging / FINGERPRINTS_TOP_DIR
+            walk = src_dir if src_dir.exists() else staging
+            for p in walk.iterdir():
+                if p.suffix == ".json":
+                    shutil.copy(p, self.fingerprints_dir / p.name)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+def _validate_archive(archive: Path, dest: Path) -> None:
+    with zipfile.ZipFile(archive) as z:
+        infos = z.infolist()
+        if len(infos) > MAX_ARCHIVE_ENTRIES:
+            raise RuntimeError("Runtime archive contains too many entries")
+        extracted = 0
+        symlinks: set[str] = set()
+        for info in infos:
+            name = info.filename
+            path = PurePosixPath(name.rstrip("/"))
+            if (not name or "\\" in name or path.is_absolute()
+                    or any(part in ("", ".", "..") for part in path.parts)
+                    or (path.parts and ":" in path.parts[0])):
+                raise RuntimeError(f"Runtime archive contains an unsafe path: {name}")
+            for link in symlinks:
+                if name.startswith(f"{link}/"):
+                    raise RuntimeError(f"Runtime archive writes through a symbolic link: {name}")
+            mode = info.external_attr >> 16
+            if stat.S_ISLNK(mode):
+                if sys.platform == "win32":
+                    raise RuntimeError("Runtime archive contains an unsupported symbolic link")
+                target = z.read(info).decode("utf-8", errors="strict")
+                target_path = PurePosixPath(target)
+                if (target_path.is_absolute() or "\\" in target
+                        or any(part in ("", ".", "..") for part in target_path.parts)):
+                    raise RuntimeError(f"Runtime archive contains an unsafe symbolic link: {name}")
+                symlinks.add(name.rstrip("/"))
+            extracted += info.file_size
+            if extracted > MAX_EXTRACTED_BYTES:
+                raise RuntimeError("Runtime archive expands beyond the 32 GiB safety limit")
+        if shutil.disk_usage(dest).free < extracted + 512 * 1024 * 1024:
+            raise RuntimeError(
+                f"not enough disk space to extract Runtime ({extracted} bytes plus reserve required)"
+            )
 
 
 _NATIVE_MAGIC = (

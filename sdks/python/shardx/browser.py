@@ -28,6 +28,7 @@ from .profile import Profile, user_data_dir as _user_data_dir
 from .proxy import ParsedProxy, parse_proxy, probe_udp
 from .runtime import Runtime, apply_engine_version
 from .screen import apply_screen_strategy, default_mode_for
+from .storage import atomic_write
 
 _NOISE_DEFAULT = {
     "canvas":       {"enabled": False, "seed": 0},
@@ -156,7 +157,7 @@ class Browser:
         )
         apply_noise_seeds(profile.config, profile.id)
         fp_file = udd / "fingerprint.json"
-        fp_file.write_text(json.dumps(profile.config))
+        atomic_write(fp_file, json.dumps(profile.config))
 
         argv: list[str] = [
             str(self.runtime.binary_path),

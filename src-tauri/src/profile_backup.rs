@@ -14,6 +14,7 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 use zip::write::SimpleFileOptions;
 
 const BACKUP_FORMAT: &str = "shardx-profile-backup";
@@ -27,10 +28,14 @@ const USER_DATA_PREFIX: &str = "user-data/";
 const MAX_BACKUP_BATCH: usize = 100;
 const MAX_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const MAX_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRIES: usize = 500_000;
-const MAX_MANIFEST_BYTES: usize = 128 * 1024 * 1024;
+const MAX_BATCH_UNCOMPRESSED_BYTES: u64 = 128 * 1024 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 250_000;
+const MAX_MANIFEST_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PROXY_BYTES: usize = 1024 * 1024;
+const MAX_USER_DATA_DEPTH: usize = 128;
+const RESTORE_DISK_RESERVE_BYTES: u64 = 1024 * 1024 * 1024;
+static BACKUP_OPERATION_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -92,6 +97,7 @@ struct PreparedImport {
     bound_proxy: Option<proxy::ProxyEntry>,
     file_count: usize,
     data_bytes: u64,
+    restore_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -163,7 +169,11 @@ fn collect_user_data_entries(
     root: &Path,
     directory: &Path,
     entries: &mut Vec<SourceEntry>,
+    depth: usize,
 ) -> Result<()> {
+    if depth > MAX_USER_DATA_DEPTH {
+        bail!("profile user-data directory nesting exceeds the safety limit");
+    }
     let mut children: Vec<_> = fs::read_dir(directory)
         .with_context(|| format!("read user-data directory {}", directory.display()))?
         .collect::<std::result::Result<_, _>>()?;
@@ -175,12 +185,15 @@ fn collect_user_data_entries(
             .strip_prefix(root)
             .context("user-data path escaped its root")?
             .to_path_buf();
+        if relative.components().count() > MAX_USER_DATA_DEPTH {
+            bail!("profile user-data directory nesting exceeds the safety limit");
+        }
         if should_skip_user_data(&relative) {
             continue;
         }
         let metadata = fs::symlink_metadata(&source)?;
-        if metadata.file_type().is_symlink() {
-            bail!("user-data contains an unsupported symbolic link: {}", relative.display());
+        if is_link_or_reparse_point(&metadata) {
+            bail!("user-data contains an unsupported link or reparse point: {}", relative.display());
         }
         if metadata.is_dir() {
             entries.push(SourceEntry {
@@ -188,7 +201,7 @@ fn collect_user_data_entries(
                 relative: relative.clone(),
                 kind: BackupEntryKind::Directory,
             });
-            collect_user_data_entries(root, &source, entries)?;
+            collect_user_data_entries(root, &source, entries, depth + 1)?;
         } else if metadata.is_file() {
             entries.push(SourceEntry {
                 source,
@@ -201,6 +214,20 @@ fn collect_user_data_entries(
         }
     }
     Ok(())
+}
+
+fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 fn archive_relative_path(relative: &Path) -> Result<String> {
@@ -251,7 +278,7 @@ fn write_user_data_entries(
     });
 
     let mut sources = Vec::new();
-    collect_user_data_entries(source_root, source_root, &mut sources)?;
+    collect_user_data_entries(source_root, source_root, &mut sources, 0)?;
     let mut file_count = 0usize;
     let mut total_bytes = 0u64;
     let mut buffer = vec![0u8; 1024 * 1024];
@@ -406,7 +433,7 @@ fn build_backup_archive(profile_id: &str, stamp: u128, exported_at: &str) -> Res
         };
         let manifest_json = serde_json::to_vec_pretty(&manifest)?;
         if manifest_json.len() > MAX_MANIFEST_BYTES {
-            bail!("backup manifest exceeds the 128 MiB limit");
+            bail!("backup manifest exceeds the 32 MiB limit");
         }
         archive.start_file(MANIFEST_ENTRY, zip_options())?;
         archive.write_all(&manifest_json)?;
@@ -430,6 +457,9 @@ fn build_backup_archive(profile_id: &str, stamp: u128, exported_at: &str) -> Res
 }
 
 pub(crate) fn export(profile_ids: Vec<String>) -> std::result::Result<ProfileBackupSummary, String> {
+    let _backup_guard = BACKUP_OPERATION_LOCK
+        .lock()
+        .map_err(|_| "profile backup operation lock is poisoned".to_string())?;
     if profile_ids.is_empty() {
         return Err("select at least one profile to export".into());
     }
@@ -502,6 +532,12 @@ fn validate_archive_entry_name(name: &str) -> Result<()> {
 
 fn validate_record_path(record: &BackupEntry) -> Result<()> {
     validate_archive_entry_name(&record.path)?;
+    if let Some(relative) = record.path.strip_prefix(USER_DATA_PREFIX) {
+        let depth = relative.trim_end_matches('/').split('/').filter(|part| !part.is_empty()).count();
+        if depth > MAX_USER_DATA_DEPTH {
+            bail!("backup user-data directory nesting exceeds the safety limit");
+        }
+    }
     match record.kind {
         BackupEntryKind::Directory => {
             if !record.path.ends_with('/') || record.size != 0 || !record.sha256.is_empty() {
@@ -626,6 +662,7 @@ fn prepare_import_inner(
     path: &Path,
     new_profile_id: String,
     stage_root: PathBuf,
+    remaining_batch_bytes: u64,
 ) -> Result<PreparedImport> {
     let metadata = fs::metadata(path).with_context(|| format!("open {}", path.display()))?;
     if metadata.len() > MAX_ARCHIVE_BYTES {
@@ -645,6 +682,12 @@ fn prepare_import_inner(
         let entry = archive.by_index(index)?;
         let name = entry.name().to_string();
         validate_archive_entry_name(&name)?;
+        if entry
+            .unix_mode()
+            .is_some_and(|mode| mode & 0o170000 == 0o120000)
+        {
+            bail!("backup contains an unsupported symbolic link");
+        }
         if !actual_names.insert(name.clone()) {
             bail!("backup contains duplicate archive entry: {name}");
         }
@@ -660,6 +703,9 @@ fn prepare_import_inner(
         serde_json::from_slice(&manifest_bytes).context("backup manifest is invalid")?;
     if manifest.format != BACKUP_FORMAT || manifest.version != BACKUP_VERSION {
         bail!("backup is not a supported ShardX v2 profile backup");
+    }
+    if manifest.entries.len() > MAX_ARCHIVE_ENTRIES + 4 {
+        bail!("backup manifest contains too many entries");
     }
     if manifest.launcher_version.trim().is_empty() || manifest.exported_at.trim().is_empty() {
         bail!("backup manifest is missing version or timestamp metadata");
@@ -685,8 +731,13 @@ fn prepare_import_inner(
         }
         if record.kind == BackupEntryKind::File && record.path.starts_with(USER_DATA_PREFIX) {
             user_data_file_count += 1;
-            user_data_bytes += record.size;
+            user_data_bytes = user_data_bytes
+                .checked_add(record.size)
+                .ok_or_else(|| anyhow!("backup user-data size overflow"))?;
         }
+    }
+    if total_uncompressed > remaining_batch_bytes {
+        bail!("selected backups exceed the 128 GiB batch restore limit");
     }
     if manifest.user_data_file_count != user_data_file_count
         || manifest.user_data_bytes != user_data_bytes
@@ -706,6 +757,19 @@ fn prepare_import_inner(
         .collect();
     if actual_names != expected_names {
         bail!("backup archive contents do not exactly match its manifest");
+    }
+
+    let available = store::available_space(
+        stage_root
+            .parent()
+            .context("restore staging directory has no parent")?,
+    )?;
+    if available < total_uncompressed.saturating_add(RESTORE_DISK_RESERVE_BYTES) {
+        bail!(
+            "not enough free disk space to restore {} (need {} bytes plus 1 GiB reserve)",
+            path.display(),
+            total_uncompressed
+        );
     }
 
     let staged_user_data = stage_root.clone();
@@ -763,10 +827,11 @@ fn prepare_import_inner(
         bound_proxy,
         file_count: user_data_file_count,
         data_bytes: user_data_bytes,
+        restore_bytes: total_uncompressed,
     })
 }
 
-fn prepare_import(path: &Path) -> Result<PreparedImport> {
+fn prepare_import(path: &Path, remaining_batch_bytes: u64) -> Result<PreparedImport> {
     if path.extension().and_then(|value| value.to_str()).map(str::to_ascii_lowercase)
         != Some("shardx-backup".to_string())
     {
@@ -780,7 +845,12 @@ fn prepare_import(path: &Path) -> Result<PreparedImport> {
         fs::remove_dir_all(&stage_root)?;
     }
     fs::create_dir_all(&stage_root)?;
-    let result = prepare_import_inner(path, new_profile_id, stage_root.clone());
+    let result = prepare_import_inner(
+        path,
+        new_profile_id,
+        stage_root.clone(),
+        remaining_batch_bytes,
+    );
     if result.is_err() {
         let _ = fs::remove_dir_all(stage_root);
     }
@@ -839,6 +909,9 @@ fn import_failure(
 }
 
 pub(crate) fn import(paths: Vec<String>) -> std::result::Result<ProfileBackupSummary, String> {
+    let _backup_guard = BACKUP_OPERATION_LOCK
+        .lock()
+        .map_err(|_| "profile backup operation lock is poisoned".to_string())?;
     if paths.is_empty() {
         return Err("select at least one .shardx-backup file".into());
     }
@@ -848,6 +921,7 @@ pub(crate) fn import(paths: Vec<String>) -> std::result::Result<ProfileBackupSum
     let mut unique_paths = HashSet::new();
     let mut prepared: Vec<PreparedImport> = Vec::with_capacity(paths.len());
     let mut backup_ids = HashSet::new();
+    let mut batch_bytes = 0u64;
     for raw_path in paths {
         let path = PathBuf::from(raw_path);
         let canonical = fs::canonicalize(&path)
@@ -858,7 +932,10 @@ pub(crate) fn import(paths: Vec<String>) -> std::result::Result<ProfileBackupSum
             }
             return Err("the same backup file was selected more than once".into());
         }
-        match prepare_import(&canonical) {
+        match prepare_import(
+            &canonical,
+            MAX_BATCH_UNCOMPRESSED_BYTES.saturating_sub(batch_bytes),
+        ) {
             Ok(item) => {
                 if !backup_ids.insert(item.backup_id.clone()) {
                     let _ = fs::remove_dir_all(&item.stage_root);
@@ -870,6 +947,9 @@ pub(crate) fn import(paths: Vec<String>) -> std::result::Result<ProfileBackupSum
                         item.backup_id
                     ));
                 }
+                batch_bytes = batch_bytes
+                    .checked_add(item.restore_bytes)
+                    .ok_or_else(|| "selected backup size overflow".to_string())?;
                 prepared.push(item);
             }
             Err(error) => {
@@ -952,6 +1032,36 @@ pub(crate) fn import(paths: Vec<String>) -> std::result::Result<ProfileBackupSum
         file_count: prepared.iter().map(|item| item.file_count).sum(),
         data_bytes: prepared.iter().map(|item| item.data_bytes).sum(),
     })
+}
+
+/// Remove only launcher-owned staging artifacts left by an interrupted export
+/// or restore. Reparse points are skipped so cleanup can never traverse outside
+/// the portable data tree.
+pub(crate) fn cleanup_stale_artifacts() -> Result<usize> {
+    let mut removed = 0usize;
+    for entry in fs::read_dir(store::user_data_root()?)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(".restore-") {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.is_dir() && !is_link_or_reparse_point(&metadata) {
+            fs::remove_dir_all(entry.path())?;
+            removed += 1;
+        }
+    }
+    for entry in fs::read_dir(store::exports_dir()?)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.ends_with(".shardx-backup.tmp") && entry.file_type()?.is_file() {
+            fs::remove_file(entry.path())?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]

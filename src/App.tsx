@@ -55,6 +55,7 @@ const clip = {
   write: (text: string) => invoke("clipboard_write", { text }),
   read: () => invoke<string>("clipboard_read"),
 };
+const MAX_JSON_IMPORT_BYTES = 16 * 1024 * 1024;
 
 /// Read a JSON file selected by the user without exposing an arbitrary path to
 /// the Rust backend. The file contents stay in-memory until they are imported.
@@ -71,6 +72,9 @@ const pickJsonText = () => new Promise<string | null>((resolve, reject) => {
       return;
     }
     try {
+      if (file.size > MAX_JSON_IMPORT_BYTES) {
+        throw new Error("JSON import files must not exceed 16 MiB");
+      }
       resolve(await file.text());
     } catch (e) {
       reject(e);
@@ -1410,7 +1414,12 @@ function BrowsersView() {
   }, [running, startBusy, backendActiveIds, expanded, quickEdit, renaming]);
   // Empty folders persist in localStorage until a profile lands in them.
   const [folderRegistry, setFolderRegistry] = useState<string[]>(() => {
-    try { return JSON.parse(localStorage.getItem("shardx-folders") || "[]"); }
+    try {
+      const parsed: unknown = JSON.parse(localStorage.getItem("shardx-folders") || "[]");
+      return Array.isArray(parsed) && parsed.every((item) => typeof item === "string")
+        ? [...new Set(parsed)]
+        : [];
+    }
     catch { return []; }
   });
   const [folderModal, setFolderModal] = useState<{ profileId: string | null } | null>(null);

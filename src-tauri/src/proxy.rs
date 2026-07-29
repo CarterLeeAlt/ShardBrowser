@@ -360,8 +360,7 @@ fn load_unlocked() -> Result<ProxyStore> {
     if !path.exists() {
         return Ok(ProxyStore::default());
     }
-    let body = fs::read_to_string(&path)?;
-    Ok(serde_json::from_str(&body).unwrap_or_default())
+    store::load_json_with_backup(&path)
 }
 
 pub fn load() -> Result<ProxyStore> {
@@ -373,7 +372,7 @@ pub fn load() -> Result<ProxyStore> {
 
 fn save(s: &ProxyStore) -> Result<()> {
     let body = serde_json::to_string_pretty(s)?;
-    fs::write(store::proxies_path()?, body)?;
+    store::atomic_write(&store::proxies_path()?, body.as_bytes())?;
     Ok(())
 }
 
@@ -384,7 +383,7 @@ pub fn list() -> Result<Vec<ProxyEntry>> {
 fn restore_store_snapshot_unlocked(snapshot: Option<&[u8]>) -> Result<()> {
     let path = store::proxies_path()?;
     match snapshot {
-        Some(bytes) => fs::write(&path, bytes)?,
+        Some(bytes) => store::atomic_write(&path, bytes)?,
         None if path.exists() => fs::remove_file(path)?,
         None => {}
     }
@@ -1313,8 +1312,7 @@ fn load_history_unlocked() -> Result<HistoryStore> {
     if !path.exists() {
         return Ok(HistoryStore::default());
     }
-    let body = fs::read_to_string(&path)?;
-    Ok(serde_json::from_str(&body).unwrap_or_default())
+    store::load_json_with_backup(&path)
 }
 
 fn load_history() -> Result<HistoryStore> {
@@ -1326,7 +1324,7 @@ fn load_history() -> Result<HistoryStore> {
 
 fn save_history(s: &HistoryStore) -> Result<()> {
     let body = serde_json::to_string_pretty(s)?;
-    fs::write(history_path()?, body)?;
+    store::atomic_write(&history_path()?, body.as_bytes())?;
     Ok(())
 }
 

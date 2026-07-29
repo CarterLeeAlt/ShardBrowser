@@ -67,6 +67,17 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+pub fn validate_profile_id(id: &str) -> Result<()> {
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        anyhow::bail!("invalid profile id");
+    }
+    Ok(())
+}
+
 /// User-facing profile names are also passed to browser/taskbar integration,
 /// so keep the accepted alphabet explicit and consistent across every entry point.
 pub fn validate_profile_name(name: &str) -> Result<()> {
@@ -112,9 +123,7 @@ pub fn generated_profile_name(value: &str, fallback: &str) -> String {
 }
 
 fn path_for(id: &str) -> Result<PathBuf> {
-    if id.contains(['/', '\\', '.']) {
-        anyhow::bail!("invalid profile id");
-    }
+    validate_profile_id(id)?;
     Ok(store::profiles_dir()?.join(format!("{id}.json")))
 }
 
@@ -127,9 +136,12 @@ pub fn list_all() -> Result<Vec<ProfileMeta>> {
             continue;
         }
         let path = entry.path();
-        let body = fs::read_to_string(&path)?;
-        let Ok(mut stored): std::result::Result<StoredProfile, _> = serde_json::from_str(&body) else {
-            continue;
+        let mut stored: StoredProfile = match store::load_json_with_backup(&path) {
+            Ok(stored) => stored,
+            Err(error) => {
+                eprintln!("[launcher] skipping unreadable profile {}: {error}", path.display());
+                continue;
+            }
         };
         // Hide ephemeral profiles.
         if stored.meta.temporary {
@@ -149,7 +161,7 @@ pub fn list_all() -> Result<Vec<ProfileMeta>> {
                 // Persist the legacy backfill after it stops instead.
                 if !crate::is_profile_active(&stored.meta.id) {
                     if let Ok(body) = serde_json::to_string_pretty(&stored) {
-                        let _ = fs::write(&path, body);
+                        let _ = store::atomic_write(&path, body.as_bytes());
                     }
                 }
             }
@@ -214,9 +226,8 @@ pub fn purge_temporary() -> Result<usize> {
 
 pub fn load_raw(id: &str) -> Result<StoredProfile> {
     let path = path_for(id)?;
-    let body = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    let stored: StoredProfile = serde_json::from_str(&body)?;
-    Ok(stored)
+    store::load_json_with_backup(&path)
+        .with_context(|| format!("load profile {}", path.display()))
 }
 
 /// Deterministic non-zero 32-bit seed from the profile id + noise slot (FNV-1a).
@@ -366,7 +377,7 @@ pub fn save_raw(stored: &mut StoredProfile) -> Result<()> {
     fill_noise_seeds(&mut stored.config, &stored.meta.id);
     let path = path_for(&stored.meta.id)?;
     let body = serde_json::to_string_pretty(stored)?;
-    fs::write(path, body)?;
+    store::atomic_write(&path, body.as_bytes())?;
     Ok(())
 }
 
@@ -404,12 +415,7 @@ pub fn save_restored(stored: &mut StoredProfile) -> Result<()> {
     if stored.meta.created_at.is_none() {
         stored.meta.created_at = Some(chrono_now_iso());
     }
-    let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, serde_json::to_string_pretty(stored)?)?;
-    if let Err(error) = fs::rename(&temporary, &path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error.into());
-    }
+    store::atomic_write(&path, serde_json::to_string_pretty(stored)?.as_bytes())?;
     Ok(())
 }
 
@@ -485,7 +491,7 @@ pub fn set_folder(id: &str, folder: &str) -> Result<()> {
     p.meta.folder = folder.trim().to_string();
     let path = path_for(&p.meta.id)?;
     let body = serde_json::to_string_pretty(&p)?;
-    fs::write(path, body)?;
+    store::atomic_write(&path, body.as_bytes())?;
     Ok(())
 }
 
@@ -497,13 +503,12 @@ fn profiles_in_folder(name: &str) -> Result<Vec<(PathBuf, StoredProfile)>> {
         if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let Ok(body) = fs::read_to_string(entry.path()) else { continue; };
-        let Ok(stored): std::result::Result<StoredProfile, _> = serde_json::from_str(&body)
-        else {
-            continue;
-        };
+        let path = entry.path();
+        let body = fs::read_to_string(&path)?;
+        let stored: StoredProfile = serde_json::from_str(&body)
+            .with_context(|| format!("parse profile {}", path.display()))?;
         if stored.meta.folder == name {
-            profiles.push((entry.path(), stored));
+            profiles.push((path, stored));
         }
     }
     Ok(profiles)
@@ -522,7 +527,7 @@ pub fn rename_folder(old: &str, new: &str) -> Result<usize> {
     for (path, mut stored) in profiles {
         ensure_stopped(&stored.meta.id)?;
         stored.meta.folder = new.to_string();
-        fs::write(path, serde_json::to_string_pretty(&stored)?)?;
+        store::atomic_write(&path, serde_json::to_string_pretty(&stored)?.as_bytes())?;
     }
     Ok(count)
 }
@@ -541,7 +546,7 @@ pub fn delete_folder(name: &str, delete_profiles: bool) -> Result<usize> {
         } else {
             ensure_stopped(&stored.meta.id)?;
             stored.meta.folder = String::new();
-            fs::write(path, serde_json::to_string_pretty(&stored)?)?;
+            store::atomic_write(&path, serde_json::to_string_pretty(&stored)?.as_bytes())?;
         }
     }
     Ok(count)
@@ -549,9 +554,7 @@ pub fn delete_folder(name: &str, delete_profiles: bool) -> Result<usize> {
 
 /// Per-profile user-data-dir; created on first call.
 pub fn user_data_dir(id: &str) -> Result<PathBuf> {
-    if id.contains(['/', '\\', '.']) {
-        anyhow::bail!("invalid profile id");
-    }
+    validate_profile_id(id)?;
     let p = store::user_data_root()?.join(id);
     std::fs::create_dir_all(&p)?;
     Ok(p)

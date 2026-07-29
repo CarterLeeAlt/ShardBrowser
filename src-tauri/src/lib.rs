@@ -1262,7 +1262,7 @@ fn block_exit_if_browsers_running(app: &tauri::AppHandle) -> bool {
 pub fn run() {
     startup_path::enforce_valid_launcher_directory_or_exit();
 
-    tauri::Builder::default()
+    let result = tauri::Builder::default()
         // Must be the first plugin: a second launch focuses the running window.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);
@@ -1377,10 +1377,12 @@ pub fn run() {
             };
 
             let main_window = window_builder.build()?;
-            taskbar_icon::apply_launcher_taskbar_icon(
+            if let Err(error) = taskbar_icon::apply_launcher_taskbar_icon(
                 main_window.hwnd()?.0 as isize,
                 &launcher_root.join("icons"),
-            )?;
+            ) {
+                eprintln!("[launcher] launcher taskbar icon unavailable: {error:#}");
+            }
             let _ = APP_HANDLE.set(app.handle().clone());
 
             {
@@ -1430,6 +1432,11 @@ pub fn run() {
                 Ok(_) => {}
                 Err(e) => eprintln!("[launcher] temporary purge failed: {e}"),
             }
+            match profile_backup::cleanup_stale_artifacts() {
+                Ok(n) if n > 0 => eprintln!("[launcher] removed {n} stale backup staging artifact(s)"),
+                Ok(_) => {}
+                Err(e) => eprintln!("[launcher] backup staging cleanup failed: {e}"),
+            }
 
             // Keep stored proxy information fresh while the launcher remains
             // running (including when its window is hidden to the tray).
@@ -1448,6 +1455,8 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .run(tauri::generate_context!());
+    if let Err(error) = result {
+        startup_path::show_fatal_startup_error_and_exit(&error.to_string());
+    }
 }

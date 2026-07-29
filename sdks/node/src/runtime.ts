@@ -2,7 +2,7 @@
 // library from the ProxyShard CDN, extract into a per-user cache dir,
 // place Widevine inside the engine bundle, remember etags so subsequent
 // runs are zero-network. Mirrors src-tauri/src/runtime.rs in the launcher.
-import { closeSync, createWriteStream, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync, chmodSync, copyFileSync, lstatSync } from "node:fs";
+import { closeSync, createWriteStream, existsSync, mkdirSync, openSync, readdirSync, readSync, renameSync, rmSync, statSync, statfsSync, chmodSync, copyFileSync, lstatSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { homedir, platform as osPlatform, arch as osArch } from "node:os";
 import { join, dirname, resolve } from "node:path";
@@ -10,6 +10,7 @@ import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import { spawnSync } from "node:child_process";
 import AdmZip from "adm-zip";
+import { atomicWriteFileSync, readJsonWithBackupSync } from "./fsUtil.js";
 
 export const PUB_BASE = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev";
 export const CHROMIUM_VERSION = "149.0.7827.103";
@@ -71,6 +72,10 @@ export const FINGERPRINTS_ARCHIVE: Archive = {
   label: "Fingerprint library",
 };
 const FINGERPRINTS_TOP_DIR = "shardx-fingerprints";
+const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024 * 1024;
+const MAX_EXTRACTED_BYTES = 32 * 1024 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES = 250_000;
+const FETCH_TIMEOUT_MS = 60_000;
 
 export type ProgressCb = (label: string, received: number, total: number) => void;
 
@@ -100,6 +105,7 @@ export class Runtime {
    *  derived from the version number). Applied to profiles on launch. */
   private _greaseBrand?: string;
   private _greaseVersion?: string;
+  private _installTail: Promise<void> = Promise.resolve();
 
   constructor(opts: { cacheDir?: string; progress?: ProgressCb; profilesDir?: string } = {}) {
     this.root = opts.cacheDir ?? defaultCacheDir();
@@ -166,18 +172,25 @@ export class Runtime {
   // ---- manifest ----
 
   private loadManifest(): Manifest {
-    try { return JSON.parse(readFileSync(this.manifestPath, "utf8")); }
-    catch { return {}; }
+    if (!existsSync(this.manifestPath)) return {};
+    return readJsonWithBackupSync<Manifest>(this.manifestPath);
   }
   private saveManifest(m: Manifest): void {
-    writeFileSync(this.manifestPath, JSON.stringify(m, null, 2));
+    atomicWriteFileSync(this.manifestPath, JSON.stringify(m, null, 2));
   }
 
   // ---- install ----
 
   async install(opts: { force?: boolean } = {}): Promise<void> {
+    const operation = this._installTail.then(() => this.installLocked(opts));
+    this._installTail = operation.catch(() => {});
+    return operation;
+  }
+
+  private async installLocked(opts: { force?: boolean }): Promise<void> {
     const force = !!opts.force;
     if (this._checkedInProcess && !force) return;
+    this.recoverInterruptedSwaps();
     const local = this.loadManifest();
     const remote = await this.fetchManifest();
     // Remember the engine version + grease so launch can normalise profiles.
@@ -194,15 +207,11 @@ export class Runtime {
       needBrowser = this.effectiveInstalledVersion(local) !== remote.chromiumVersion;
     }
     if (needBrowser) {
-      // Wipe the old engine tree first so a leftover `<old>.manifest` / stale
-      // libs can't linger beside the new ones (that pinned the detected version
-      // → endless re-download). binarySubpath[0] is the engine root dir.
-      rmSync(join(this.root, this.spec.binarySubpath[0]), { recursive: true, force: true });
-      local.browser_etag = await this.downloadAndExtract(this.spec.browser, this.root);
-    }
-    if (this.spec.widevine && (needBrowser || !local.widevine_etag)) {
-      local.widevine_etag = await this.downloadAndExtract(this.spec.widevine, this.root);
-      this.placeWidevine();
+      const installed = await this.installCompleteRuntime();
+      local.browser_etag = installed.browserEtag;
+      local.widevine_etag = installed.widevineEtag;
+    } else if (this.spec.widevine && !local.widevine_etag) {
+      local.widevine_etag = await this.installWidevine();
     }
     const remoteFp = remote.archives[FINGERPRINTS_ARCHIVE.key];
     const fpDirHasJson = readdirSync(this.fingerprintsDir).some((f) => f.endsWith(".json"));
@@ -232,7 +241,7 @@ export class Runtime {
    *  against R2/S3. Empty archives / undefined version when unreachable. */
   private async fetchManifest(): Promise<{ archives: Record<string, string>; chromiumVersion?: string; greaseBrand?: string; greaseVersion?: string }> {
     try {
-      const r = await fetch(MANIFEST_URL);
+      const r = await fetchWithTimeout(MANIFEST_URL);
       if (!r.ok) return { archives: {} };
       const data = await r.json() as { archives?: Record<string, string>; chromium_version?: string; grease_brand?: string; grease_version?: string };
       const str = (v: unknown) => (typeof v === "string" ? v : undefined);
@@ -245,102 +254,223 @@ export class Runtime {
     } catch { return { archives: {} }; }
   }
 
+  private async installCompleteRuntime(): Promise<{ browserEtag: string; widevineEtag?: string }> {
+    const stage = join(this.root, ".runtime-stage");
+    rmSync(stage, { recursive: true, force: true });
+    mkdirSync(stage, { recursive: true });
+    try {
+      const browserEtag = await this.downloadAndExtract(this.spec.browser, stage);
+      let widevineEtag: string | undefined;
+      if (this.spec.widevine) {
+        widevineEtag = await this.downloadAndExtract(this.spec.widevine, stage);
+        this.placeWidevine(stage);
+      }
+      this.validateRuntime(stage, !!this.spec.widevine);
+      if (osPlatform() !== "win32") fixUnixExecBits(stage);
+      this.replaceDirectory(
+        join(stage, this.spec.binarySubpath[0]),
+        join(this.root, this.spec.binarySubpath[0]),
+        join(this.root, `.${this.spec.binarySubpath[0]}.rollback`),
+      );
+      return { browserEtag, widevineEtag };
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
+  }
+
+  private async installWidevine(): Promise<string> {
+    if (!this.spec.widevine) throw new Error("Widevine is unavailable on this host");
+    const stage = join(this.root, ".runtime-stage");
+    rmSync(stage, { recursive: true, force: true });
+    mkdirSync(stage, { recursive: true });
+    try {
+      const etag = await this.downloadAndExtract(this.spec.widevine, stage);
+      this.placeWidevine(stage);
+      const staged = join(stage, ...this.spec.widevineSubpath);
+      this.validateWidevine(staged);
+      this.replaceDirectory(
+        staged,
+        join(this.root, ...this.spec.widevineSubpath),
+        join(this.root, ".WidevineCdm.rollback"),
+      );
+      return etag;
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
+  }
+
+  private replaceDirectory(staged: string, live: string, rollback: string): void {
+    if (!existsSync(staged) || !statSync(staged).isDirectory()) {
+      throw new Error(`staged Runtime directory is missing: ${staged}`);
+    }
+    rmSync(rollback, { recursive: true, force: true });
+    const hadLive = existsSync(live);
+    if (hadLive) renameSync(live, rollback);
+    try {
+      renameSync(staged, live);
+    } catch (error) {
+      if (hadLive && existsSync(rollback) && !existsSync(live)) renameSync(rollback, live);
+      throw error;
+    }
+    try {
+      rmSync(rollback, { recursive: true, force: true });
+    } catch (error) {
+      console.warn(`[shardx] installed Runtime but could not remove rollback ${rollback}:`, error);
+    }
+  }
+
+  private recoverInterruptedSwaps(): void {
+    const engine = join(this.root, this.spec.binarySubpath[0]);
+    for (const [live, rollback] of [
+      [engine, join(this.root, `.${this.spec.binarySubpath[0]}.rollback`)],
+      [join(this.root, ...this.spec.widevineSubpath), join(this.root, ".WidevineCdm.rollback")],
+    ]) {
+      if (!existsSync(rollback)) continue;
+      if (existsSync(live)) {
+        try { rmSync(rollback, { recursive: true, force: true }); }
+        catch (error) { console.warn(`[shardx] old Runtime cleanup is still pending: ${rollback}`, error); }
+      } else renameSync(rollback, live);
+    }
+    rmSync(join(this.root, ".runtime-stage"), { recursive: true, force: true });
+  }
+
+  private validateRuntime(root: string, requireWidevine: boolean): void {
+    const binary = join(root, ...this.spec.binarySubpath);
+    if (!existsSync(binary) || !statSync(binary).isFile() || statSync(binary).size === 0) {
+      throw new Error(`staged Runtime binary is missing or empty: ${binary}`);
+    }
+    if (osPlatform() === "win32") {
+      const engine = join(root, this.spec.binarySubpath[0]);
+      for (const name of ["chrome.dll", "resources.pak"]) {
+        const file = join(engine, name);
+        if (!existsSync(file) || !statSync(file).isFile() || statSync(file).size === 0) {
+          throw new Error(`staged Runtime file is missing or empty: ${file}`);
+        }
+      }
+    }
+    if (requireWidevine) this.validateWidevine(join(root, ...this.spec.widevineSubpath));
+  }
+
+  private validateWidevine(root: string): void {
+    const manifest = join(root, "manifest.json");
+    if (!existsSync(manifest) || !statSync(manifest).isFile() || statSync(manifest).size === 0) {
+      throw new Error(`staged Widevine manifest is missing or empty: ${manifest}`);
+    }
+  }
+
   private async downloadAndExtract(arch: Archive, dest: string): Promise<string> {
     const url = `${PUB_BASE}/${arch.key}`;
     mkdirSync(dest, { recursive: true });
     const tmp = join(dest, `.${arch.key}.tmp`);
 
-    const r = await fetch(url);
-    if (!r.ok || !r.body) throw new Error(`download ${arch.key}: HTTP ${r.status}`);
-    const etag = r.headers.get("etag")?.replace(/^"|"$/g, "") ?? "";
-    const total = Number(r.headers.get("content-length") ?? 0);
-
-    let received = 0;
-    const reader = r.body.getReader();
-    const out = createWriteStream(tmp);
-    const stream = new Readable({
-      async read() {
-        const { value, done } = await reader.read();
-        if (done) { this.push(null); return; }
-        received += value.byteLength;
-        if (arch.label) {/* throttle: rounded percent */}
-        this.push(Buffer.from(value));
-      },
-    });
-    // Wire progress in a parallel listener so pipeline stays clean.
-    if (this.progress) {
-      stream.on("data", () => this.progress!(arch.label, received, total));
+    const controller = new AbortController();
+    let inactivityTimer: ReturnType<typeof setTimeout>;
+    const resetInactivityTimeout = () => {
+      clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    };
+    resetInactivityTimeout();
+    try {
+      const r = await fetch(url, { signal: controller.signal });
+      if (!r.ok || !r.body) throw new Error(`download ${arch.key}: HTTP ${r.status}`);
+      const etag = r.headers.get("etag")?.replace(/^"|"$/g, "") ?? "";
+      const total = Number(r.headers.get("content-length") ?? 0);
+      if (Number.isFinite(total) && total > MAX_ARCHIVE_BYTES) {
+        throw new Error(`${arch.key} exceeds the 16 GiB archive limit`);
+      }
+      let received = 0;
+      const reader = r.body.getReader();
+      const stream = new Readable({
+        async read() {
+          try {
+            const { value, done } = await reader.read();
+            if (done) { this.push(null); return; }
+            resetInactivityTimeout();
+            received += value.byteLength;
+            if (received > MAX_ARCHIVE_BYTES) {
+              this.destroy(new Error(`${arch.key} exceeds the 16 GiB archive limit`));
+              return;
+            }
+            this.push(Buffer.from(value));
+          } catch (error) {
+            this.destroy(error as Error);
+          }
+        },
+      });
+      if (this.progress) stream.on("data", () => this.progress!(arch.label, received, total));
+      await pipeline(stream, createWriteStream(tmp));
+      validateArchive(tmp, dest);
+      if (osPlatform() === "win32") new AdmZip(tmp).extractAllTo(dest, true);
+      else systemUnzip(tmp, dest);
+      return etag;
+    } finally {
+      clearTimeout(inactivityTimer!);
+      rmSync(tmp, { force: true });
     }
-    await pipeline(stream, out);
-
-    // Extract.  IMPORTANT: on macOS/Linux shell out to the system
-    // `unzip` instead of adm-zip — adm-zip writes symlinks as ordinary
-    // text files (every `Versions/Current/...` link in a `.app`
-    // framework becomes a 24-byte regular file) and drops the +x bit
-    // on every helper executable.  The result extracts cleanly but
-    // fails to launch — GPU helper can't find the framework dylib.
-    if (osPlatform() === "win32") {
-      new AdmZip(tmp).extractAllTo(dest, /*overwrite*/ true);
-    } else {
-      systemUnzip(tmp, dest);
-    }
-    rmSync(tmp, { force: true });
-    return etag;
   }
 
-  private placeWidevine(): void {
+  private placeWidevine(root: string): void {
     if (!this.spec.widevine) return;
     const wrapper = this.spec.widevine.key.replace(/\.zip$/, "");
-    const src = join(this.root, wrapper, "WidevineCdm");
-    if (!existsSync(src)) return;
-    const dst = join(this.root, ...this.spec.widevineSubpath);
+    const src = join(root, wrapper, "WidevineCdm");
+    if (!existsSync(src)) throw new Error(`staged Widevine directory is missing: ${src}`);
+    const dst = join(root, ...this.spec.widevineSubpath);
     if (existsSync(dst)) rmSync(dst, { recursive: true, force: true });
     mkdirSync(dirname(dst), { recursive: true });
     renameSync(src, dst);
-    rmSync(join(this.root, wrapper), { recursive: true, force: true });
+    rmSync(join(root, wrapper), { recursive: true, force: true });
   }
 
   private async installFingerprints(): Promise<void> {
-    const url = `${PUB_BASE}/${FINGERPRINTS_ARCHIVE.key}`;
     const staging = join(this.fingerprintsDir, ".staging");
     if (existsSync(staging)) rmSync(staging, { recursive: true, force: true });
     mkdirSync(staging, { recursive: true });
-    const tmp = join(staging, "bundle.zip");
-
-    const r = await fetch(url);
-    if (!r.ok || !r.body) throw new Error(`download fingerprints: HTTP ${r.status}`);
-    const total = Number(r.headers.get("content-length") ?? 0);
-
-    let received = 0;
-    const reader = r.body.getReader();
-    const out = createWriteStream(tmp);
-    const stream = new Readable({
-      async read() {
-        const { value, done } = await reader.read();
-        if (done) { this.push(null); return; }
-        received += value.byteLength;
-        this.push(Buffer.from(value));
-      },
-    });
-    if (this.progress) {
-      stream.on("data", () => this.progress!(FINGERPRINTS_ARCHIVE.label, received, total));
+    try {
+      await this.downloadAndExtract(FINGERPRINTS_ARCHIVE, staging);
+      const srcDir = join(staging, FINGERPRINTS_TOP_DIR);
+      const walk = existsSync(srcDir) ? srcDir : staging;
+      for (const name of readdirSync(walk)) {
+        if (!name.endsWith(".json")) continue;
+        copyFileSync(join(walk, name), join(this.fingerprintsDir, name));
+      }
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
     }
-    await pipeline(stream, out);
+  }
+}
 
-    // Fingerprints bundle is plain JSON files — adm-zip is fine here
-    // (no symlinks / exec bits to preserve).
-    new AdmZip(tmp).extractAllTo(staging, true);
+async function fetchWithTimeout(url: string): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
-    const srcDir = join(staging, FINGERPRINTS_TOP_DIR);
-    const walk = existsSync(srcDir) ? srcDir : staging;
-    for (const name of readdirSync(walk)) {
-      if (!name.endsWith(".json")) continue;
-      const dst = join(this.fingerprintsDir, name);
-      // Always overwrite bundled templates so engine-version bumps reach
-      // existing libraries; user-added files (other names) are never iterated.
-      copyFileSync(join(walk, name), dst);
+function validateArchive(archivePath: string, dest: string): void {
+  const entries = new AdmZip(archivePath).getEntries();
+  if (entries.length > MAX_ARCHIVE_ENTRIES) throw new Error("Runtime archive contains too many entries");
+  let extracted = 0;
+  for (const entry of entries) {
+    const name = entry.entryName;
+    if (!name || name.includes("\\") || name.startsWith("/") || /^[A-Za-z]:/.test(name)) {
+      throw new Error(`Runtime archive contains an unsafe path: ${name}`);
     }
-    rmSync(staging, { recursive: true, force: true });
+    const parts = name.replace(/\/$/, "").split("/");
+    if (parts.some((part) => !part || part === "." || part === "..")) {
+      throw new Error(`Runtime archive contains an unsafe path: ${name}`);
+    }
+    extracted += entry.header.size;
+    if (!Number.isSafeInteger(extracted) || extracted > MAX_EXTRACTED_BYTES) {
+      throw new Error("Runtime archive expands beyond the 32 GiB safety limit");
+    }
+  }
+  const fsStats = statfsSync(dest);
+  const available = fsStats.bavail * fsStats.bsize;
+  if (available < extracted + 512 * 1024 * 1024) {
+    throw new Error(`not enough disk space to extract Runtime (${extracted} bytes plus reserve required)`);
   }
 }
 

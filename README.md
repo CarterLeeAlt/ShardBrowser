@@ -273,7 +273,7 @@ immediately:
 ### Option A — grab a pre-built release
 
 Download the Windows x64 build from [GitHub Releases](../../releases). Use the
-`.msi` installer or the installer-free portable `.exe`.
+portable `.exe`; no installer build is produced.
 
 The release is not Authenticode-signed. If SmartScreen shows *"Windows
 protected your PC"*, click **More info** → **Run anyway**. Repeated launches
@@ -284,13 +284,13 @@ do not re-prompt.
 ```powershell
 npm ci
 npm run tauri dev
-# Windows x64 release MSI + portable EXE
+# Windows x64 portable EXE only
 npm run tauri:build:windows-x64
 ```
 
-The Windows MSI is written under
-`src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/`. The standalone
-portable executable is one level above `bundle/`.
+The executable is written to
+`src-tauri/target/x86_64-pc-windows-msvc/release/`. Move the EXE together with
+its adjacent `shardx-launcher` data directory when relocating the launcher.
 
 ### First launch
 

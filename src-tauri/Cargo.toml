@@ -52,6 +52,7 @@ ico = "0.5"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",            # HLOCAL + LocalFree live here in 0.59
     "Win32_Security_Cryptography", # CryptProtectData / CryptUnprotectData
+    "Win32_Storage_FileSystem",    # MoveFileExW / GetDiskFreeSpaceExW
     "Win32_System_SystemInformation", # GlobalMemoryStatusEx
     "Win32_UI_WindowsAndMessaging", # Native startup path error dialog
 ] }
