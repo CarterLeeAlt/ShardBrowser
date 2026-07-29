@@ -1026,6 +1026,39 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   font-weight: var(--font-weight-regular);
 }
 
+/* Name and proxy are visually one two-line information group. Give both the
+   same explicit tracks so their primary content shares one center line and
+   their compact secondary labels share another. Other columns remain
+   vertically centered across the full row. */
+.browser-data-row .cell-name,
+.browser-data-row .proxy-cell {
+  display: grid;
+  grid-template-rows: 22px 14px;
+  align-items: center;
+  row-gap: 2px;
+  height: 38px;
+}
+.browser-data-row .cell-name .name-main,
+.browser-data-row .proxy-main {
+  display: flex;
+  align-items: center;
+  height: 22px;
+}
+.browser-data-row .cell-name .name-sub {
+  margin-top: 0;
+  line-height: 14px;
+}
+.browser-data-row .proxy-detail,
+.browser-data-row .proxy-detail-text {
+  height: 14px;
+  line-height: 14px;
+}
+.browser-data-row .cell-proxy > .muted {
+  display: flex;
+  align-items: center;
+  height: 22px;
+}
+
 .row-actions { display: flex; align-items: center; gap: 4px; justify-content: flex-end; }
 .t-cols > .row-actions {
   min-width: 160px;
