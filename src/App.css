@@ -916,17 +916,21 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   white-space: nowrap;
 }
 .proxy-detail {
-  display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px;
+  display: block;
+  width: 100%;
   min-width: 0;
   color: var(--tx-3);
   font-size: 10.5px;
   line-height: 1.3;
-  overflow-wrap: anywhere;
-  word-break: break-word;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.proxy-detail .mono {
-  white-space: normal;
-  overflow-wrap: anywhere;
+.proxy-detail-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .flag {
   display: inline-block;
