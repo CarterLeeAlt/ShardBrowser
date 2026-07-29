@@ -35,6 +35,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import "./fonts.css";
 import "./App.css";
@@ -85,48 +86,20 @@ const pickJsonText = () => new Promise<string | null>((resolve, reject) => {
   input.click();
 });
 
-type ProfileBackupImportFile = { name: string; text: string };
-type ProfileBackupSummary = { profileCount: number; cookieCount: number };
-const MAX_PROFILE_BACKUP_BYTES = 64 * 1024 * 1024;
-const MAX_PROFILE_BACKUP_BATCH = 100;
+type ProfileBackupSummary = { profileCount: number; fileCount: number; dataBytes: number };
 
-/// Select one or more complete profile backups. The filename is retained so
-/// Rust can enforce the custom extension as well as the versioned file body.
-const pickProfileBackupFiles = () => new Promise<ProfileBackupImportFile[] | null>((resolve, reject) => {
-  const input = document.createElement("input");
-  input.type = "file";
-  input.accept = ".shardx-backup";
-  input.multiple = true;
-  input.style.display = "none";
-  input.addEventListener("change", async () => {
-    const selected = [...(input.files ?? [])];
-    if (selected.length === 0) {
-      input.remove();
-      resolve(null);
-      return;
-    }
-    try {
-      if (selected.length > MAX_PROFILE_BACKUP_BATCH) {
-        throw new Error("At most 100 profiles can be imported at once");
-      }
-      const invalid = selected.find((file) => !file.name.toLowerCase().endsWith(".shardx-backup"));
-      if (invalid) throw new Error(`${invalid.name} is not a .shardx-backup file`);
-      const oversized = selected.find((file) => file.size > MAX_PROFILE_BACKUP_BYTES);
-      if (oversized) throw new Error(`${oversized.name} exceeds the 64 MB backup limit`);
-      resolve(await Promise.all(selected.map(async (file) => ({ name: file.name, text: await file.text() }))));
-    } catch (e) {
-      reject(e);
-    } finally {
-      input.remove();
-    }
-  }, { once: true });
-  input.addEventListener("cancel", () => {
-    input.remove();
-    resolve(null);
-  }, { once: true });
-  document.body.appendChild(input);
-  input.click();
-});
+/// Complete backups are binary ZIP containers and may be many gigabytes, so
+/// pass native file paths directly to Rust instead of reading them into the
+/// webview as text/base64.
+const pickProfileBackupFiles = async (): Promise<string[] | null> => {
+  const selected = await openDialog({
+    multiple: true,
+    directory: false,
+    filters: [{ name: "ShardX complete profile backup", extensions: ["shardx-backup"] }],
+  });
+  if (!selected) return null;
+  return Array.isArray(selected) ? selected : [selected];
+};
 
 // Single UTM tag appended to every outbound proxyshard.com link.
 const UTM_QS = "utm_source=shardx&utm_medium=referral&utm_campaign=shardx-launcher";
@@ -1686,7 +1659,7 @@ function BrowsersView() {
     try {
       const summary = await invoke<ProfileBackupSummary>("profile_backup_export", { profileIds: ids });
       toast.ok(
-        `Exported ${summary.profileCount} profile${summary.profileCount === 1 ? "" : "s"} + ${summary.cookieCount} cookie${summary.cookieCount === 1 ? "" : "s"}. Keep backup files private.`,
+        `Exported ${summary.profileCount} complete profile backup${summary.profileCount === 1 ? "" : "s"} (${summary.fileCount} browser-data files). Keep backup files private.`,
       );
       // Backups are written only inside the launcher's fixed portable exports
       // directory; no arbitrary destination path crosses the trust boundary.
@@ -1708,7 +1681,7 @@ function BrowsersView() {
     {
       label: "Export profile",
       onClick: () => exportProfiles([p.id]),
-      title: "Export fingerprint and sensitive cookies as one .shardx-backup file",
+      title: "Export the complete browser profile, user-data, fingerprint, and bound proxy",
     },
     { sep: true, label: "", onClick: () => {} },
     { label: "Delete", onClick: () => remove(p.id), danger: true },
@@ -1879,12 +1852,12 @@ function BrowsersView() {
 
   const bulkImport = async () => {
     try {
-      const files = await pickProfileBackupFiles();
-      if (!files) return;
-      const summary = await invoke<ProfileBackupSummary>("profile_backup_import", { files });
+      const paths = await pickProfileBackupFiles();
+      if (!paths) return;
+      const summary = await invoke<ProfileBackupSummary>("profile_backup_import", { paths });
       await reload();
       toast.ok(
-        `Imported ${summary.profileCount} profile${summary.profileCount === 1 ? "" : "s"} + ${summary.cookieCount} cookie${summary.cookieCount === 1 ? "" : "s"}`,
+        `Imported ${summary.profileCount} complete profile${summary.profileCount === 1 ? "" : "s"}, including bound proxy settings (${summary.fileCount} browser-data files)`,
       );
     } catch (e) {
       toast.err("Import failed: " + String(e));

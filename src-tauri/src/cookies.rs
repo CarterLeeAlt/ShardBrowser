@@ -100,6 +100,24 @@ fn strip_host_prefix(mut pt: Vec<u8>) -> Vec<u8> {
 fn os_crypt_key(udd: &Path) -> Result<Vec<u8>> {
     win::os_crypt_key(udd)
 }
+
+/// Export the profile's raw 32-byte OSCrypt key. Complete profile backups
+/// carry this key so the unchanged Chromium databases can be restored under a
+/// different Windows user and re-wrapped with that user's DPAPI credentials.
+pub fn export_os_crypt_key(udd: &Path) -> Result<Vec<u8>> {
+    os_crypt_key(udd)
+}
+
+/// Install an existing OSCrypt key into a restored Local State file, wrapping
+/// it with the current Windows user's DPAPI credentials without changing the
+/// underlying key used by Cookies, Login Data, and other Chromium stores.
+pub fn install_os_crypt_key(udd: &Path, key: &[u8]) -> Result<()> {
+    if key.len() != 32 {
+        anyhow::bail!("restored OSCrypt key must be exactly 32 bytes");
+    }
+    win::write_key(&udd.join("Local State"), key)
+}
+
 fn cipher_decrypt(key: &[u8], body: &[u8]) -> Option<Vec<u8>> {
     win::gcm_decrypt(key, body)
 }
@@ -226,7 +244,7 @@ mod win {
         Ok(Some(unsafe { dpapi(&blob[DPAPI_TAG.len()..], false)? }))
     }
 
-    fn write_key(ls_path: &Path, key: &[u8]) -> Result<()> {
+    pub fn write_key(ls_path: &Path, key: &[u8]) -> Result<()> {
         let wrapped = unsafe { dpapi(key, true)? };
         let mut tagged = DPAPI_TAG.to_vec();
         tagged.extend_from_slice(&wrapped);
