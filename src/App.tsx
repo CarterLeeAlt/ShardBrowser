@@ -777,6 +777,30 @@ function toStored(f: ProfileForm, lib: FingerprintEntry | null, existing: any | 
 
 type Theme = "dark" | "light";
 
+const TITLEBAR_HOVER_RESET_CLASS = "titlebar-hover-reset";
+
+/**
+ * Hiding a Tauri window preserves the WebView DOM. If the close button was
+ * hovered when the window was hidden, Chromium can keep that stale :hover
+ * state until it receives another pointer event. Blur the button immediately
+ * and suppress that stale paint until the pointer really moves over the
+ * restored window.
+ */
+function prepareTitlebarWindowHide(button: HTMLButtonElement) {
+  button.blur();
+
+  const root = document.documentElement;
+  root.classList.add(TITLEBAR_HOVER_RESET_CLASS);
+  const controller = new AbortController();
+  const clearStaleHover = () => {
+    root.classList.remove(TITLEBAR_HOVER_RESET_CLASS);
+    controller.abort();
+  };
+  const options = { capture: true, once: true, signal: controller.signal };
+  window.addEventListener("pointermove", clearStaleHover, options);
+  window.addEventListener("pointerdown", clearStaleHover, options);
+}
+
 export default function App() {
   const [section, setSection] = useState<Section>("browsers");
   const [theme, setTheme] = useState<Theme>(
@@ -838,7 +862,10 @@ export default function App() {
             <button
               className="tb-btn tb-close"
               aria-label="Close"
-              onClick={() => getCurrentWindow().close()}
+              onClick={(event) => {
+                prepareTitlebarWindowHide(event.currentTarget);
+                void getCurrentWindow().close();
+              }}
             >
               <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
                 <line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" strokeWidth="1" />
