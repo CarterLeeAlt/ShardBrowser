@@ -381,6 +381,16 @@ pub fn list() -> Result<Vec<ProxyEntry>> {
     Ok(load()?.proxies)
 }
 
+fn restore_store_snapshot_unlocked(snapshot: Option<&[u8]>) -> Result<()> {
+    let path = store::proxies_path()?;
+    match snapshot {
+        Some(bytes) => fs::write(&path, bytes)?,
+        None if path.exists() => fs::remove_file(path)?,
+        None => {}
+    }
+    Ok(())
+}
+
 pub fn upsert_with_status(
     mut entry: ProxyEntry,
 ) -> Result<(ProxyEntry, bool, bool, Option<PreparedProxyTest>)> {
@@ -432,23 +442,100 @@ pub fn upsert_with_status(
     Ok((entry, created, changed, test))
 }
 
-/// Upsert that reuses an entry with the same kind/host/port/username.
-pub fn upsert_dedup(mut entry: ProxyEntry) -> Result<ProxyEntry> {
+fn insert_or_reuse_dedup(
+    store_data: &mut ProxyStore,
+    mut entry: ProxyEntry,
+) -> Result<(ProxyEntry, bool)> {
     entry = normalize_entry(entry)?;
+    let key = duplicate_key(&entry);
+    if let Some(existing) = store_data
+        .proxies
+        .iter()
+        .find(|proxy| duplicate_key(proxy) == key)
+    {
+        if existing.password != entry.password {
+            anyhow::bail!(
+                "proxy already exists with the same type, host, port, and username but a different password"
+            );
+        }
+        return Ok((existing.clone(), false));
+    }
+    if entry.id.is_empty()
+        || store_data
+            .proxies
+            .iter()
+            .any(|proxy| proxy.id == entry.id)
+    {
+        entry.id = uuid::Uuid::new_v4().to_string();
+    }
+    store_data.proxies.push(entry.clone());
+    Ok((entry, true))
+}
+
+/// Upsert that reuses an entry with the same endpoint and credentials.
+pub fn upsert_dedup(entry: ProxyEntry) -> Result<ProxyEntry> {
     let _guard = PROXY_STORE_LOCK
         .write()
         .map_err(|_| anyhow::anyhow!("proxy store lock poisoned"))?;
-    let mut s = load_unlocked()?;
-    let key = duplicate_key(&entry);
-    if let Some(existing) = s.proxies.iter().find(|proxy| duplicate_key(proxy) == key) {
-        return Ok(existing.clone());
+    let mut store_data = load_unlocked()?;
+    let (stored, created) = insert_or_reuse_dedup(&mut store_data, entry)?;
+    if created {
+        save(&store_data)?;
     }
-    if entry.id.is_empty() || s.proxies.iter().any(|proxy| proxy.id == entry.id) {
-        entry.id = uuid::Uuid::new_v4().to_string();
+    Ok(stored)
+}
+
+/// Resolve and persist all proxy bindings for a complete-profile restore as
+/// one transaction. Holding the proxy write lock through `commit` prevents a
+/// failed restore from rolling back an unrelated concurrent proxy mutation.
+pub fn with_restored_proxy_bindings<T>(
+    entries: Vec<Option<ProxyEntry>>,
+    commit: impl FnOnce(Vec<Option<String>>) -> Result<T>,
+) -> Result<T> {
+    let _guard = PROXY_STORE_LOCK
+        .write()
+        .map_err(|_| anyhow::anyhow!("proxy store lock poisoned"))?;
+    let path = store::proxies_path()?;
+    let snapshot = if path.exists() {
+        Some(fs::read(&path)?)
+    } else {
+        None
+    };
+    let mut store_data = load_unlocked()?;
+    let mut changed = false;
+    let mut binding_ids = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match entry {
+            Some(entry) => {
+                let (stored, created) = insert_or_reuse_dedup(&mut store_data, entry)?;
+                changed |= created;
+                binding_ids.push(Some(stored.id));
+            }
+            None => binding_ids.push(None),
+        }
     }
-    s.proxies.push(entry.clone());
-    save(&s)?;
-    Ok(entry)
+
+    if changed {
+        if let Err(error) = save(&store_data) {
+            return match restore_store_snapshot_unlocked(snapshot.as_deref()) {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(anyhow::anyhow!(
+                    "{error}; proxy rollback was incomplete: {rollback}"
+                )),
+            };
+        }
+    }
+
+    match commit(binding_ids) {
+        Ok(value) => Ok(value),
+        Err(error) if changed => match restore_store_snapshot_unlocked(snapshot.as_deref()) {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(anyhow::anyhow!(
+                "{error}; proxy rollback was incomplete: {rollback}"
+            )),
+        },
+        Err(error) => Err(error),
+    }
 }
 
 pub fn delete(id: &str) -> Result<()> {
@@ -829,6 +916,38 @@ mod bulk_import_tests {
         let socks = entry(ProxyKind::Socks5, "Proxy.Example.", 1080, "user");
         let http = entry(ProxyKind::Http, "proxy.example", 1080, "user");
         assert_ne!(duplicate_key(&socks), duplicate_key(&http));
+    }
+
+    #[test]
+    fn restored_proxy_dedup_reuses_matching_credentials() {
+        let mut store_data = ProxyStore::default();
+        let mut first = entry(ProxyKind::Socks5, "Proxy.Example.", 1080, "user");
+        first.id = "source-proxy".to_string();
+        first.password = "secret".to_string();
+        let (stored, created) = insert_or_reuse_dedup(&mut store_data, first).unwrap();
+        assert!(created);
+
+        let mut duplicate = entry(ProxyKind::Socks5, "proxy.example", 1080, "user");
+        duplicate.id = "other-source-proxy".to_string();
+        duplicate.password = "secret".to_string();
+        let (reused, created) = insert_or_reuse_dedup(&mut store_data, duplicate).unwrap();
+
+        assert!(!created);
+        assert_eq!(reused.id, stored.id);
+        assert_eq!(store_data.proxies.len(), 1);
+    }
+
+    #[test]
+    fn restored_proxy_dedup_rejects_password_conflicts() {
+        let mut store_data = ProxyStore::default();
+        let mut first = entry(ProxyKind::Http, "proxy.example", 8080, "user");
+        first.password = "first".to_string();
+        insert_or_reuse_dedup(&mut store_data, first).unwrap();
+
+        let mut conflict = entry(ProxyKind::Http, "PROXY.EXAMPLE.", 8080, "user");
+        conflict.password = "second".to_string();
+        assert!(insert_or_reuse_dedup(&mut store_data, conflict).is_err());
+        assert_eq!(store_data.proxies.len(), 1);
     }
 
     #[test]
