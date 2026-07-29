@@ -107,6 +107,23 @@ fn profile_get(id: String) -> Result<Value, String> {
     serde_json::to_value(stored).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn profile_rename(id: String, name: String) -> Result<(), String> {
+    let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
+    profile::ensure_stopped(&id).map_err(|e| e.to_string())?;
+
+    let name = name.trim();
+    profile::validate_profile_name(name).map_err(|e| e.to_string())?;
+
+    let mut stored = profile::load_raw(&id).map_err(|e| e.to_string())?;
+    stored
+        .config
+        .insert("name".into(), Value::String(name.to_string()));
+    profile::save_raw(&mut stored).map_err(|e| e.to_string())?;
+    notify_store_changed("profiles");
+    Ok(())
+}
+
 /// Recover library fingerprint id by matching webgl.renderer (+ screen if ambiguous).
 fn infer_gpu_preset_id(config: &serde_json::Map<String, Value>) -> Option<String> {
     let renderer = config.get("webgl")?.get("renderer")?.as_str()?;
@@ -1359,6 +1376,7 @@ pub fn run() {
             profile_list,
             profile_move_order,
             profile_get,
+            profile_rename,
             profile_save,
             profile_delete,
             profile_bind_proxy,

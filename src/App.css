@@ -578,6 +578,11 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   align-items: center;
   flex: none;
 }
+.profile-page-action {
+  width: 128px;
+  justify-content: center;
+  white-space: nowrap;
+}
 
 /* ===== buttons ===== */
 
@@ -1047,6 +1052,13 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .browser-data-row .cell-name .name-sub {
   margin-top: 0;
   line-height: 14px;
+}
+.browser-data-row .profile-inline-rename {
+  align-self: center;
+  height: 22px;
+  padding: 2px 7px;
+  font-size: 12px;
+  font-weight: var(--font-weight-regular);
 }
 .browser-data-row .proxy-detail,
 .browser-data-row .proxy-detail-text {
