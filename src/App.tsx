@@ -3420,7 +3420,7 @@ function ProxiesView() {
       onDragEnd={handleProxyDragEnd}
     >
     <section className="page workspace-page">
-      <Topbar crumbs={["PROXYLIST", "Proxies"]} search={search} onSearch={setSearch} />
+      <Topbar crumbs={["Proxylist", "Proxies"]} search={search} onSearch={setSearch} />
       <div className="page-title">
         <h1>Proxies</h1>
         <div className="page-actions">
