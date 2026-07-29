@@ -950,10 +950,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 }
 .pill-status.ps-on .dot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
 
-.proxy-cell {
-  display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 4px;
-  min-width: 0;
-}
 .proxy-main {
   display: flex; align-items: center; gap: 8px;
   min-width: 0;
@@ -1038,25 +1034,28 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   font-weight: var(--font-weight-regular);
 }
 
-/* Name and proxy are visually one two-line information group. Give both the
-   same explicit tracks so their primary content shares one center line and
-   their compact secondary labels share another. Other columns remain
-   vertically centered across the full row. */
+/* Name and proxy are visually one two-line information group. The proxy
+   column is itself the grid item: keeping its two lines directly inside the
+   t-cols track makes the header and row content share the exact same x-axis. */
 .browser-data-row .cell-name,
-.browser-data-row .proxy-cell {
+.browser-data-row .cell-proxy {
   display: grid;
   grid-template-rows: 22px 14px;
   align-items: center;
   row-gap: 2px;
   height: 38px;
 }
-.browser-data-row .cell-proxy,
-.browser-data-row .proxy-cell {
+.rows-head.t-cols > .head-proxy,
+.browser-data-row.t-cols > .cell-proxy {
   width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  justify-self: stretch;
   text-align: left;
 }
-.browser-data-row .proxy-cell {
-  justify-items: start;
+.browser-data-row.t-cols > .cell-proxy {
+  justify-items: stretch;
 }
 .browser-data-row .cell-name .name-main,
 .browser-data-row .proxy-main {
