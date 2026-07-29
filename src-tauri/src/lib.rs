@@ -650,33 +650,6 @@ fn profile_clone(id: String) -> Result<profile::ProfileMeta, String> {
     Ok(cloned)
 }
 
-/// Import profiles verbatim under fresh ids; returns the count.
-#[tauri::command]
-fn profile_import(payloads: Vec<Value>) -> Result<usize, String> {
-    // Validate the entire import before writing anything, avoiding a partial
-    // import when a later profile contains an invalid name.
-    for payload in &payloads {
-        let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        profile::validate_profile_name(name).map_err(|e| e.to_string())?;
-    }
-    let mut n = 0;
-    for mut payload in payloads {
-        if let Some(obj) = payload.as_object_mut() {
-            match obj.get_mut("_meta").and_then(|m| m.as_object_mut()) {
-                Some(meta) => {
-                    meta.insert("id".into(), Value::String(String::new()));
-                }
-                None => {
-                    obj.insert("_meta".into(), serde_json::json!({ "id": "" }));
-                }
-            }
-        }
-        save_profile_core(None, payload, false)?;
-        n += 1;
-    }
-    Ok(n)
-}
-
 // ---- Clipboard (via tauri-plugin-clipboard-manager; webview navigator.clipboard throws) ----
 
 #[tauri::command]
@@ -1184,68 +1157,354 @@ fn validate_export_profile_id(profile_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Export cookies to a generated file under the portable exports directory.
-#[tauri::command]
-fn cookies_export_portable(profile_id: String) -> Result<usize, String> {
-    validate_export_profile_id(&profile_id)?;
-    let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
-    profile::ensure_stopped(&profile_id).map_err(|e| e.to_string())?;
-    let cookies = cookies::export(&profile_id).map_err(|e| e.to_string())?;
-    let json = serde_json::to_string_pretty(&cookies).map_err(|e| e.to_string())?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_millis();
-    let path = store::exports_dir()
-        .map_err(|e| e.to_string())?
-        .join(format!("{profile_id}-cookies-{stamp}.json"));
-    std::fs::write(&path, json).map_err(|e| e.to_string())?;
-    Ok(cookies.len())
+const PROFILE_BACKUP_FORMAT: &str = "shardx-profile-backup";
+const PROFILE_BACKUP_VERSION: u32 = 1;
+const MAX_PROFILE_BACKUP_BATCH: usize = 100;
+const MAX_PROFILE_BACKUP_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ProfileBackup {
+    format: String,
+    version: u32,
+    launcher_version: String,
+    backup_id: String,
+    name: String,
+    exported_at: String,
+    source_profile_id: String,
+    fingerprint: serde_json::Map<String, Value>,
+    cookie_count: usize,
+    cookies: Vec<cookies::Cookie>,
 }
 
-/// Export the profile's decrypted cookies and its current FingerprintConfig as
-/// two generated JSON files under the portable exports directory.
-#[tauri::command]
-fn profile_export_all(profile_id: String) -> Result<usize, String> {
-    validate_export_profile_id(&profile_id)?;
-    let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
-    profile::ensure_stopped(&profile_id).map_err(|e| e.to_string())?;
+#[derive(serde::Deserialize)]
+struct ProfileBackupImportFile {
+    name: String,
+    text: String,
+}
 
-    let cookies = cookies::export(&profile_id).map_err(|e| e.to_string())?;
-    let stored = profile::load_raw(&profile_id).map_err(|e| e.to_string())?;
-    let cookies_json = serde_json::to_string_pretty(&cookies).map_err(|e| e.to_string())?;
-    // Export only the verbatim FingerprintConfig. Launcher-owned _meta fields
-    // such as id, proxy binding, folder, and runtime must not leak into a
-    // fingerprint-library import.
-    let fingerprint_json =
-        serde_json::to_string_pretty(&stored.config).map_err(|e| e.to_string())?;
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileBackupSummary {
+    profile_count: usize,
+    cookie_count: usize,
+}
+
+struct PendingProfileBackup {
+    final_path: std::path::PathBuf,
+    temporary_path: std::path::PathBuf,
+    contents: String,
+}
+
+#[derive(Clone)]
+struct BackupImportArtifacts {
+    profile_id: String,
+    created_fingerprint_id: Option<String>,
+}
+
+fn portable_backup_name(raw_name: &str) -> String {
+    if profile::validate_profile_name(raw_name).is_ok() {
+        raw_name.to_string()
+    } else {
+        profile::generated_profile_name(raw_name, "profile")
+    }
+}
+
+fn backup_filename_name(name: &str) -> String {
+    let component: String = name
+        .chars()
+        .take(64)
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    if component.is_empty() {
+        "profile".to_string()
+    } else {
+        component
+    }
+}
+
+fn remove_backup_import_artifacts(artifacts: &BackupImportArtifacts) -> Result<(), String> {
+    validate_export_profile_id(&artifacts.profile_id)?;
+    let mut cleanup_errors = Vec::new();
+    let profile_path = store::profiles_dir()
+        .map_err(|e| e.to_string())?
+        .join(format!("{}.json", artifacts.profile_id));
+    if profile_path.exists() {
+        if let Err(error) = std::fs::remove_file(&profile_path) {
+            cleanup_errors.push(error.to_string());
+        }
+    }
+    let user_data = store::user_data_root()
+        .map_err(|e| e.to_string())?
+        .join(&artifacts.profile_id);
+    if user_data.exists() {
+        if let Err(error) = std::fs::remove_dir_all(&user_data) {
+            cleanup_errors.push(error.to_string());
+        }
+    }
+    if let Some(fingerprint_id) = &artifacts.created_fingerprint_id {
+        if let Err(error) = fingerprints::delete(fingerprint_id) {
+            cleanup_errors.push(error.to_string());
+        }
+    }
+    if !cleanup_errors.is_empty() {
+        return Err(cleanup_errors.join(", "));
+    }
+    Ok(())
+}
+
+fn backup_import_failure(error: String, artifacts: &[BackupImportArtifacts]) -> String {
+    let rollback_errors: Vec<String> = artifacts
+        .iter()
+        .filter_map(|artifacts| {
+            remove_backup_import_artifacts(artifacts)
+                .err()
+                .map(|rollback| format!("{}: {rollback}", artifacts.profile_id))
+        })
+        .collect();
+    if rollback_errors.is_empty() {
+        error
+    } else {
+        format!(
+            "{error}; backup import rollback was incomplete: {}",
+            rollback_errors.join(", ")
+        )
+    }
+}
+
+fn validate_profile_backup_file(file: ProfileBackupImportFile) -> Result<ProfileBackup, String> {
+    if !file.name.to_ascii_lowercase().ends_with(".shardx-backup") {
+        return Err(format!("{} is not a .shardx-backup file", file.name));
+    }
+    if file.text.len() > MAX_PROFILE_BACKUP_BYTES {
+        return Err(format!("{} exceeds the 64 MB backup limit", file.name));
+    }
+
+    let backup: ProfileBackup = serde_json::from_str(&file.text)
+        .map_err(|e| format!("{} is not a valid ShardX backup: {e}", file.name))?;
+    if backup.format != PROFILE_BACKUP_FORMAT {
+        return Err(format!("{} has an unsupported backup format", file.name));
+    }
+    if backup.version != PROFILE_BACKUP_VERSION {
+        return Err(format!(
+            "{} uses unsupported backup version {}",
+            file.name, backup.version
+        ));
+    }
+    if backup.launcher_version.trim().is_empty() {
+        return Err(format!("{} is missing its launcher version", file.name));
+    }
+    uuid::Uuid::parse_str(&backup.backup_id)
+        .map_err(|_| format!("{} has an invalid backup id", file.name))?;
+    validate_export_profile_id(&backup.source_profile_id)
+        .map_err(|_| format!("{} has an invalid source profile id", file.name))?;
+    profile::validate_profile_name(&backup.name)
+        .map_err(|e| format!("{}: {e}", file.name))?;
+    if backup.exported_at.trim().is_empty() {
+        return Err(format!("{} is missing its export timestamp", file.name));
+    }
+    if backup.fingerprint.contains_key("_meta") {
+        return Err(format!("{} contains non-portable profile metadata", file.name));
+    }
+    let fingerprint_name = backup
+        .fingerprint
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if fingerprint_name != backup.name {
+        return Err(format!("{} has mismatched profile names", file.name));
+    }
+    if backup.cookie_count != backup.cookies.len() {
+        return Err(format!("{} has a mismatched cookie count", file.name));
+    }
+    Ok(backup)
+}
+
+/// Export each selected profile as one versioned JSON container. The custom
+/// extension keeps it separate from raw fingerprint and cookie JSON files.
+#[tauri::command]
+fn profile_backup_export(profile_ids: Vec<String>) -> Result<ProfileBackupSummary, String> {
+    if profile_ids.is_empty() {
+        return Err("select at least one profile to export".into());
+    }
+    if profile_ids.len() > MAX_PROFILE_BACKUP_BATCH {
+        return Err("at most 100 profiles can be exported at once".into());
+    }
+    let mut unique_ids = std::collections::HashSet::new();
+    for id in &profile_ids {
+        validate_export_profile_id(id)?;
+        if !unique_ids.insert(id.clone()) {
+            return Err("duplicate profile id in export request".into());
+        }
+    }
+
+    let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
+    for id in &profile_ids {
+        profile::ensure_stopped(id).map_err(|e| e.to_string())?;
+    }
+
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_millis();
     let directory = store::exports_dir().map_err(|e| e.to_string())?;
-    let cookies_path = directory.join(format!("{profile_id}-cookies-{stamp}.json"));
-    let fingerprint_path = directory.join(format!("{profile_id}-fingerprint-{stamp}.json"));
-    let cookies_temp = cookies_path.with_extension("json.tmp");
-    let fingerprint_temp = fingerprint_path.with_extension("json.tmp");
+    let mut cookie_count = 0usize;
+    let mut pending = Vec::with_capacity(profile_ids.len());
 
-    std::fs::write(&cookies_temp, cookies_json).map_err(|e| e.to_string())?;
-    if let Err(error) = std::fs::write(&fingerprint_temp, fingerprint_json) {
-        let _ = std::fs::remove_file(&cookies_temp);
-        return Err(error.to_string());
+    for profile_id in &profile_ids {
+        let cookies = cookies::export(profile_id).map_err(|e| e.to_string())?;
+        let mut stored = profile::load_raw(profile_id).map_err(|e| e.to_string())?;
+        let raw_name = stored
+            .config
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let name = portable_backup_name(raw_name);
+        stored
+            .config
+            .insert("name".into(), Value::String(name.clone()));
+
+        let backup_id = uuid::Uuid::new_v4().to_string();
+        let backup = ProfileBackup {
+            format: PROFILE_BACKUP_FORMAT.to_string(),
+            version: PROFILE_BACKUP_VERSION,
+            launcher_version: env!("CARGO_PKG_VERSION").to_string(),
+            backup_id: backup_id.clone(),
+            name: name.clone(),
+            exported_at: format!("@{}", stamp / 1000),
+            source_profile_id: profile_id.clone(),
+            fingerprint: stored.config,
+            cookie_count: cookies.len(),
+            cookies,
+        };
+        let contents = serde_json::to_string_pretty(&backup).map_err(|e| e.to_string())?;
+        if contents.len() > MAX_PROFILE_BACKUP_BYTES {
+            return Err(format!("profile {name} exceeds the 64 MB backup limit"));
+        }
+
+        let short_backup_id = &backup_id[..8];
+        let file_name = format!(
+            "{}__{}__{}.shardx-backup",
+            backup_filename_name(&name),
+            short_backup_id,
+            stamp
+        );
+        let final_path = directory.join(file_name);
+        let temporary_path = final_path.with_extension("shardx-backup.tmp");
+        cookie_count = cookie_count.saturating_add(backup.cookie_count);
+        pending.push(PendingProfileBackup {
+            final_path,
+            temporary_path,
+            contents,
+        });
     }
-    if let Err(error) = std::fs::rename(&cookies_temp, &cookies_path) {
-        let _ = std::fs::remove_file(&cookies_temp);
-        let _ = std::fs::remove_file(&fingerprint_temp);
-        return Err(error.to_string());
+
+    for item in &pending {
+        if let Err(error) = std::fs::write(&item.temporary_path, &item.contents) {
+            for cleanup in &pending {
+                let _ = std::fs::remove_file(&cleanup.temporary_path);
+            }
+            return Err(error.to_string());
+        }
     }
-    if let Err(error) = std::fs::rename(&fingerprint_temp, &fingerprint_path) {
-        // Do not report a successful pair when only one file became visible.
-        let _ = std::fs::remove_file(&cookies_path);
-        let _ = std::fs::remove_file(&fingerprint_temp);
-        return Err(error.to_string());
+
+    let mut published = Vec::new();
+    for item in &pending {
+        if let Err(error) = std::fs::rename(&item.temporary_path, &item.final_path) {
+            for cleanup in &pending {
+                let _ = std::fs::remove_file(&cleanup.temporary_path);
+            }
+            for cleanup in &published {
+                let _ = std::fs::remove_file(cleanup);
+            }
+            return Err(error.to_string());
+        }
+        published.push(item.final_path.clone());
     }
-    Ok(cookies.len())
+
+    Ok(ProfileBackupSummary {
+        profile_count: profile_ids.len(),
+        cookie_count,
+    })
+}
+
+/// Restore one or more complete profile backups under fresh ids. All files are
+/// validated before the first write; a later failure rolls the whole batch back.
+#[tauri::command]
+fn profile_backup_import(
+    files: Vec<ProfileBackupImportFile>,
+) -> Result<ProfileBackupSummary, String> {
+    if files.is_empty() {
+        return Err("select at least one .shardx-backup file".into());
+    }
+    if files.len() > MAX_PROFILE_BACKUP_BATCH {
+        return Err("at most 100 profiles can be imported at once".into());
+    }
+    let backups: Vec<ProfileBackup> = files
+        .into_iter()
+        .map(validate_profile_backup_file)
+        .collect::<Result<_, _>>()?;
+    let mut backup_ids = std::collections::HashSet::new();
+    for backup in &backups {
+        if !backup_ids.insert(backup.backup_id.clone()) {
+            return Err(format!(
+                "backup {} was selected more than once",
+                backup.backup_id
+            ));
+        }
+    }
+
+    let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
+    let mut imported: Vec<BackupImportArtifacts> = Vec::with_capacity(backups.len());
+    let mut cookie_count = 0usize;
+
+    for backup in backups {
+        let created_fingerprint_id;
+        let fingerprint_id = if let Some(existing_id) = infer_gpu_preset_id(&backup.fingerprint) {
+            created_fingerprint_id = None;
+            existing_id
+        } else {
+            let fingerprint_json = serde_json::to_string(&backup.fingerprint)
+                .map_err(|e| backup_import_failure(e.to_string(), &imported))?;
+            let id_hint = format!("restored-{}", &backup.backup_id[..8]);
+            let entry = fingerprints::import(&fingerprint_json, Some(id_hint))
+                .map_err(|e| backup_import_failure(e.to_string(), &imported))?;
+            created_fingerprint_id = Some(entry.id.clone());
+            entry.id
+        };
+        let profile_id = uuid::Uuid::new_v4().to_string();
+        let current_artifacts = BackupImportArtifacts {
+            profile_id: profile_id.clone(),
+            created_fingerprint_id,
+        };
+        let current_cookie_count = backup.cookies.len();
+        if let Err(error) = cookies::import(&profile_id, &backup.cookies) {
+            let mut cleanup = imported.clone();
+            cleanup.push(current_artifacts);
+            return Err(backup_import_failure(error.to_string(), &cleanup));
+        }
+
+        let mut stored = profile::StoredProfile {
+            meta: profile::StoredMeta {
+                id: profile_id.clone(),
+                gpu_preset_id: Some(fingerprint_id),
+                ..Default::default()
+            },
+            config: backup.fingerprint,
+        };
+        if let Err(error) = profile::save_raw(&mut stored) {
+            let mut cleanup = imported.clone();
+            cleanup.push(current_artifacts);
+            return Err(backup_import_failure(error.to_string(), &cleanup));
+        }
+        imported.push(current_artifacts);
+        cookie_count = cookie_count.saturating_add(current_cookie_count);
+    }
+
+    notify_store_changed("profiles");
+    Ok(ProfileBackupSummary {
+        profile_count: imported.len(),
+        cookie_count,
+    })
 }
 
 #[tauri::command]
@@ -1381,7 +1640,6 @@ pub fn run() {
             profile_delete,
             profile_bind_proxy,
             profile_clone,
-            profile_import,
             clipboard_write,
             clipboard_read,
             profile_set_folder,
@@ -1420,8 +1678,8 @@ pub fn run() {
             api_info,
             api_regenerate_token,
             cookies_export,
-            cookies_export_portable,
-            profile_export_all,
+            profile_backup_export,
+            profile_backup_import,
             cookies_import,
             mcp_download,
             runtime::runtime_check_updates,
