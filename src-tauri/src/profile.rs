@@ -420,11 +420,12 @@ pub fn clone_profile(id: &str) -> Result<ProfileMeta> {
         .and_then(|v| v.as_str())
         .unwrap_or("profile")
         .to_string();
-    let clone_name = format!("{}-copy", generated_profile_name(&old_name, "profile"));
+    let clone_name = format!("{}-C", generated_profile_name(&old_name, "profile"));
     src.meta.id = new_id.clone();
     src.meta.last_launched_at = None;
     src.meta.created_at = None;
     src.meta.pinned = false;
+    src.meta.total_runtime_ms = 0;
     src.config
         .insert("name".into(), serde_json::Value::String(clone_name.clone()));
     // Re-randomize CPU/RAM/platform_version so the copy doesn't collide on those axes.

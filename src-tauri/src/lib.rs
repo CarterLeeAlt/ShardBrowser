@@ -607,7 +607,30 @@ fn profile_bind_proxy(profile_id: String, proxy_id: Option<String>) -> Result<()
 
 #[tauri::command]
 fn profile_clone(id: String) -> Result<profile::ProfileMeta, String> {
-    profile::clone_profile(&id).map_err(|e| e.to_string())
+    let cloned = profile::clone_profile(&id).map_err(|e| e.to_string())?;
+    let order_result = (|| {
+        let profiles = profile::list_all().map_err(|e| e.to_string())?;
+        let default_ids: Vec<String> = profiles.into_iter().map(|profile| profile.id).collect();
+        display_order::move_profile(
+            &default_ids,
+            &cloned.id,
+            None,
+            display_order::Placement::After,
+        )
+        .map_err(|e| e.to_string())
+    })();
+
+    if let Err(order_error) = order_result {
+        return match profile::delete(&cloned.id) {
+            Ok(()) => Err(order_error),
+            Err(rollback_error) => Err(format!(
+                "{order_error}; also failed to remove incomplete clone: {rollback_error}"
+            )),
+        };
+    }
+
+    notify_store_changed("profiles");
+    Ok(cloned)
 }
 
 /// Import profiles verbatim under fresh ids; returns the count.
