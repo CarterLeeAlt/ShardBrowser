@@ -584,6 +584,28 @@ pub fn save_profile_core(
         profile::ensure_stopped(&stored.meta.id).map_err(|e| e.to_string())?;
     }
     profile::save_raw(&mut stored).map_err(|e| e.to_string())?;
+    if is_new && !stored.meta.temporary {
+        let order_result = (|| -> Result<(), String> {
+            let current_profile_ids = profile::list_all()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|profile| profile.id)
+                .collect::<Vec<_>>();
+            display_order::append_profiles(
+                &current_profile_ids,
+                std::slice::from_ref(&stored.meta.id),
+            )
+            .map_err(|e| e.to_string())
+        })();
+        if let Err(error) = order_result {
+            // The profile itself is already durable. Preserve it; later list
+            // reconciliation still places ids missing from saved order last.
+            eprintln!(
+                "[launcher] new profile {} display-order persistence failed: {error}",
+                stored.meta.id
+            );
+        }
+    }
     let name = stored
         .config
         .get("name")
