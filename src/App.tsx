@@ -4732,7 +4732,7 @@ function VersionPill() {
 function SettingsView() {
   const [s, setS] = useState<Settings>({
     theme: "dark",
-    geo_checker: "ip-api.com",
+    geo_checker: "ipwho.is",
     screen_resolution_mode: "fingerprint",
     api_enabled: true,
     api_port: 40325,
@@ -4767,13 +4767,16 @@ function SettingsView() {
       <div className="settings-card-list">
         <div className="card settings-card">
           <h3>Proxy geo checker</h3>
-          <p className="muted small">Which free public IP-geo service to hit when you press the proxy <strong>Test</strong> button. All three are no-key, rate-limited.</p>
+          <p className="muted small">Preferred free public IP-geo service for manual and scheduled proxy tests. If it times out, returns HTTP 429, or sends invalid JSON, ShardX automatically tries the next provider.</p>
           <label>
-            <span className="lbl">Provider</span>
-            <select value={s.geo_checker ?? "ip-api.com"} onChange={(e) => setS({ ...s, geo_checker: e.target.value })}>
-              <option value="ip-api.com">ip-api.com (45 req/min, HTTP)</option>
-              <option value="ipapi.co">ipapi.co (1k/day, HTTPS)</option>
-              <option value="ipwho.is">ipwho.is (10k/month, HTTPS)</option>
+            <span className="lbl">Preferred provider</span>
+            <select value={s.geo_checker ?? "ipwho.is"} onChange={(e) => setS({ ...s, geo_checker: e.target.value })}>
+              <option value="ipwho.is">ipwho.is (1k/day, HTTPS)</option>
+              <option value="geojs.io">geojs.io (no rate limits, HTTPS)</option>
+              <option value="country.is">country.is (10 req/s, HTTPS)</option>
+              <option value="bigdatacloud.com">BigDataCloud (client-side fair use, HTTPS)</option>
+              <option value="freeipapi.com">freeipapi.com (60 req/min, HTTPS)</option>
+              <option value="ipapi.is">ipapi.is (1k/day, HTTPS)</option>
             </select>
           </label>
         </div>

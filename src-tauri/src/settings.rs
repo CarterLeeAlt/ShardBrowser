@@ -8,7 +8,7 @@ pub struct Settings {
     #[serde(default = "default_theme")]
     pub theme: String,
     /// Geo-IP checker provider used by the proxy "Test" button.
-    /// One of "ip-api.com" | "ipapi.co" | "ipwho.is".
+    /// One of the six no-key providers exposed in Settings.
     #[serde(default)]
     pub geo_checker: Option<String>,
     /// "fingerprint" (use the screen from the bound fingerprint) or
@@ -53,7 +53,7 @@ pub fn load() -> Result<Settings> {
     if !path.exists() {
         return Ok(Settings {
             theme: default_theme(),
-            geo_checker: Some("ip-api.com".into()),
+            geo_checker: Some("ipwho.is".into()),
             screen_resolution_mode: Some("fingerprint".into()),
             minimize_to_tray: default_minimize_to_tray(),
             api_enabled: default_api_enabled(),
@@ -61,7 +61,23 @@ pub fn load() -> Result<Settings> {
             api_secret: String::new(),
         });
     }
-    store::load_json_with_backup(&path)
+    let mut settings: Settings = store::load_json_with_backup(&path)?;
+    if !matches!(
+        settings.geo_checker.as_deref(),
+        Some(
+            "ipwho.is"
+                | "geojs.io"
+                | "country.is"
+                | "bigdatacloud.com"
+                | "freeipapi.com"
+                | "ipapi.is"
+        )
+    ) {
+        // Removed/unknown providers migrate in-memory to the new safe default.
+        // The normalized value is persisted the next time Settings is saved.
+        settings.geo_checker = Some("ipwho.is".into());
+    }
+    Ok(settings)
 }
 
 /// Load settings, generating + persisting the API JWT secret if it's
