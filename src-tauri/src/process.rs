@@ -1,6 +1,6 @@
 // Tracker for launched ShardX child processes; keyed by profile_id.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
@@ -29,7 +29,7 @@ impl Drop for LaunchReservation<'_> {
 
 struct ChildEntry {
     pid: u32,
-    killer: tokio::sync::mpsc::Sender<()>,
+    closer: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<()>>>,
     /// Set once DevToolsActivePort is read; None for UI launches.
     cdp: Option<CdpInfo>,
     /// Process start; serialised as elapsed ms in RunningProfile.
@@ -82,50 +82,72 @@ impl Tracker {
         })
     }
 
-    /// Take a spawned child + monitor it; entry removed on exit/kill.
+    /// Take a spawned child + monitor it; entry removed only after a real exit.
     pub fn track(self: &'static Self, profile_id: String, mut child: Child, temporary: bool) -> u32 {
         let pid = child.id().unwrap_or(0);
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
 
         {
             let mut g = self.inner.lock().unwrap();
             g.insert(
                 profile_id.clone(),
-                ChildEntry { pid, killer: tx, cdp: None, started_at: Instant::now() },
+                ChildEntry { pid, closer: tx, cdp: None, started_at: Instant::now() },
             );
         }
         if let Ok(mut launching) = self.launching.lock() {
             launching.remove(&profile_id);
         }
 
-        // Graceful shutdown (taskkill WM_CLOSE) → 5s → hard kill.
-        // Graceful path flushes session state so next launch skips the restore prompt.
+        // A launcher stop request posts WM_CLOSE and then waits without a
+        // deadline. Chromium alone decides when shutdown is complete, so its
+        // Cookie, OAuth and Local State writes are never cut off by this app.
         let started_at = Instant::now();
         tokio::spawn(async move {
-            tokio::select! {
-                _ = child.wait() => {}
-                _ = rx.recv() => {
-                    use std::os::windows::process::CommandExt;
-                    if let Some(p) = child.id() {
-                        // taskkill /PID without /F posts WM_CLOSE for clean shutdown.
-                        // 0x08000000 = CREATE_NO_WINDOW — suppress the console flash.
-                        let _ = std::process::Command::new("taskkill")
-                            .args(["/PID", &p.to_string()])
-                            .creation_flags(0x08000000)
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .status();
+            let close_completion = tokio::select! {
+                wait_result = child.wait() => {
+                    if let Err(error) = wait_result {
+                        eprintln!("[launcher] wait for browser profile {profile_id} failed: {error}");
                     }
-                    let graceful = tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        child.wait(),
-                    ).await;
-                    if graceful.is_err() {
-                        let _ = child.kill().await;
-                        let _ = child.wait().await;
+                    None
+                }
+                request = rx.recv() => {
+                    rx.close();
+                    match request {
+                        Some(reply) => {
+                            let close_result = child
+                                .id()
+                                .map(request_graceful_browser_close)
+                                .unwrap_or(Ok(()));
+                            if let Err(error) = close_result {
+                                if matches!(child.try_wait(), Ok(Some(_))) {
+                                    // The process exited between select() and
+                                    // taskkill. It already closed cleanly.
+                                    Some((reply, Ok(())))
+                                } else {
+                                    let _ = reply.send(Err(error));
+                                    if let Err(wait_error) = child.wait().await {
+                                        eprintln!("[launcher] wait for browser profile {profile_id} after close failure failed: {wait_error}");
+                                    }
+                                    None
+                                }
+                            } else {
+                                let wait_result = child
+                                    .wait()
+                                    .await
+                                    .map(|_| ())
+                                    .with_context(|| format!("wait for browser profile {profile_id} to close"));
+                                Some((reply, wait_result))
+                            }
+                        }
+                        None => {
+                            if let Err(error) = child.wait().await {
+                                eprintln!("[launcher] wait for browser profile {profile_id} failed: {error}");
+                            }
+                            None
+                        }
                     }
                 }
-            }
+            };
             // Bump the persisted total runtime; non-temporary only (temp
             // profiles get deleted below so their counter is moot). Keep the
             // tracker entry authoritative until this read/modify/write is
@@ -146,6 +168,9 @@ impl Tracker {
                     Ok(()) => eprintln!("[launcher] temporary profile {profile_id} deleted on close"),
                     Err(e) => eprintln!("[launcher] temporary profile {profile_id} cleanup failed: {e}"),
                 }
+            }
+            if let Some((reply, result)) = close_completion {
+                let _ = reply.send(result);
             }
         });
 
@@ -215,13 +240,27 @@ impl Tracker {
         active.into_iter().collect()
     }
 
-    pub async fn kill(&self, profile_id: &str) -> Result<bool> {
-        let killer = {
+    pub async fn close(&self, profile_id: &str) -> Result<bool> {
+        let closer = {
             let g = self.inner.lock().unwrap();
-            g.get(profile_id).map(|e| e.killer.clone())
+            g.get(profile_id).map(|e| e.closer.clone())
         };
-        if let Some(k) = killer {
-            let _ = k.send(()).await;
+        if let Some(closer) = closer {
+            let (reply, completion) = tokio::sync::oneshot::channel();
+            if closer.send(reply).await.is_err() {
+                if self.is_running_profile(profile_id) {
+                    anyhow::bail!("browser profile is already closing");
+                }
+                return Ok(false);
+            }
+            match completion.await {
+                Ok(result) => result?,
+                Err(_) if !self.is_running_profile(profile_id) => {
+                    // The process can exit naturally at the same instant the
+                    // close request is queued. That is already a clean result.
+                }
+                Err(_) => anyhow::bail!("browser close monitor stopped unexpectedly"),
+            }
             Ok(true)
         } else {
             Ok(false)
@@ -232,6 +271,30 @@ impl Tracker {
         static INSTANCE: std::sync::OnceLock<Tracker> = std::sync::OnceLock::new();
         INSTANCE.get_or_init(Tracker::new)
     }
+}
+
+fn request_graceful_browser_close(pid: u32) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    // `taskkill` without `/F` posts WM_CLOSE to the browser's windows. Never
+    // add `/F` here: forced termination can discard freshly rotated sessions.
+    let output = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string()])
+        .creation_flags(0x08000000)
+        .output()
+        .context("run taskkill for graceful browser close")?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!(
+            "graceful close request failed for browser pid {pid}{}",
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        );
+    }
+    Ok(())
 }
 
 pub fn lock_profile_resources() -> Result<MutexGuard<'static, ()>> {

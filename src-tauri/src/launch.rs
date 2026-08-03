@@ -127,10 +127,25 @@ pub async fn launch_profile(
         false
     };
 
+    // Resolve one authoritative live network identity for the complete launch.
+    // Reusing it for auto fields and WebRTC avoids contradictory provider
+    // answers within the same browser start.
+    let session_geo = if let Some(bound_proxy) = bound_proxy.as_ref() {
+        let geo = proxy::geo_check(bound_proxy, None)
+            .await
+            .with_context(|| {
+                "bound proxy session identity check failed; browser launch cancelled"
+            })?;
+        profile::enforce_session_network_identity(&mut stored, &bound_proxy.id, &geo)?;
+        Some(geo)
+    } else {
+        None
+    };
+
     // Strip launcher-only fields and resolve "auto" sentinels before serialising.
     let mut raw = stored.config.clone();
     raw.remove("_meta");
-    resolve_auto_fields(&mut raw, bound_proxy.as_ref()).await?;
+    resolve_auto_fields(&mut raw, bound_proxy.as_ref(), session_geo.as_ref()).await?;
     // ShardX Browser renders `name` as the blue label in its chrome. Override
     // only this launch-time clone: the launcher-visible NAME remains stored,
     // while profile id, user-data directory, noise seeds, and every actual
@@ -194,15 +209,12 @@ pub async fn launch_profile(
     let latest = bound_proxy
         .as_ref()
         .and_then(|p| proxy::latest_test(&p.id));
-    // Live geo for ICE-candidate spoofing, cached snapshot as fallback.
-    let proxy_public_ip: Option<String> = if let Some(p) = bound_proxy.as_ref() {
-        match proxy::geo_check(p, None).await {
-            Ok(g) if !g.ip.is_empty() => Some(g.ip),
-            _ => latest.as_ref().map(|s| s.ip.clone()).filter(|ip| !ip.is_empty()),
-        }
-    } else {
-        None
-    };
+    // Use the same live identity that drove timezone/language/geolocation.
+    let proxy_public_ip: Option<String> = session_geo
+        .as_ref()
+        .map(|geo| geo.ip.clone())
+        .filter(|ip| !ip.is_empty())
+        .or_else(|| latest.as_ref().map(|s| s.ip.clone()).filter(|ip| !ip.is_empty()));
     match webrtc_mode {
         "block" => {
             launch_args.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp".into());
@@ -373,6 +385,7 @@ async fn read_devtools_endpoint(udd: &Path) -> Option<process::CdpInfo> {
 async fn resolve_auto_fields(
     cfg: &mut serde_json::Map<String, serde_json::Value>,
     proxy_opt: Option<&proxy::ProxyEntry>,
+    preflight_geo: Option<&proxy::GeoInfo>,
 ) -> Result<()> {
     let want_tz_auto = cfg.get("timezone").and_then(|v| v.as_str()) == Some("auto");
     let want_lang_auto = cfg
@@ -404,13 +417,16 @@ async fn resolve_auto_fields(
         let route = proxy_opt
             .map(|p| format!("proxy {}:{}", p.host, p.port))
             .unwrap_or_else(|| "the direct network connection".to_string());
-        let live = proxy::geo_check_via(proxy_opt, None)
-            .await
-            .with_context(|| {
-                format!(
-                    "automatic timezone detection failed through {route}; browser launch cancelled"
-                )
-            })?;
+        let live = match preflight_geo {
+            Some(geo) => geo.clone(),
+            None => proxy::geo_check_via(proxy_opt, None)
+                .await
+                .with_context(|| {
+                    format!(
+                        "automatic timezone detection failed through {route}; browser launch cancelled"
+                    )
+                })?,
+        };
 
         if live.ip.trim().is_empty() {
             anyhow::bail!(
@@ -435,6 +451,10 @@ async fn resolve_auto_fields(
         // Auto fields. The strict no-cache rule above applies to Auto timezone.
         let mut source = String::new();
         let geo = match proxy_opt {
+            Some(_) if preflight_geo.is_some() => {
+                source = "proxy-live-preflight".into();
+                preflight_geo.cloned()
+            }
             Some(p) => match proxy::geo_check_via(Some(p), None).await {
                 Ok(g) => {
                     source = "proxy-live".into();
