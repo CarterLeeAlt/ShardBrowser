@@ -179,7 +179,7 @@ async fn new_fingerprint_for(Path(platform): Path<String>) -> ApiResult {
 }
 
 async fn new_fingerprint_impl(platform: Option<String>) -> ApiResult {
-    let fid = random_fingerprint_for(platform.as_deref())?;
+    let fid = least_used_fingerprint_for(platform.as_deref())?;
     let mut cfg = crate::build_fingerprint_config(crate::main_window().as_ref(), &fid)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     cfg.remove("_meta");
@@ -264,7 +264,7 @@ struct TempReq {
 async fn create_temporary(Json(body): Json<TempReq>) -> ApiResult {
     let fid = match body.fingerprint_id {
         Some(f) => f,
-        None => random_fingerprint_for(body.platform.as_deref())?,
+        None => least_used_fingerprint_for(body.platform.as_deref())?,
     };
     let mut cfg = crate::build_fingerprint_config(crate::main_window().as_ref(), &fid)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
@@ -610,34 +610,10 @@ async fn list_folders() -> ApiResult {
     Ok(Json(json!(set.into_iter().collect::<Vec<_>>())))
 }
 
-/// Normalize platform string to library tag vocabulary.
-fn normalize_platform(p: &str) -> String {
-    match p.trim().to_lowercase().as_str() {
-        "windows" | "win" => "Windows".into(),
-        "linux" => "Linux".into(),
-        "mac" | "macos" | "osx" | "darwin" => "macOS".into(),
-        other => other.to_string(),
-    }
-}
-
-/// Random fingerprint id for platform (host OS when None); falls back to all.
-fn random_fingerprint_for(platform: Option<&str>) -> Result<String, ApiError> {
-    let want = platform
-        .map(normalize_platform)
-        .unwrap_or_else(crate::host_platform);
-    let all = crate::fingerprints::list_all()
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    if all.is_empty() {
-        return Err(err(StatusCode::NOT_FOUND, "fingerprint library is empty"));
-    }
-    let matching: Vec<crate::fingerprints::LibraryEntry> = all
-        .iter()
-        .filter(|e| e.platform.eq_ignore_ascii_case(&want))
-        .cloned()
-        .collect();
-    let pool = if matching.is_empty() { all } else { matching };
-    let idx = (uuid::Uuid::new_v4().as_bytes()[0] as usize) % pool.len();
-    Ok(pool[idx].id.clone())
+/// Least-used fingerprint id for platform (host OS when None); falls back to all.
+fn least_used_fingerprint_for(platform: Option<&str>) -> Result<String, ApiError> {
+    crate::recommended_fingerprint_for(platform)
+        .map_err(|error| err(StatusCode::INTERNAL_SERVER_ERROR, error))
 }
 
 // ---- server ----
