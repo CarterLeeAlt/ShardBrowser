@@ -611,7 +611,7 @@ const defaultForm = (): ProfileForm => ({
   noise_canvas: "auto",
   noise_webgl: "auto",
   noise_audio: "real",
-  noise_client_rects: "auto",
+  noise_client_rects: "real",
   noise_sensors: "real",
   noise_fonts: "real",
   blocked_ports: DEFAULT_BLOCKED_PORTS.slice(),

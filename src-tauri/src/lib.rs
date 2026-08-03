@@ -837,7 +837,7 @@ pub fn build_fingerprint_config(
 }
 
 /// Replace the noise block with the policy used for every fresh identity.
-/// Canvas, WebGL, and ClientRects use stable per-profile noise; media, sensor,
+/// Canvas and WebGL use stable per-profile noise; ClientRects, media, sensor,
 /// and font vectors remain real by default.
 pub(crate) fn apply_default_noise(cfg: &mut serde_json::Map<String, Value>) {
     cfg.insert(
@@ -846,7 +846,7 @@ pub(crate) fn apply_default_noise(cfg: &mut serde_json::Map<String, Value>) {
             "canvas":       { "enabled": true,  "seed": 0 },
             "webgl":        { "enabled": true,  "seed": 0, "intensity": 0.0005 },
             "audio":        { "enabled": false, "seed": 0 },
-            "client_rects": { "enabled": true,  "seed": 0, "max_offset": 1 },
+            "client_rects": { "enabled": false, "seed": 0, "max_offset": 0 },
             "sensors":      { "enabled": false, "seed": 0 },
             "fonts":        { "enabled": false, "seed": 0 }
         }),
