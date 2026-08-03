@@ -1694,18 +1694,18 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   border-color: #8b5cf680;
   box-shadow: 0 0 0 2px #8b5cf612;
 }
-/* UDP unavailable for any reason (HTTP proxy, SOCKS5 with no
-   UDP_ASSOCIATE, etc.).  Err-tinted plus a clean corner-to-corner
-   diagonal slash drawn via ::after — using a linear-gradient with
-   sharp colour stops gives an antialiased line at the natural pill
-   aspect ratio (no transform: rotate fudging, no <s>-on-text mess). */
+/* Unavailable TCP/UDP results use the same clean corner-to-corner diagonal
+   slash. A linear-gradient keeps the line antialiased at the pill's natural
+   aspect ratio without transform/rotation adjustments. */
 .status-pill.status-no-udp {
-  position: relative;
   color: var(--err);
   background: #fb71851a;
   border-color: #fb718555;
 }
-.status-pill.status-no-udp::after {
+.status-pill.status-unavailable {
+  position: relative;
+}
+.status-pill.status-unavailable::after {
   content: "";
   position: absolute;
   inset: 0;
