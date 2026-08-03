@@ -929,7 +929,7 @@ fn profile_active_ids() -> Vec<String> {
 #[tauri::command]
 async fn process_kill(profile_id: String) -> Result<bool, String> {
     process::Tracker::shared()
-        .kill(&profile_id)
+        .close(&profile_id)
         .await
         .map_err(|e| e.to_string())
 }

@@ -1,6 +1,7 @@
 use crate::store;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
@@ -61,6 +62,18 @@ pub struct StoredMeta {
     /// Hidden from listings; auto-deleted on close.
     #[serde(default, skip_serializing_if = "is_false")]
     pub temporary: bool,
+    /// Last successfully launched network identity for this browser profile.
+    /// The public IP is stored only as a SHA-256 digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_network_identity: Option<SessionNetworkIdentity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionNetworkIdentity {
+    pub proxy_id: String,
+    pub exit_ip_sha256: String,
+    pub country_code: String,
+    pub timezone: String,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -341,6 +354,80 @@ pub fn ensure_proxy_not_active(proxy_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn session_location_changed(
+    locked: &SessionNetworkIdentity,
+    current: &SessionNetworkIdentity,
+) -> bool {
+    locked.country_code != current.country_code
+        || (!locked.timezone.is_empty()
+            && !current.timezone.is_empty()
+            && locked.timezone != current.timezone)
+}
+
+/// Bind a browser profile's persisted sessions to the geographic identity
+/// observed on its first protected launch. A same-region IP rotation is logged
+/// and accepted, but a country/timezone jump on the same proxy binding is
+/// blocked before Chromium can expose the account session to the new location.
+pub fn enforce_session_network_identity(
+    stored: &mut StoredProfile,
+    proxy_id: &str,
+    geo: &crate::proxy::GeoInfo,
+) -> Result<()> {
+    let public_ip = geo.ip.trim();
+    let country_code = geo.country_code.trim().to_ascii_uppercase();
+    if public_ip.is_empty() || country_code.is_empty() {
+        anyhow::bail!(
+            "session network identity check returned no public IP or country; browser launch cancelled"
+        );
+    }
+
+    let current = SessionNetworkIdentity {
+        proxy_id: proxy_id.to_string(),
+        exit_ip_sha256: format!("{:x}", Sha256::digest(public_ip.as_bytes())),
+        country_code,
+        timezone: geo.timezone.trim().to_string(),
+    };
+
+    match stored.meta.session_network_identity.clone() {
+        None => {
+            stored.meta.session_network_identity = Some(current);
+            save_raw(stored)?;
+        }
+        Some(locked) if locked.proxy_id != proxy_id => {
+            stored.meta.session_network_identity = Some(current);
+            save_raw(stored)?;
+        }
+        Some(locked) if locked.exit_ip_sha256 == current.exit_ip_sha256 => {}
+        Some(locked) if session_location_changed(&locked, &current) => {
+            anyhow::bail!(
+                "bound proxy session identity changed from {}/{} to {}/{}; browser launch blocked to protect Google/ChatGPT sessions. Bind a stable proxy (or intentionally rebind this profile) before launching",
+                locked.country_code,
+                if locked.timezone.is_empty() { "unknown-timezone" } else { &locked.timezone },
+                current.country_code,
+                if current.timezone.is_empty() { "unknown-timezone" } else { &current.timezone },
+            );
+        }
+        Some(locked) => {
+            let mut updated = current;
+            if updated.timezone.is_empty() {
+                // A provider can occasionally omit timezone while still
+                // returning the same country. Keep the last known timezone so
+                // a transient partial response does not weaken future checks.
+                updated.timezone = locked.timezone;
+            }
+            eprintln!(
+                "[launcher] profile {} proxy exit IP rotated within {}/{}; accepting the new IP identity",
+                stored.meta.id,
+                updated.country_code,
+                if updated.timezone.is_empty() { "unknown-timezone" } else { &updated.timezone },
+            );
+            stored.meta.session_network_identity = Some(updated);
+            save_raw(stored)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn save_raw(stored: &mut StoredProfile) -> Result<()> {
     let is_new = stored.meta.id.is_empty();
     if is_new {
@@ -351,6 +438,14 @@ pub fn save_raw(stored: &mut StoredProfile) -> Result<()> {
     // keeps existing profile JSON round-trippable.
     if !is_new {
         if let Ok(existing) = load_raw(&stored.meta.id) {
+            if stored.meta.proxy_id != existing.meta.proxy_id {
+                // An intentional rebind establishes a new trust boundary on
+                // the next launch; never carry the old proxy identity across.
+                stored.meta.session_network_identity = None;
+            } else if stored.meta.session_network_identity.is_none() {
+                stored.meta.session_network_identity =
+                    existing.meta.session_network_identity.clone();
+            }
             if stored.meta.created_at.is_none() {
                 stored.meta.created_at = existing.meta.created_at;
             }
@@ -456,6 +551,7 @@ pub fn clone_profile(id: &str) -> Result<ProfileMeta> {
     src.meta.created_at = None;
     src.meta.pinned = false;
     src.meta.total_runtime_ms = 0;
+    src.meta.session_network_identity = None;
     src.config
         .insert("name".into(), serde_json::Value::String(clone_name.clone()));
     // Re-randomize CPU/RAM/platform_version so the copy doesn't collide on those axes.
@@ -567,4 +663,51 @@ fn chrono_now_iso() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("@{s}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{session_location_changed, SessionNetworkIdentity};
+
+    fn identity(country_code: &str, timezone: &str) -> SessionNetworkIdentity {
+        SessionNetworkIdentity {
+            proxy_id: "proxy-1".into(),
+            exit_ip_sha256: "digest".into(),
+            country_code: country_code.into(),
+            timezone: timezone.into(),
+        }
+    }
+
+    #[test]
+    fn session_location_detects_country_change() {
+        let locked = identity("US", "America/Los_Angeles");
+        let current = identity("DE", "Europe/Berlin");
+
+        assert!(session_location_changed(&locked, &current));
+    }
+
+    #[test]
+    fn session_location_detects_timezone_change() {
+        let locked = identity("US", "America/Los_Angeles");
+        let current = identity("US", "America/New_York");
+
+        assert!(session_location_changed(&locked, &current));
+    }
+
+    #[test]
+    fn session_location_accepts_same_identity() {
+        let locked = identity("DE", "Europe/Berlin");
+        let current = identity("DE", "Europe/Berlin");
+
+        assert!(!session_location_changed(&locked, &current));
+    }
+
+    #[test]
+    fn session_location_ignores_timezone_when_either_side_is_empty() {
+        let known = identity("US", "America/Los_Angeles");
+        let unknown = identity("US", "");
+
+        assert!(!session_location_changed(&known, &unknown));
+        assert!(!session_location_changed(&unknown, &known));
+    }
 }
