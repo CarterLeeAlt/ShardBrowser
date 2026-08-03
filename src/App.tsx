@@ -3667,16 +3667,14 @@ function ProxiesView() {
                       >
                         {isActive ? "Active" : "Failed"}
                       </span>
-                      {/* UDP pill: clickable to docs explaining what the
-                          presence/absence of UDP means for QUIC + WebRTC.
-                          Shown for any proxy type — HTTP proxies never
-                          have UDP, but the badge still tells the user why
-                          QUIC will be force-disabled at launch. */}
+                      {/* UDP remains a proxy capability used by WebRTC policy
+                          and diagnostics. QUIC is disabled independently for
+                          every launcher-managed browser. */}
                       {r.udp_ms != null && p.kind === "socks5" && (
                         <button
                           type="button"
                           className="status-pill status-udp status-link"
-                          title={`UDP relay works (${r.udp_ms} ms) — QUIC enabled at launch. Click for docs.`}
+                          title={`UDP relay works (${r.udp_ms} ms) — QUIC remains disabled by launcher policy. Click for docs.`}
                           onClick={() => { openUrl(UDP_DOCS_URL).catch(() => {}); }}
                         >
                           UDP
@@ -3686,7 +3684,7 @@ function ProxiesView() {
                         <button
                           type="button"
                           className="status-pill status-no-udp status-unavailable status-link"
-                          title="No UDP support — QUIC/HTTP-3 disabled at launch. Click for docs."
+                          title="No UDP support — WebRTC cannot use a proxied UDP relay; QUIC remains disabled. Click for docs."
                           onClick={() => { openUrl(UDP_DOCS_URL).catch(() => {}); }}
                         >
                           UDP
