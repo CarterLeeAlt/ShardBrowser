@@ -530,7 +530,7 @@ pub fn enrich_new_config(
 ) {
     randomize_platform_version(obj);
     randomize_hardware(obj);
-    obj.entry("webrtc".into())
+    obj.entry("webrtc")
         .or_insert_with(|| Value::String("block".into()));
     if let Some(w) = window {
         clamp_screen_to_real_display(w, obj);
