@@ -42,11 +42,13 @@ info:
        `browserWSEndpoint = cdp.web_socket_debugger_url`.
     5. `POST /profiles/{id}/stop` when done.
 
-    ## Proxies & QUIC/WebRTC
+    ## Proxies, UDP & WebRTC
     On **every** launch (UI or API), before the browser starts, the bound
-    proxy is probed live for UDP-relay (SOCKS5 UDP_ASSOCIATE). If UDP works,
-    QUIC is enabled and WebRTC may use the proxied UDP relay; otherwise QUIC
-    is disabled and WebRTC collapses to TCP-only so the real IP can't leak.
+    proxy is probed live for UDP-relay (SOCKS5 UDP_ASSOCIATE). QUIC is always
+    disabled by launcher policy. The UDP result remains available to WebRTC:
+    `auto` may use the proxied relay, while a failed probe collapses to
+    TCP-only so the real IP cannot leak. New profiles default to WebRTC
+    `block`.
     Timezone/locale/geo `auto` fields are resolved live through the proxy at
     launch too. Passing `proxy` (string) on a persistent create adds it to
     the store and full-tests it up front; a temporary profile keeps it inline.
@@ -825,7 +827,7 @@ components:
             `scheme://user:pass@host:port`). On a **persistent** profile it is
             added to the proxy store (deduped by endpoint) and full-tested
             (UDP + geo), then bound by id — so it appears in the proxy list
-            and QUIC/WebRTC gating has a cached result. On a **temporary**
+            and WebRTC UDP gating has a cached result. On a **temporary**
             profile it is attached inline (not stored). Ignored if `proxy_id`
             is set.
           example: "socks5://user:pass@1.2.3.4:1080"

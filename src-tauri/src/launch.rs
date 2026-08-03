@@ -103,7 +103,8 @@ pub async fn launch_profile(
         stored.meta.inline_proxy.clone()
     };
 
-    // Live UDP probe; QUIC/WebRTC gating uses current capability not stale cache.
+    // Live UDP probe; WebRTC gating uses current capability, while QUIC is
+    // disabled independently by launcher policy.
     let proxy_udp_ok = if let Some(p) = bound_proxy.as_ref() {
         if matches!(p.kind, proxy::ProxyKind::Socks5) {
             match proxy::probe_udp(p).await {
@@ -169,6 +170,8 @@ pub async fn launch_profile(
     launch_args.push(format!("--fingerprint-profile={}", fp_file.display()).into());
     launch_args.push(format!("--user-data-dir={}", udd.display()).into());
     launch_args.push("--no-first-run".into());
+    launch_args.push("--disable-quic".into());
+    eprintln!("[launcher] QUIC disabled by launcher policy");
 
     // Disable WebGPU when profile omits `webgpu` (matches real Linux Chrome).
     let webgpu_present = raw
@@ -187,25 +190,13 @@ pub async fn launch_profile(
 
     if let Some(p) = bound_proxy.as_ref() {
         launch_args.push(format!("--proxy-server={}", p.to_proxy_server_arg()).into());
-
-        // QUIC: enable only when proxy UDP relay verified; rely on Alt-Svc upgrade path.
-        if proxy_udp_ok {
-            launch_args.push("--enable-quic".into());
-            eprintln!(
-                "[launcher] QUIC enabled (Alt-Svc upgrade path): proxy {} UDP relay verified",
-                p.host
-            );
-        } else {
-            launch_args.push("--disable-quic".into());
-            eprintln!("[launcher] QUIC disabled: proxy {} has no working UDP relay", p.host);
-        }
     }
 
     // WebRTC IP policy: block / tcp_only / auto (auto = relay if UDP, else tcp_only).
     let webrtc_mode = raw
         .get("webrtc")
         .and_then(|v| v.as_str())
-        .unwrap_or("auto");
+        .unwrap_or("block");
     let latest = bound_proxy
         .as_ref()
         .and_then(|p| proxy::latest_test(&p.id));
