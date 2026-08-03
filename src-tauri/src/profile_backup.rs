@@ -992,7 +992,14 @@ pub(crate) fn import(paths: Vec<String>) -> std::result::Result<ProfileBackupSum
                         Some(entry.id)
                     };
                 item.profile.meta.gpu_preset_id = fingerprint_id;
-                item.profile.meta.proxy_id = restored_proxy_id;
+                item.profile.meta.proxy_id = restored_proxy_id.clone();
+                if let Some(proxy_id) = restored_proxy_id.as_ref() {
+                    if let Some(identity) = item.profile.meta.session_network_identity.as_mut() {
+                        identity.proxy_id = proxy_id.clone();
+                    }
+                } else {
+                    item.profile.meta.session_network_identity = None;
+                }
 
                 let artifacts = ImportArtifacts {
                     profile_id: item.new_profile_id.clone(),

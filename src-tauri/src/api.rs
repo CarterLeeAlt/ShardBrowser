@@ -445,7 +445,7 @@ async fn start_profile(Path(id): Path<String>, body: Option<Json<StartReq>>) -> 
 
 async fn stop_profile(Path(id): Path<String>) -> ApiResult {
     let stopped = crate::process::Tracker::shared()
-        .kill(&id)
+        .close(&id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(json!({ "profile_id": id, "stopped": stopped })))
