@@ -2242,14 +2242,14 @@ function BrowsersView() {
                   )}
                   <div className="name-sub">{p.id.slice(0, 8)}</div>
                 </div>
-                <div>
+                <div className="cell-status">
                   <span className={`pill-status ${isRunning ? "ps-on" : "ps-off"}`}>
                     <i className="dot" />
                     {isRunning ? "Running" : "Idle"}
                   </span>
                 </div>
                 <div
-                  className={`cell-proxy cell-click ${isActive ? "cell-locked" : ""}`}
+                  className={`cell-proxy cell-click ${px ? "" : "cell-proxy-direct"} ${isActive ? "cell-locked" : ""}`}
                   onClick={isActive ? undefined : () => setQuickEdit({ kind: "proxy", profile: p })}
                   title={isActive ? "Stop the browser or wait for it to finish starting before changing proxy" : "Change proxy"}
                 >
