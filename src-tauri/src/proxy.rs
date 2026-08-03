@@ -918,6 +918,22 @@ mod bulk_import_tests {
     }
 
     #[test]
+    fn bulk_parser_preserves_top_to_bottom_input_order() {
+        let preview = parse_bulk_against(
+            "192.168.99.7:1081\n192.168.99.7:1082\n192.168.99.7:1083",
+            ProxyKind::Socks5,
+            &[],
+        );
+        let parsed_ports: Vec<u16> = preview
+            .entries
+            .iter()
+            .map(|proxy| proxy.port)
+            .collect();
+
+        assert_eq!(parsed_ports, vec![1081, 1082, 1083]);
+    }
+
+    #[test]
     fn restored_proxy_dedup_reuses_matching_credentials() {
         let mut store_data = ProxyStore::default();
         let mut first = entry(ProxyKind::Socks5, "Proxy.Example.", 1080, "user");

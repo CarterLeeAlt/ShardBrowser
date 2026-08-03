@@ -998,9 +998,8 @@ fn start_proxy_refresh_loop() {
 
 #[tauri::command]
 fn proxy_list() -> Result<Vec<proxy::ProxyEntry>, String> {
-    // Newest-first display order; internal paths still read raw on-disk order.
-    let mut list = proxy::list().map_err(|e| e.to_string())?;
-    list.reverse();
+    // Raw storage is append-only oldest-to-newest, matching the UI default.
+    let list = proxy::list().map_err(|e| e.to_string())?;
     display_order::sort_proxies(list).map_err(|e| e.to_string())
 }
 
@@ -1015,10 +1014,8 @@ fn proxy_move_order(
     anchor_id: Option<String>,
     placement: display_order::Placement,
 ) -> Result<(), String> {
-    // Match proxy_list's current display default without changing the raw
-    // proxy store order used by launch and automation paths.
-    let mut proxies = proxy::list().map_err(|e| e.to_string())?;
-    proxies.reverse();
+    // Match proxy_list's append-at-bottom default.
+    let proxies = proxy::list().map_err(|e| e.to_string())?;
     let default_ids: Vec<String> = proxies.into_iter().map(|proxy| proxy.id).collect();
     display_order::move_proxy(
         &default_ids,
