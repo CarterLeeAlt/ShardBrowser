@@ -522,13 +522,16 @@ fn profile_save(
     save_profile_core(Some(&window), payload, false)
 }
 
-/// Enrich a new profile in place: platform_version, hardware, screen clamp.
+/// Enrich a new profile in place: platform_version, hardware, screen clamp,
+/// and privacy-safe network defaults.
 pub fn enrich_new_config(
     window: Option<&tauri::WebviewWindow>,
     obj: &mut serde_json::Map<String, Value>,
 ) {
     randomize_platform_version(obj);
     randomize_hardware(obj);
+    obj.entry("webrtc".into())
+        .or_insert_with(|| Value::String("block".into()));
     if let Some(w) = window {
         clamp_screen_to_real_display(w, obj);
     }

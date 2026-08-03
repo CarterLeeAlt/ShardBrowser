@@ -113,12 +113,11 @@ Windows desktops/laptops with RTX/GTX/Intel/AMD GPUs, Linux
 workstations), bind a SOCKS5 / HTTP proxy to each one, and the
 launcher handles the rest — auto-resolved timezone + locale +
 geolocation from the proxy's exit country, isolated `user-data-dir`,
-persistent cookies, Widevine pre-warm, QUIC over the proxy's UDP
-relay, no real-IP leaks via WebRTC.
+persistent cookies, Widevine pre-warm, QUIC disabled by launcher policy,
+and WebRTC blocked by default.
 
 Free for any use — pair with [ProxyShard](https://proxyshard.com?utm_source=shardx&utm_medium=referral&utm_campaign=shardx-launcher)
-proxies for the QUIC + WebRTC stack to actually work end-to-end, or
-bring your own.
+proxies for stable TCP and optional UDP relay support, or bring your own.
 
 What this gives you out of the box:
 
@@ -160,8 +159,8 @@ across iframes, web workers, devtools and headless inspection.
 * **TLS ClientHello** — Chrome-149 cipher + signature-algorithm
   selection, extension shuffling, so JA4 / Akamai / Peetprint fingerprints
   match real Chrome.
-* **HTTP-3 over the proxy's UDP relay** — QUIC works end-to-end through
-  SOCKS5; origin hostnames are resolved proxy-side.
+* **UDP relay remains available** — SOCKS5 UDP support is still tested and
+  retained for WebRTC policy and SDK use; the desktop launcher forces QUIC off.
 * **WebRTC policy** — `block` / `tcp_only` / `auto`. In `auto` traffic
   rides the proxy's UDP relay; otherwise WebRTC candidates report the
   proxy exit IP, never the host. STUN / TURN targets on private
@@ -220,9 +219,10 @@ across iframes, web workers, devtools and headless inspection.
 
 ## Screenshots
 
-### Network — QUIC + WebRTC over SOCKS5
+### Network engine capability — QUIC + WebRTC over SOCKS5
 
-QUIC handshake completes end-to-end through the SOCKS5 UDP relay;
+The engine supports QUIC through the SOCKS5 UDP relay, although the desktop
+launcher now forces QUIC off. With WebRTC enabled explicitly,
 every WebRTC probe (UDP / TCP / TLS) passes against Twilio's test
 suite without leaking the host IP.
 
@@ -300,11 +300,10 @@ immediately:
   1920×1080 screen, RTX GPU with `hardwareConcurrency=2`). ShardX's
   library is derived from real-device samples so every signal agrees
   with the others.
-* QUIC / HTTP-3 over SOCKS5 is the new normal — major Google
-  properties refuse to fall back to HTTP/2 cleanly. The paid
-  anti-detects disable QUIC entirely the moment a proxy is set;
-  CloakBrowser implements UDP relay but it drops mid-session.
-  ShardX rides the proxy's UDP relay end-to-end so HTTP/3 stays up.
+* The desktop launcher forces QUIC / HTTP-3 off for every profile so
+  authentication and other state-changing requests use the TCP/TLS path.
+  SOCKS5 UDP support remains available to proxy tests, WebRTC policy, and
+  direct SDK launches.
 
 ---
 
@@ -362,9 +361,8 @@ and hit *Start*. The launcher takes care of:
   isolated;
 * resolving timezone / locale / geolocation from the proxy's exit
   country before each launch;
-* deciding QUIC + WebRTC policy from a live UDP probe — QUIC stays on
-  when the proxy supports UDP, off when it doesn't, no manual toggle
-  needed;
+* forcing QUIC off on every launch while retaining the live UDP probe for
+  proxy diagnostics and WebRTC policy; new profiles default to WebRTC block;
 * re-binding to the same `user-data-dir` next time so you get
   *"Continue where you left off"* without the crash-restore bubble.
 
