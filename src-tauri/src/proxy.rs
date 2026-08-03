@@ -6,8 +6,8 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-const LATENCY_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-const LATENCY_TIMEOUT_ERROR: &str = "proxy latency test timed out after 5 seconds";
+const PROXY_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const PROXY_TEST_TIMEOUT_ERROR: &str = "proxy test timed out after 5 seconds";
 pub const TEST_CANCELLED_ERROR: &str = "proxy test cancelled because the proxy changed";
 const BULK_TEST_CONCURRENCY: usize = 5;
 const BACKGROUND_TEST_CONCURRENCY: usize = 3;
@@ -565,9 +565,9 @@ pub fn get(id: &str) -> Result<Option<ProxyEntry>> {
 
 /// SOCKS5/HTTP CONNECT probe; returns RTT in ms on success.
 pub async fn probe(entry: &ProxyEntry) -> Result<u128> {
-    tokio::time::timeout(LATENCY_TEST_TIMEOUT, probe_inner(entry))
+    tokio::time::timeout(PROXY_TEST_TIMEOUT, probe_inner(entry))
         .await
-        .context(LATENCY_TIMEOUT_ERROR)?
+        .context(PROXY_TEST_TIMEOUT_ERROR)?
 }
 
 async fn probe_inner(entry: &ProxyEntry) -> Result<u128> {
@@ -1020,9 +1020,9 @@ async fn resolve_stun_ipv4() -> Result<(std::net::Ipv4Addr, u16)> {
 }
 
 pub async fn probe_udp(entry: &ProxyEntry) -> Result<u128> {
-    tokio::time::timeout(LATENCY_TEST_TIMEOUT, probe_udp_inner(entry))
+    tokio::time::timeout(PROXY_TEST_TIMEOUT, probe_udp_inner(entry))
         .await
-        .context(LATENCY_TIMEOUT_ERROR)?
+        .context(PROXY_TEST_TIMEOUT_ERROR)?
 }
 
 async fn probe_udp_inner(entry: &ProxyEntry) -> Result<u128> {
@@ -1151,7 +1151,6 @@ const GEO_PROVIDERS: [&str; 6] = [
     "freeipapi.com",
     "ipapi.is",
 ];
-const GEO_PROVIDER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn normalize_geo_provider(provider: &str) -> &'static str {
     GEO_PROVIDERS
@@ -1242,7 +1241,7 @@ async fn geo_check_provider(entry: Option<&ProxyEntry>, provider: String) -> Res
 
     let mut builder = reqwest::Client::builder()
         .user_agent(concat!("ShardX Launcher/", env!("CARGO_PKG_VERSION")))
-        .timeout(GEO_PROVIDER_TIMEOUT);
+        .timeout(PROXY_TEST_TIMEOUT);
     if let Some(entry) = entry {
         let scheme = match entry.kind {
             ProxyKind::Socks5 => "socks5h", // DNS via proxy
@@ -1670,56 +1669,93 @@ async fn collect_test_snapshot(entry: &ProxyEntry, lane: TestLane) -> Result<Tes
         .map_err(|_| anyhow::anyhow!("proxy test queue closed"))?;
 
     let now = unix_now();
+    // Queueing does not count against the proxy. Once a worker starts, the
+    // complete TCP + UDP + geo operation has one shared five-second deadline.
+    let test = async {
+        let udp_probe = async {
+            if matches!(entry.kind, ProxyKind::Socks5) {
+                Some(probe_udp(entry).await)
+            } else {
+                None
+            }
+        };
+        let geo_probe = geo_check(entry, None);
+        let (tcp_res, udp_res, geo_res) = tokio::join!(probe(entry), udp_probe, geo_probe);
 
-    let udp_probe = async {
-        if matches!(entry.kind, ProxyKind::Socks5) {
-            Some(probe_udp(entry).await)
-        } else {
-            None
+        // TCP failure → zero geo so snapshot reads "Failed, no IP".
+        let tcp_failed = tcp_res.is_err();
+        let (ip, country_code, country, region, city, isp, tz, lat, lng, provider) =
+            match (&geo_res, tcp_failed) {
+                (Ok(g), false) => (
+                    g.ip.clone(),
+                    g.country_code.clone(),
+                    g.country.clone(),
+                    g.region.clone(),
+                    g.city.clone(),
+                    g.isp.clone(),
+                    g.timezone.clone(),
+                    g.latitude,
+                    g.longitude,
+                    g.provider.clone(),
+                ),
+                _ => (
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    0.0,
+                    0.0,
+                    String::new(),
+                ),
+            };
+
+        TestSnapshot {
+            first_seen: String::new(),
+            last_seen: now.clone(),
+            ip,
+            country_code,
+            country,
+            region,
+            city,
+            isp,
+            timezone: tz,
+            latitude: lat,
+            longitude: lng,
+            tcp_ms: tcp_res.ok(),
+            udp_ms: udp_res
+                .as_ref()
+                .and_then(|result| result.as_ref().ok().copied()),
+            udp_error: udp_res
+                .as_ref()
+                .and_then(|result| result.as_ref().err().map(|error| error.to_string())),
+            provider,
         }
     };
-    // Each provider owns its timeout so a timeout can advance to the next
-    // provider instead of cancelling the entire fallback chain.
-    let geo_probe = geo_check(entry, None);
-    // A full test is one user-visible operation. Run TCP, UDP, and the complete
-    // geo fallback chain concurrently; each geo provider owns its timeout.
-    let (tcp_res, udp_res, geo_res) = tokio::join!(probe(entry), udp_probe, geo_probe);
 
-    // TCP failure → zero geo so snapshot reads "Failed, no IP".
-    let tcp_failed = tcp_res.is_err();
-    let (ip, country_code, country, region, city, isp, tz, lat, lng, provider) =
-        match (&geo_res, tcp_failed) {
-            (Ok(g), false) => (
-                g.ip.clone(), g.country_code.clone(), g.country.clone(),
-                g.region.clone(), g.city.clone(), g.isp.clone(),
-                g.timezone.clone(), g.latitude, g.longitude, g.provider.clone(),
-            ),
-            _ => (String::new(), String::new(), String::new(),
-                  String::new(), String::new(), String::new(),
-                  String::new(), 0.0, 0.0, String::new()),
-        };
-
-    Ok(TestSnapshot {
-        first_seen: String::new(),
-        last_seen: now,
-        ip,
-        country_code,
-        country,
-        region,
-        city,
-        isp,
-        timezone: tz,
-        latitude: lat,
-        longitude: lng,
-        tcp_ms: tcp_res.ok(),
-        udp_ms: udp_res
-            .as_ref()
-            .and_then(|r| r.as_ref().ok().copied()),
-        udp_error: udp_res
-            .as_ref()
-            .and_then(|r| r.as_ref().err().map(|e| e.to_string())),
-        provider,
-    })
+    match tokio::time::timeout(PROXY_TEST_TIMEOUT, test).await {
+        Ok(snapshot) => Ok(snapshot),
+        Err(_) => Ok(TestSnapshot {
+            first_seen: String::new(),
+            last_seen: now,
+            ip: String::new(),
+            country_code: String::new(),
+            country: String::new(),
+            region: String::new(),
+            city: String::new(),
+            isp: String::new(),
+            timezone: String::new(),
+            latitude: 0.0,
+            longitude: 0.0,
+            tcp_ms: None,
+            udp_ms: None,
+            udp_error: matches!(entry.kind, ProxyKind::Socks5)
+                .then(|| PROXY_TEST_TIMEOUT_ERROR.to_string()),
+            provider: String::new(),
+        }),
+    }
 }
 
 async fn collect_test_snapshot_or_cancel(
@@ -1873,11 +1909,15 @@ pub async fn full_test_background(entry: &ProxyEntry) -> Result<TestSnapshot> {
     full_test_with_retry_in_lane(request, 1, TestLane::Background).await
 }
 
-async fn full_test_batch_in_lane(
+async fn full_test_batch_in_lane<F>(
     requests: Vec<PreparedProxyTest>,
     lane: TestLane,
     max_attempts: usize,
-) -> Vec<BatchTestResult> {
+    mut on_result: F,
+) -> Vec<BatchTestResult>
+where
+    F: FnMut(&BatchTestResult) + Send,
+{
     let count = requests.len();
     let mut queue: VecDeque<(usize, PreparedProxyTest)> =
         requests.into_iter().enumerate().collect();
@@ -1897,19 +1937,21 @@ async fn full_test_batch_in_lane(
     let mut results: Vec<Option<BatchTestResult>> = (0..count).map(|_| None).collect();
     while let Some(joined) = tasks.join_next().await {
         match joined {
-            Ok((index, Ok(snapshot))) => {
-                results[index] = Some(BatchTestResult {
-                    index,
-                    snapshot: Some(snapshot),
-                    error: None,
-                });
-            }
-            Ok((index, Err(error))) => {
-                results[index] = Some(BatchTestResult {
-                    index,
-                    snapshot: None,
-                    error: Some(error.to_string()),
-                });
+            Ok((index, result)) => {
+                let result = match result {
+                    Ok(snapshot) => BatchTestResult {
+                        index,
+                        snapshot: Some(snapshot),
+                        error: None,
+                    },
+                    Err(error) => BatchTestResult {
+                        index,
+                        snapshot: None,
+                        error: Some(error.to_string()),
+                    },
+                };
+                on_result(&result);
+                results[index] = Some(result);
             }
             Err(_) => {}
         }
@@ -1929,18 +1971,24 @@ async fn full_test_batch_in_lane(
     results
         .into_iter()
         .enumerate()
-        .map(|(index, result)| result.unwrap_or_else(|| BatchTestResult {
-            index,
-            snapshot: None,
-            error: Some("proxy test task did not complete".to_string()),
-        }))
+        .map(|(index, result)| {
+            result.unwrap_or_else(|| {
+                let result = BatchTestResult {
+                    index,
+                    snapshot: None,
+                    error: Some("proxy test task did not complete".to_string()),
+                };
+                on_result(&result);
+                result
+            })
+        })
         .collect()
 }
 
 /// Test every proxy with the manual-priority five-worker pool. Each proxy owns
 /// its full timeout; queued entries are never failed because the batch is busy.
 pub async fn full_test_batch(entries: Vec<ProxyEntry>) -> Vec<BatchTestResult> {
-    full_test_batch_in_lane(prepare_proxy_tests(entries), TestLane::Manual, 1).await
+    full_test_batch_in_lane(prepare_proxy_tests(entries), TestLane::Manual, 1, |_| {}).await
 }
 
 /// Run automatic tests without consuming the capacity reserved for manual
@@ -1949,7 +1997,20 @@ pub async fn full_test_batch_background(
     requests: Vec<PreparedProxyTest>,
     max_attempts: usize,
 ) -> Vec<BatchTestResult> {
-    full_test_batch_in_lane(requests, TestLane::Background, max_attempts).await
+    full_test_batch_background_with_progress(requests, max_attempts, |_| {}).await
+}
+
+/// Run automatic tests and report each result immediately after its persisted
+/// test finishes, without waiting for slower proxies in the same batch.
+pub async fn full_test_batch_background_with_progress<F>(
+    requests: Vec<PreparedProxyTest>,
+    max_attempts: usize,
+    on_result: F,
+) -> Vec<BatchTestResult>
+where
+    F: FnMut(&BatchTestResult) + Send,
+{
+    full_test_batch_in_lane(requests, TestLane::Background, max_attempts, on_result).await
 }
 
 /// Fallback country → IANA timezone for providers that omit timezone.
