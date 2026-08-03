@@ -3099,6 +3099,36 @@ type ProxyBatchTestResult = {
   error: string | null;
 };
 
+/// Dispatch one command per proxy so completed rows can render immediately.
+/// The backend's shared semaphore still limits all manual tests to five in
+/// flight, including single-row tests started elsewhere in the UI.
+async function testProxiesIncrementally(
+  entries: ProxyEntry[],
+  onResult: (result: ProxyBatchTestResult) => void,
+): Promise<ProxyBatchTestResult[]> {
+  const results = new Array<ProxyBatchTestResult>(entries.length);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < entries.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const entry = entries[index];
+      let result: ProxyBatchTestResult;
+      try {
+        const snapshot = await invoke<ProxyTestSnapshot>("proxy_full_test", { entry });
+        result = { index, snapshot, error: null };
+      } catch (error) {
+        result = { index, snapshot: null, error: String(error) };
+      }
+      results[index] = result;
+      onResult(result);
+    }
+  };
+  const workerCount = Math.min(entries.length, 5);
+  await Promise.all(Array.from({ length: workerCount }, worker));
+  return results;
+}
+
 function ProxiesView() {
   const [proxies, setProxies] = useState<ProxyEntry[]>([]);
   const [editing, setEditing] = useState<ProxyEntry | null>(null);
@@ -3272,8 +3302,8 @@ function ProxiesView() {
     catch (e) { toast.err(String(e)); }
   };
 
-  // The backend keeps at most five tests in flight. Every queued proxy receives
-  // its own complete five-second test window once a worker becomes available.
+  // Each proxy reports independently while the backend keeps at most five
+  // tests in flight. A slow timeout no longer withholds completed row results.
   const bulkTest = async () => {
     const ids = [...proxySel];
     if (ids.length === 0) return;
@@ -3285,23 +3315,26 @@ function ProxiesView() {
       return next;
     });
     try {
-      const results = await invoke<ProxyBatchTestResult[]>("proxy_full_test_batch", { entries: targets });
-      const tested: Record<string, ProxyTestSnapshot> = {};
+      const results = await testProxiesIncrementally(targets, (result) => {
+        const target = targets[result.index];
+        if (!target) return;
+        const snapshot = result.snapshot;
+        if (snapshot) {
+          setSnapshots((state) => ({ ...state, [target.id]: snapshot }));
+        }
+        setBusy((state) => ({ ...state, [target.id]: false }));
+      });
       let passed = 0;
       let failed = 0;
       let incomplete = 0;
       for (const result of results) {
-        const target = targets[result.index];
-        if (!target) continue;
         if (!result.snapshot) {
           incomplete += 1;
           continue;
         }
-        tested[target.id] = result.snapshot;
         if (result.snapshot.tcp_ms != null) passed += 1;
         else failed += 1;
       }
-      setSnapshots((state) => ({ ...state, ...tested }));
       await reload();
       const summary = `Bulk test done: ${passed} passed, ${failed} failed${incomplete > 0 ? `, ${incomplete} incomplete` : ""}`;
       if (failed === 0 && incomplete === 0) toast.ok(summary);
@@ -3911,38 +3944,34 @@ function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
     setBusy(true);
     setRows((current) => current.map((row) => ({ ...row, status: "testing", error: undefined })));
     try {
-      const results = await invoke<ProxyBatchTestResult[]>("proxy_full_test_batch", {
-        entries: rows.map((row) => row.entry),
-      });
-      const byIndex = new Map(results.map((result) => [result.index, result]));
-      setRows((current) => current.map((row, index) => {
-        const result = byIndex.get(index);
-        const snap = result?.snapshot;
-        if (!snap) {
+      await testProxiesIncrementally(rows.map((row) => row.entry), (result) => {
+        setRows((current) => current.map((row, index) => {
+          if (index !== result.index) return row;
+          const snap = result.snapshot;
+          if (!snap) {
+            return {
+              ...row,
+              status: "incomplete",
+              error: result.error ?? "Proxy test failed",
+            };
+          }
           return {
             ...row,
-            status: "incomplete",
-            error: result?.error ?? "Proxy test failed",
+            status: snap.tcp_ms != null ? "ok" : "fail",
+            tcp_ms: snap.tcp_ms,
+            udp_ms: snap.udp_ms,
+            country: snap.country_code || row.country,
+            error: snap.tcp_ms == null
+              ? (result.error ?? "Proxy latency test failed")
+              : undefined,
+            entry: { ...row.entry, country: snap.country_code || row.entry.country },
           };
-        }
-        return {
-          ...row,
-          status: snap.tcp_ms != null ? "ok" : "fail",
-          tcp_ms: snap.tcp_ms,
-          udp_ms: snap.udp_ms,
-          country: snap.country_code || row.country,
-          error: snap.tcp_ms == null
-            ? (result?.error ?? "Proxy latency test failed")
-            : undefined,
-          entry: { ...row.entry, country: snap.country_code || row.entry.country },
-        };
-      }));
+        }));
+      });
     } catch (e) {
-      setRows((current) => current.map((row) => ({
-        ...row,
-        status: "incomplete",
-        error: String(e),
-      })));
+      setRows((current) => current.map((row) => row.status === "testing"
+        ? { ...row, status: "incomplete", error: String(e) }
+        : row));
     } finally {
       setBusy(false);
     }
