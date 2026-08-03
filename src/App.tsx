@@ -3099,6 +3099,16 @@ type ProxyBatchTestResult = {
   error: string | null;
 };
 
+function proxyTestFailureReason(snapshot: ProxyTestSnapshot): string | null {
+  if (snapshot.tcp_ms == null) return "Proxy TCP test failed";
+  if (!snapshot.ip.trim()) return "Proxy test did not return an exit IP";
+  return null;
+}
+
+function proxyTestIsActive(snapshot: ProxyTestSnapshot): boolean {
+  return proxyTestFailureReason(snapshot) == null;
+}
+
 /// Dispatch one command per proxy so completed rows can render immediately.
 /// The backend's shared semaphore still limits all manual tests to five in
 /// flight, including single-row tests started elsewhere in the UI.
@@ -3332,7 +3342,7 @@ function ProxiesView() {
           incomplete += 1;
           continue;
         }
-        if (result.snapshot.tcp_ms != null) passed += 1;
+        if (proxyTestIsActive(result.snapshot)) passed += 1;
         else failed += 1;
       }
       await reload();
@@ -3516,6 +3526,8 @@ function ProxiesView() {
         <SortableContext items={pagedProxies.map((proxy) => proxy.id)} strategy={verticalListSortingStrategy}>
         {pagedProxies.map((p) => {
           const r = snapshots[p.id];
+          const testFailure = r ? proxyTestFailureReason(r) : null;
+          const isActive = !!r && testFailure == null;
           const isBusy = !!busy[p.id];
           const cc = r?.country_code || p.country || "";
           const isSel = proxySel.has(p.id);
@@ -3615,10 +3627,10 @@ function ProxiesView() {
                   {r && !isBusy && (
                     <div className="proxy-test">
                       <span
-                        className={`status-pill ${r.tcp_ms != null ? "status-active" : "status-failed"}`}
-                        title={r.tcp_ms != null ? `TCP ${r.tcp_ms} ms` : "TCP failed"}
+                        className={`status-pill ${isActive ? "status-active" : "status-failed status-unavailable"}`}
+                        title={isActive ? `TCP ${r.tcp_ms} ms` : (testFailure ?? "Proxy test failed")}
                       >
-                        {r.tcp_ms != null ? "Active" : "Failed"}
+                        {isActive ? "Active" : "Failed"}
                       </span>
                       {/* UDP pill: clickable to docs explaining what the
                           presence/absence of UDP means for QUIC + WebRTC.
@@ -3638,14 +3650,14 @@ function ProxiesView() {
                       {r.udp_ms == null && (
                         <button
                           type="button"
-                          className="status-pill status-no-udp status-link"
+                          className="status-pill status-no-udp status-unavailable status-link"
                           title="No UDP support — QUIC/HTTP-3 disabled at launch. Click for docs."
                           onClick={() => { openUrl(UDP_DOCS_URL).catch(() => {}); }}
                         >
                           UDP
                         </button>
                       )}
-                      {r.tcp_ms != null && r.ip && (
+                      {isActive && r.ip && (
                         <span className="test-ip mono small" title={r.isp}>{r.ip}</span>
                       )}
                     </div>
@@ -3754,20 +3766,25 @@ function ProxyInfoPopover({
   // Clamp inside viewport to avoid clipping at the right edge.
   const left = Math.min(anchor.x, window.innerWidth - 360);
   const top = Math.min(anchor.y + 8, window.innerHeight - 320);
+  const latestFailure = latest ? proxyTestFailureReason(latest) : null;
 
   return (
     <div className="proxy-popover" style={{ left, top }} onClick={(e) => e.stopPropagation()}>
       <div className="popover-section">
-        {latest?.ip ? (
+        {latest ? (
           <>
-            <div className="pop-row">
-              <span className="pop-ico"><Icon.Globe /></span>
-              <span className="mono">{latest.ip}</span>
-            </div>
-            <div className="pop-row">
-              <span className="pop-ico">{latest.country_code ? <CountryFlag cc={latest.country_code} height={14} /> : <Icon.Globe />}</span>
-              <span>{[latest.region, latest.city].filter(Boolean).join(", ") || latest.country || "—"}</span>
-            </div>
+            {latest.ip && (
+              <>
+                <div className="pop-row">
+                  <span className="pop-ico"><Icon.Globe /></span>
+                  <span className="mono">{latest.ip}</span>
+                </div>
+                <div className="pop-row">
+                  <span className="pop-ico">{latest.country_code ? <CountryFlag cc={latest.country_code} height={14} /> : <Icon.Globe />}</span>
+                  <span>{[latest.region, latest.city].filter(Boolean).join(", ") || latest.country || "—"}</span>
+                </div>
+              </>
+            )}
             {latest.timezone && (
               <div className="pop-row">
                 <span className="pop-ico"><Icon.Clock /></span>
@@ -3781,8 +3798,8 @@ function ProxyInfoPopover({
               </div>
             )}
             <div className="pop-row pop-row-split">
-              <span className={`pop-pill ${latest.tcp_ms != null ? "ok" : "err"}`}>
-                TCP {latest.tcp_ms != null ? `${latest.tcp_ms} ms` : "✗"}
+              <span className={`pop-pill ${latestFailure == null ? "ok" : "err"}`} title={latestFailure ?? undefined}>
+                TCP {latestFailure == null ? `${latest.tcp_ms} ms` : "✗"}
               </span>
               {proxy.kind === "socks5" && (
                 <span
@@ -3922,14 +3939,16 @@ function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
     if (!entry) return;
     try {
       const snap = await invoke<ProxyTestSnapshot>("proxy_full_test", { entry });
+      const failure = proxyTestFailureReason(snap);
       setRows((rs) => rs.map((r, i) =>
         i === idx
           ? {
               ...r,
-              status: snap.tcp_ms != null ? "ok" : "fail",
+              status: failure == null ? "ok" : "fail",
               tcp_ms: snap.tcp_ms,
               udp_ms: snap.udp_ms,
               country: snap.country_code || r.country,
+              error: failure ?? undefined,
               entry: { ...r.entry, country: snap.country_code || r.entry.country },
             }
           : r,
@@ -3955,15 +3974,14 @@ function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
               error: result.error ?? "Proxy test failed",
             };
           }
+          const failure = proxyTestFailureReason(snap);
           return {
             ...row,
-            status: snap.tcp_ms != null ? "ok" : "fail",
+            status: failure == null ? "ok" : "fail",
             tcp_ms: snap.tcp_ms,
             udp_ms: snap.udp_ms,
             country: snap.country_code || row.country,
-            error: snap.tcp_ms == null
-              ? (result.error ?? "Proxy latency test failed")
-              : undefined,
+            error: failure ?? result.error ?? undefined,
             entry: { ...row.entry, country: snap.country_code || row.entry.country },
           };
         }));
@@ -4128,7 +4146,7 @@ host:8080               # no auth
                         </>
                       )}
                       {r.status === "fail" && (
-                        <span className="status-pill status-failed" title={r.error}>Failed</span>
+                        <span className="status-pill status-failed status-unavailable" title={r.error}>Failed</span>
                       )}
                       {r.status === "incomplete" && (
                         <span className="status-pill" title={r.error}>Incomplete</span>

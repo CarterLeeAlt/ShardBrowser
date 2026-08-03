@@ -958,7 +958,7 @@ async fn process_kill(profile_id: String) -> Result<bool, String> {
 
 // ---- Proxies ----
 
-const AUTOMATIC_PROXY_TEST_ATTEMPTS: usize = 3;
+const AUTOMATIC_PROXY_TEST_ATTEMPTS: usize = 1;
 const PROXY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
 
 async fn test_proxies_in_background(
@@ -970,7 +970,10 @@ async fn test_proxies_in_background(
     }
 
     let total = requests.len();
-    let results = proxy::full_test_batch_background(requests, max_attempts).await;
+    let results = proxy::full_test_batch_background_with_progress(requests, max_attempts, |_| {
+        notify_store_changed("proxies");
+    })
+    .await;
     let incomplete = results
         .iter()
         .filter(|result| {
@@ -992,7 +995,6 @@ async fn test_proxies_in_background(
             "[launcher] automatic proxy test finished: {total} total, {failed} failed, {incomplete} incomplete"
         );
     }
-    notify_store_changed("proxies");
 }
 
 fn spawn_automatic_proxy_tests(requests: Vec<proxy::PreparedProxyTest>) {
