@@ -24,12 +24,6 @@ pub enum Placement {
     After,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum NewItemPlacement {
-    Front,
-    Back,
-}
-
 fn load_unlocked() -> Result<DisplayOrder> {
     let path = store::display_order_path()?;
     if !path.exists() {
@@ -50,13 +44,9 @@ fn save_unlocked(order: &DisplayOrder) -> Result<()> {
 }
 
 /// Merge a possibly-stale saved order with the current default order.
-/// Newly-created ids stay in default order at the requested edge, missing ids
-/// are discarded, and duplicates are ignored.
-fn reconcile_order(
-    saved: &[String],
-    defaults: &[String],
-    new_item_placement: NewItemPlacement,
-) -> Vec<String> {
+/// Newly-created ids stay in default order at the back, missing ids are
+/// discarded, and duplicates are ignored.
+fn reconcile_order(saved: &[String], defaults: &[String]) -> Vec<String> {
     let valid: HashSet<&str> = defaults.iter().map(String::as_str).collect();
     let mut saved_seen: HashSet<String> = HashSet::new();
     let saved_valid: Vec<String> = saved
@@ -70,14 +60,10 @@ fn reconcile_order(
         .filter(|id| !saved_ids.contains(id.as_str()))
         .cloned()
         .collect();
-    let (first, second) = match new_item_placement {
-        NewItemPlacement::Front => (new_valid, saved_valid),
-        NewItemPlacement::Back => (saved_valid, new_valid),
-    };
 
     let mut result = Vec::with_capacity(defaults.len());
     let mut result_seen: HashSet<String> = HashSet::new();
-    for id in first.into_iter().chain(second) {
+    for id in saved_valid.into_iter().chain(new_valid) {
         if result_seen.insert(id.clone()) {
             result.push(id);
         }
@@ -88,12 +74,11 @@ fn reconcile_order(
 fn move_in_order(
     saved: &[String],
     defaults: &[String],
-    new_item_placement: NewItemPlacement,
     id: &str,
     anchor_id: Option<&str>,
     placement: Placement,
 ) -> Result<Vec<String>> {
-    let mut order = reconcile_order(saved, defaults, new_item_placement);
+    let mut order = reconcile_order(saved, defaults);
     let Some(source_index) = order.iter().position(|current| current == id) else {
         anyhow::bail!("item no longer exists");
     };
@@ -133,11 +118,7 @@ pub fn sort_profiles(profiles: Vec<ProfileMeta>) -> Result<Vec<ProfileMeta>> {
         .map_err(|_| anyhow::anyhow!("display order lock poisoned"))?;
     let saved = load_unlocked()?;
     let defaults: Vec<String> = profiles.iter().map(|profile| profile.id.clone()).collect();
-    let order = reconcile_order(
-        &saved.profiles,
-        &defaults,
-        NewItemPlacement::Front,
-    );
+    let order = reconcile_order(&saved.profiles, &defaults);
     let mut by_id: HashMap<String, ProfileMeta> = profiles
         .into_iter()
         .map(|profile| (profile.id.clone(), profile))
@@ -154,7 +135,7 @@ pub fn sort_proxies(proxies: Vec<ProxyEntry>) -> Result<Vec<ProxyEntry>> {
         .map_err(|_| anyhow::anyhow!("display order lock poisoned"))?;
     let saved = load_unlocked()?;
     let defaults: Vec<String> = proxies.iter().map(|proxy| proxy.id.clone()).collect();
-    let order = reconcile_order(&saved.proxies, &defaults, NewItemPlacement::Back);
+    let order = reconcile_order(&saved.proxies, &defaults);
     let mut by_id: HashMap<String, ProxyEntry> = proxies
         .into_iter()
         .map(|proxy| (proxy.id.clone(), proxy))
@@ -178,7 +159,6 @@ pub fn move_profile(
     saved.profiles = move_in_order(
         &saved.profiles,
         default_ids,
-        NewItemPlacement::Front,
         id,
         anchor_id,
         placement,
@@ -186,7 +166,7 @@ pub fn move_profile(
     save_unlocked(&saved)
 }
 
-/// Append a batch of newly-created profiles to the saved order in one atomic
+/// Append one or more newly-created profiles to the saved order in one atomic
 /// write. The caller's id order is preserved.
 pub fn append_profiles(default_ids: &[String], ids: &[String]) -> Result<()> {
     if ids.is_empty() {
@@ -207,11 +187,7 @@ pub fn append_profiles(default_ids: &[String], ids: &[String]) -> Result<()> {
         .lock()
         .map_err(|_| anyhow::anyhow!("display order lock poisoned"))?;
     let mut saved = load_unlocked()?;
-    let mut order = reconcile_order(
-        &saved.profiles,
-        default_ids,
-        NewItemPlacement::Front,
-    );
+    let mut order = reconcile_order(&saved.profiles, default_ids);
     order.retain(|current| !seen.contains(current.as_str()));
     order.extend(ids.iter().cloned());
     saved.profiles = order;
@@ -231,7 +207,6 @@ pub fn move_proxy(
     saved.proxies = move_in_order(
         &saved.proxies,
         default_ids,
-        NewItemPlacement::Back,
         id,
         anchor_id,
         placement,
@@ -248,14 +223,13 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_keeps_new_items_first_and_prunes_stale_ids() {
+    fn reconcile_appends_new_items_and_prunes_stale_ids() {
         assert_eq!(
             reconcile_order(
                 &ids(&["b", "missing", "a", "b"]),
                 &ids(&["c", "b", "a"]),
-                NewItemPlacement::Front,
             ),
-            ids(&["c", "b", "a"]),
+            ids(&["b", "a", "c"]),
         );
     }
 
@@ -265,7 +239,6 @@ mod tests {
             reconcile_order(
                 &ids(&["existing-b", "existing-a"]),
                 &ids(&["existing-a", "existing-b", "new-1", "new-2"]),
-                NewItemPlacement::Back,
             ),
             ids(&["existing-b", "existing-a", "new-1", "new-2"]),
         );
@@ -276,7 +249,6 @@ mod tests {
         let moved = move_in_order(
             &ids(&["existing-a", "existing-b"]),
             &ids(&["existing-a", "existing-b", "new"]),
-            NewItemPlacement::Back,
             "existing-a",
             Some("existing-b"),
             Placement::After,
@@ -292,7 +264,6 @@ mod tests {
         let before = move_in_order(
             &[],
             &defaults,
-            NewItemPlacement::Front,
             "d",
             Some("b"),
             Placement::Before,
@@ -302,7 +273,6 @@ mod tests {
         let after = move_in_order(
             &before,
             &defaults,
-            NewItemPlacement::Front,
             "a",
             Some("c"),
             Placement::After,
@@ -317,7 +287,6 @@ mod tests {
         let end = move_in_order(
             &ids(&["a", "b"]),
             &defaults,
-            NewItemPlacement::Front,
             "new",
             None,
             Placement::After,
@@ -327,7 +296,6 @@ mod tests {
         let start = move_in_order(
             &end,
             &defaults,
-            NewItemPlacement::Front,
             "b",
             None,
             Placement::Before,
@@ -342,7 +310,6 @@ mod tests {
         assert!(move_in_order(
             &[],
             &defaults,
-            NewItemPlacement::Front,
             "missing",
             Some("a"),
             Placement::Before,
@@ -351,7 +318,6 @@ mod tests {
         assert!(move_in_order(
             &[],
             &defaults,
-            NewItemPlacement::Front,
             "a",
             Some("missing"),
             Placement::Before,
