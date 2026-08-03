@@ -583,7 +583,11 @@ pub fn save_profile_core(
     if !is_new {
         profile::ensure_stopped(&stored.meta.id).map_err(|e| e.to_string())?;
     }
-    profile::save_raw(&mut stored).map_err(|e| e.to_string())?;
+    if is_new {
+        profile::save_new_unique(&mut stored).map_err(|e| e.to_string())?;
+    } else {
+        profile::save_raw(&mut stored).map_err(|e| e.to_string())?;
+    }
     if is_new && !stored.meta.temporary {
         let order_result = (|| -> Result<(), String> {
             let current_profile_ids = profile::list_all()
@@ -711,6 +715,57 @@ fn host_platform() -> String {
     "Windows".to_string()
 }
 
+fn normalize_fingerprint_platform(platform: &str) -> String {
+    match platform.trim().to_lowercase().as_str() {
+        "windows" | "win" => "Windows".into(),
+        "linux" => "Linux".into(),
+        "mac" | "macos" | "osx" | "darwin" => "macOS".into(),
+        other => other.to_string(),
+    }
+}
+
+/// Choose among the least-used templates for a platform. This is deliberately
+/// a recommendation: a template explicitly selected by the user is never
+/// replaced during save.
+pub(crate) fn recommended_fingerprint_for(platform: Option<&str>) -> Result<String, String> {
+    let want = platform
+        .map(normalize_fingerprint_platform)
+        .unwrap_or_else(host_platform);
+    let all = fingerprints::list_all().map_err(|error| error.to_string())?;
+    if all.is_empty() {
+        return Err("fingerprint library is empty".into());
+    }
+
+    let matching = all
+        .iter()
+        .filter(|entry| entry.platform.eq_ignore_ascii_case(&want))
+        .collect::<Vec<_>>();
+    let pool = if matching.is_empty() {
+        all.iter().collect::<Vec<_>>()
+    } else {
+        matching
+    };
+    let usage = profile::gpu_preset_usage_counts().map_err(|error| error.to_string())?;
+    let minimum = pool
+        .iter()
+        .map(|entry| usage.get(&entry.id).copied().unwrap_or(0))
+        .min()
+        .unwrap_or(0);
+    let least_used = pool
+        .into_iter()
+        .filter(|entry| usage.get(&entry.id).copied().unwrap_or(0) == minimum)
+        .collect::<Vec<_>>();
+    let random = uuid::Uuid::new_v4();
+    let pick = u64::from_le_bytes(random.as_bytes()[0..8].try_into().unwrap()) as usize
+        % least_used.len();
+    Ok(least_used[pick].id.clone())
+}
+
+#[tauri::command]
+fn fingerprint_recommend(platform: String) -> Result<String, String> {
+    recommended_fingerprint_for(Some(&platform))
+}
+
 #[tauri::command]
 fn profile_create_from_template(
     window: tauri::WebviewWindow,
@@ -765,7 +820,8 @@ pub fn create_from_fingerprint_core(
     window: Option<&tauri::WebviewWindow>,
     template_id: &str,
 ) -> Result<profile::ProfileMeta, String> {
-    let merged = merge_library_fingerprint(template_id)?;
+    let mut merged = merge_library_fingerprint(template_id)?;
+    apply_default_noise(&mut merged);
     save_profile_core(window, Value::Object(merged), true)
 }
 
@@ -776,28 +832,35 @@ pub fn build_fingerprint_config(
 ) -> Result<serde_json::Map<String, Value>, String> {
     let mut merged = merge_library_fingerprint(template_id)?;
     enrich_new_config(window, &mut merged);
-    ensure_default_noise(&mut merged);
+    apply_default_noise(&mut merged);
     Ok(merged)
 }
 
-/// Add the UI's default noise block (every vector present, disabled, seed 0 —
-/// the sentinel `save_raw` fills per-profile) when a config carries none, so
-/// API/SDK profiles match UI profiles and get a unique seed instead of none.
-pub fn ensure_default_noise(cfg: &mut serde_json::Map<String, Value>) {
-    if cfg.contains_key("noise") {
-        return;
-    }
+/// Replace the noise block with the policy used for every fresh identity.
+/// Canvas, WebGL, and ClientRects use stable per-profile noise; media, sensor,
+/// and font vectors remain real by default.
+pub(crate) fn apply_default_noise(cfg: &mut serde_json::Map<String, Value>) {
     cfg.insert(
         "noise".into(),
         serde_json::json!({
-            "canvas":       { "enabled": false, "seed": 0 },
-            "webgl":        { "enabled": false, "seed": 0, "intensity": 0 },
+            "canvas":       { "enabled": true,  "seed": 0 },
+            "webgl":        { "enabled": true,  "seed": 0, "intensity": 0.0005 },
             "audio":        { "enabled": false, "seed": 0 },
-            "client_rects": { "enabled": false, "seed": 0, "max_offset": 0 },
+            "client_rects": { "enabled": true,  "seed": 0, "max_offset": 1 },
             "sensors":      { "enabled": false, "seed": 0 },
             "fonts":        { "enabled": false, "seed": 0 }
         }),
     );
+}
+
+/// Add the new-identity noise policy only when the caller supplied no noise
+/// block. Explicit settings on imports, API requests, and existing profiles
+/// continue to round-trip unchanged.
+pub fn ensure_default_noise(cfg: &mut serde_json::Map<String, Value>) {
+    if cfg.contains_key("noise") {
+        return;
+    }
+    apply_default_noise(cfg);
 }
 
 #[derive(serde::Serialize)]
@@ -1325,6 +1388,7 @@ pub fn run() {
             folder_rename,
             folder_delete,
             host_platform,
+            fingerprint_recommend,
             profile_create_from_template,
             enrich_picks_for_preset,
             fingerprint_list,

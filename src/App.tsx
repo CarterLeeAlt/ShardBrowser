@@ -608,10 +608,10 @@ const defaultForm = (): ProfileForm => ({
   webrtc: "block",
   do_not_track: false,
 
-  noise_canvas: "real",
-  noise_webgl: "real",
+  noise_canvas: "auto",
+  noise_webgl: "auto",
   noise_audio: "real",
-  noise_client_rects: "real",
+  noise_client_rects: "auto",
   noise_sensors: "real",
   noise_fonts: "real",
   blocked_ports: DEFAULT_BLOCKED_PORTS.slice(),
@@ -633,7 +633,8 @@ function fromStored(stored: any): ProfileForm {
   f.proxy_id = stored?._meta?.proxy_id ?? null;
   f.name = stored?.name ?? "";
   f.notes = stored?.notes ?? "";
-  // Empty for legacy profiles; snapped by useEffect.
+  // Empty only when a legacy profile cannot be matched; existing identities
+  // are never auto-replaced merely because the library link is unavailable.
   f.gpu_preset_id = stored?._meta?.gpu_preset_id ?? "";
   f.user_agent = stored?.navigator?.user_agent ?? f.user_agent;
   f.hardware_concurrency = stored?.navigator?.hardware_concurrency ?? 8;
@@ -732,18 +733,28 @@ function toStored(f: ProfileForm, lib: FingerprintEntry | null, existing: any | 
       ? { mode: "manual", latitude: f.geo_lat, longitude: f.geo_lng, accuracy: f.geo_accuracy }
       : { mode: "auto" };
 
-  // seed: 0 is the "derive automatically" sentinel — the launcher fills each
-  // vector with a stable per-profile seed once the real profile id exists
-  // (see fill_noise_seeds in profile.rs).  Computing seeds here is impossible
-  // for new profiles (no id yet) and previously collapsed every new profile
-  // onto one shared seed, giving them all an identical fingerprint.
+  // seed: 0 is the "derive automatically" sentinel for new profiles. Existing
+  // profiles retain every seed and active tuning value so an ordinary edit
+  // cannot silently change their browser fingerprint.
+  const priorNoise = existing?.noise ?? {};
+  const noiseSeed = (slot: string): number => {
+    if (!f.id) return 0;
+    const seed = priorNoise?.[slot]?.seed;
+    return typeof seed === "number" && Number.isInteger(seed) && seed > 0 ? seed : 0;
+  };
+  const activeNumber = (slot: string, key: string, fallback: number): number => {
+    const value = priorNoise?.[slot]?.[key];
+    return f.id && priorNoise?.[slot]?.enabled === true && typeof value === "number"
+      ? value
+      : fallback;
+  };
   base.noise = {
-    canvas:       { enabled: f.noise_canvas === "auto",       seed: 0 },
-    webgl:        { enabled: f.noise_webgl === "auto",        seed: 0, intensity: f.noise_webgl === "auto" ? WEBGL_NOISE_INTENSITY : 0 },
-    audio:        { enabled: f.noise_audio === "auto",        seed: 0 },
-    client_rects: { enabled: f.noise_client_rects === "auto", seed: 0, max_offset: f.noise_client_rects === "auto" ? CLIENT_RECTS_MAX_OFFSET : 0 },
-    sensors:      { enabled: f.noise_sensors === "auto",      seed: 0 },
-    fonts:        { enabled: f.noise_fonts === "auto",        seed: 0 },
+    canvas:       { enabled: f.noise_canvas === "auto",       seed: noiseSeed("canvas") },
+    webgl:        { enabled: f.noise_webgl === "auto",        seed: noiseSeed("webgl"), intensity: f.noise_webgl === "auto" ? activeNumber("webgl", "intensity", WEBGL_NOISE_INTENSITY) : 0 },
+    audio:        { enabled: f.noise_audio === "auto",        seed: noiseSeed("audio") },
+    client_rects: { enabled: f.noise_client_rects === "auto", seed: noiseSeed("client_rects"), max_offset: f.noise_client_rects === "auto" ? activeNumber("client_rects", "max_offset", CLIENT_RECTS_MAX_OFFSET) : 0 },
+    sensors:      { enabled: f.noise_sensors === "auto",      seed: noiseSeed("sensors") },
+    fonts:        { enabled: f.noise_fonts === "auto",        seed: noiseSeed("fonts") },
   };
   base.blocked_ports = [...f.blocked_ports].sort((a, b) => a - b);
 
@@ -2499,6 +2510,7 @@ function InlineEditor({
   const draftRef = useRef(f);
   draftRef.current = f;
   const gpuPickRequest = useRef(0);
+  const gpuRecommendationRequest = useRef(0);
   const [hardwareSource, setHardwareSource] = useState<{
     presetId: string;
     configs: HardwareConfig[];
@@ -2515,7 +2527,8 @@ function InlineEditor({
   );
 
   /// Pick GPU = full fingerprint snap; toStored carries lib.payload at save.
-  const setGpu = async (id: string) => {
+  const setGpu = async (id: string, fromRecommendation = false) => {
+    if (!fromRecommendation) gpuRecommendationRequest.current += 1;
     const fp = fingerprints.find((x) => x.id === id);
     if (!fp) return;
     const nav = fp.payload?.navigator ?? {};
@@ -2550,6 +2563,32 @@ function InlineEditor({
     });
   };
 
+  const setRecommendedGpu = async (os: OsPlatform, replaceCurrent: boolean) => {
+    const request = ++gpuRecommendationRequest.current;
+    const pool = fingerprints.filter((fp) => fp.platform === os);
+    const fallbackPool = pool.length > 0 ? pool : fingerprints;
+    try {
+      const id = await invoke<string>("fingerprint_recommend", { platform: os });
+      if (request !== gpuRecommendationRequest.current) return;
+      const currentId = draftRef.current.gpu_preset_id;
+      const currentExists = fingerprints.some((fp) => fp.id === currentId);
+      if (!replaceCurrent && currentExists) return;
+      if (fingerprints.some((fp) => fp.id === id)) {
+        await setGpu(id, true);
+        return;
+      }
+      console.warn(`recommended fingerprint is not in the loaded library: ${id}`);
+    } catch (e) {
+      if (request !== gpuRecommendationRequest.current) return;
+      console.warn("fingerprint recommendation failed:", e);
+    }
+
+    const fallback = fallbackPool[Math.floor(Math.random() * fallbackPool.length)];
+    if (fallback && request === gpuRecommendationRequest.current) {
+      await setGpu(fallback.id, true);
+    }
+  };
+
   // Existing profiles did not pass through setGpu in this editor session.
   // Load the same backend-owned combinations without changing their values.
   useEffect(() => {
@@ -2568,24 +2607,22 @@ function InlineEditor({
     return () => { disposed = true; };
   }, [f.gpu_preset_id, hardwareSource?.presetId]);
 
-  // Snap unknown / empty gpu_preset_id to a random GPU of the active OS.
+  // Pick an unused or least-used template only for a fresh identity. An
+  // existing legacy profile with no match must keep its stored fingerprint.
   useEffect(() => {
-    if (fingerprints.length === 0) return;
+    if (fingerprints.length === 0 || f.id) return;
     const exists = fingerprints.some((g) => g.id === f.gpu_preset_id);
     if (!exists) {
-      const pool = gpusForOs.length > 0 ? gpusForOs : fingerprints;
-      const pick = pool[Math.floor(Math.random() * pool.length)];
-      if (pick) setGpu(pick.id);
+      void setRecommendedGpu(osFilter, false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fingerprints, osFilter, f.gpu_preset_id]);
 
   const pickOs = (os: OsPlatform) => {
     setOsFilter(os);
-    // Switch GPU to first of new OS if current doesn't match.
-    if (currentFp && currentFp.platform !== os) {
-      const first = fingerprints.find((g) => g.platform === os);
-      if (first) setGpu(first.id);
+    // An OS change is an automatic choice, so prefer its least-used template.
+    if (!currentFp || currentFp.platform !== os) {
+      void setRecommendedGpu(os, true);
     }
   };
 
@@ -2730,7 +2767,7 @@ function InlineEditor({
             <Pair label="Audio"         value={f.noise_audio}         on={(v) => u("noise_audio", v)} />
             <Pair label="Client rects"  value={f.noise_client_rects}  on={(v) => u("noise_client_rects", v)} />
             <Pair label="Sensors"       value={f.noise_sensors}       on={(v) => u("noise_sensors", v)} />
-            <Pair label="Fonts"         value={f.noise_fonts}         on={(v) => u("noise_fonts", v)} onText="Noise" />
+            <Pair label="Fonts"         value={f.noise_fonts}         on={(v) => u("noise_fonts", v)} />
           </div>
 
           <PortList
@@ -2853,21 +2890,19 @@ function NumField({ label, value, onChange, step }: { label: string; value: numb
 }
 
 function Pair({
-  label, value, on, blockLabel, onText,
+  label, value, on, blockLabel,
 }: {
   label: string;
   value: NoiseMode;
   on: (v: NoiseMode) => void;
   /// Allow/Block labels instead of Real/Auto (used by Ports).
   blockLabel?: boolean;
-  /// Custom "on" label (default "Auto noise"; Fonts passes "Noise").
-  onText?: string;
 }) {
   const opts: NoiseMode[] = ["real", "auto"];
   const labelFor = (o: NoiseMode) =>
     blockLabel
       ? (o === "real" ? "Allow" : "Block")
-      : (o === "real" ? "Real" : (onText ?? "Auto noise"));
+      : (o === "real" ? "Real" : "Auto noise");
   return (
     <label>
       <span className="lbl">{label}</span>

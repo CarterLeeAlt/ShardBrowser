@@ -2,7 +2,7 @@ use crate::store;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -243,6 +243,40 @@ pub fn load_raw(id: &str) -> Result<StoredProfile> {
         .with_context(|| format!("load profile {}", path.display()))
 }
 
+/// Count how many stored browser identities use each fingerprint-library
+/// template. Temporary profiles count too while they exist because they are
+/// still active identities that should not bias the next automatic pick.
+pub fn gpu_preset_usage_counts() -> Result<HashMap<String, usize>> {
+    let dir = store::profiles_dir()?;
+    let mut counts = HashMap::new();
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let path = entry.path();
+        let stored: StoredProfile = match store::load_json_with_backup(&path) {
+            Ok(stored) => stored,
+            Err(error) => {
+                eprintln!(
+                    "[launcher] skipping unreadable profile {} while counting fingerprint templates: {error}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        let preset_id = stored
+            .meta
+            .gpu_preset_id
+            .clone()
+            .or_else(|| crate::infer_gpu_preset_id(&stored.config));
+        if let Some(preset_id) = preset_id {
+            *counts.entry(preset_id).or_insert(0) += 1;
+        }
+    }
+    Ok(counts)
+}
+
 /// Deterministic non-zero 32-bit seed from the profile id + noise slot (FNV-1a).
 /// Same id + slot always yields the same seed (stable fingerprint across
 /// launches/edits); different ids yield different seeds (unique per profile).
@@ -285,9 +319,8 @@ fn fill_noise_seeds(config: &mut serde_json::Map<String, serde_json::Value>, id:
     }
 }
 
-/// Reset every noise seed back to the auto sentinel so the next `save_raw`
-/// re-derives them from a fresh id.  Used when cloning so the copy doesn't
-/// inherit the source's canvas/audio/WebGL fingerprint.
+/// Reset every noise seed back to the auto sentinel so the next identity save
+/// re-derives them from a fresh id. Used by clone and collision retry paths.
 fn clear_noise_seeds(config: &mut serde_json::Map<String, serde_json::Value>) {
     let Some(noise) = config.get_mut("noise").and_then(|n| n.as_object_mut()) else {
         return;
@@ -297,6 +330,168 @@ fn clear_noise_seeds(config: &mut serde_json::Map<String, serde_json::Value>) {
             obj.insert("seed".into(), serde_json::Value::from(0u32));
         }
     }
+}
+
+/// An explicit Real -> Auto noise change on a legacy profile may introduce an
+/// enabled block that never had a seed. Seed only that newly enabled vector;
+/// unchanged existing vectors, including legacy zero values, remain verbatim.
+fn fill_newly_enabled_noise_seeds(
+    config: &mut serde_json::Map<String, serde_json::Value>,
+    existing: &serde_json::Map<String, serde_json::Value>,
+    id: &str,
+) {
+    let existing_noise = existing.get("noise").and_then(|value| value.as_object());
+    let Some(noise) = config.get_mut("noise").and_then(|value| value.as_object_mut()) else {
+        return;
+    };
+
+    for (slot, block) in noise.iter_mut() {
+        let Some(block) = block.as_object_mut() else {
+            continue;
+        };
+        let enabled = block
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let was_enabled = existing_noise
+            .and_then(|noise| noise.get(slot))
+            .and_then(|value| value.get("enabled"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let needs_seed = block
+            .get("seed")
+            .and_then(|value| value.as_u64())
+            .map(|seed| seed == 0)
+            .unwrap_or(true);
+        if enabled && !was_enabled && needs_seed {
+            block.insert(
+                "seed".into(),
+                serde_json::Value::from(derive_noise_seed(id, slot)),
+            );
+        }
+    }
+}
+
+/// Browser-effective comparison form. Names and launcher notes are not exposed
+/// to page JavaScript, and disabled noise blocks have no effect regardless of
+/// the seed or inactive tuning values stored in them.
+fn effective_fingerprint(
+    config: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    let mut normalized = config.clone();
+    normalized.remove("name");
+    normalized.remove("notes");
+
+    if let Some(noise) = normalized.get("noise").and_then(|value| value.as_object()) {
+        let enabled = noise
+            .iter()
+            .filter(|(_, block)| {
+                block
+                    .get("enabled")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+            })
+            .map(|(slot, block)| (slot.clone(), block.clone()))
+            .collect::<serde_json::Map<_, _>>();
+        if enabled.is_empty() {
+            normalized.remove("noise");
+        } else {
+            normalized.insert("noise".into(), serde_json::Value::Object(enabled));
+        }
+    }
+
+    serde_json::Value::Object(normalized)
+}
+
+fn enabled_noise_present(config: &serde_json::Map<String, serde_json::Value>) -> bool {
+    config
+        .get("noise")
+        .and_then(|value| value.as_object())
+        .map(|noise| {
+            noise.values().any(|block| {
+                block
+                    .get("enabled")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn colliding_profile_id(
+    config: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<String>> {
+    let candidate = effective_fingerprint(config);
+    let dir = store::profiles_dir()?;
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let path = entry.path();
+        let stored: StoredProfile = match store::load_json_with_backup(&path) {
+            Ok(stored) => stored,
+            Err(error) => {
+                eprintln!(
+                    "[launcher] skipping unreadable profile {} during fingerprint collision check: {error}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        if effective_fingerprint(&stored.config) == candidate {
+            return Ok(Some(stored.meta.id));
+        }
+    }
+    Ok(None)
+}
+
+/// Persist a fresh browser identity only after its effective fingerprint is
+/// distinct from every stored profile. A collision can be resolved by deriving
+/// fresh seeds when at least one noise vector is enabled; an all-real duplicate
+/// is rejected because changing the UUID would not change its fingerprint.
+pub fn save_new_unique(stored: &mut StoredProfile) -> Result<()> {
+    const MAX_ATTEMPTS: usize = 16;
+
+    if stored.meta.id.is_empty() {
+        stored.meta.id = uuid::Uuid::new_v4().to_string();
+    }
+
+    for attempt in 0..MAX_ATTEMPTS {
+        let path = path_for(&stored.meta.id)?;
+        if path.exists() {
+            if attempt + 1 == MAX_ATTEMPTS {
+                anyhow::bail!("could not allocate a unique browser profile id");
+            }
+            stored.meta.id = uuid::Uuid::new_v4().to_string();
+            clear_noise_seeds(&mut stored.config);
+            continue;
+        }
+
+        fill_noise_seeds(&mut stored.config, &stored.meta.id);
+        match colliding_profile_id(&stored.config)? {
+            None => return save_raw(stored),
+            Some(existing_id) if enabled_noise_present(&stored.config) => {
+                if attempt + 1 == MAX_ATTEMPTS {
+                    anyhow::bail!(
+                        "could not generate a unique browser fingerprint after {MAX_ATTEMPTS} attempts"
+                    );
+                }
+                eprintln!(
+                    "[launcher] fresh profile fingerprint collided with {existing_id}; deriving new noise seeds"
+                );
+                stored.meta.id = uuid::Uuid::new_v4().to_string();
+                clear_noise_seeds(&mut stored.config);
+            }
+            Some(existing_id) => {
+                anyhow::bail!(
+                    "This browser fingerprint duplicates existing profile {existing_id}. Enable Auto noise for Canvas, WebGL, or ClientRects, or choose a different device template."
+                );
+            }
+        }
+    }
+
+    anyhow::bail!("could not generate a unique browser fingerprint")
 }
 
 /// Reject user-initiated profile mutations while its browser owns the live
@@ -438,6 +633,11 @@ pub fn save_raw(stored: &mut StoredProfile) -> Result<()> {
     // keeps existing profile JSON round-trippable.
     if !is_new {
         if let Ok(existing) = load_raw(&stored.meta.id) {
+            fill_newly_enabled_noise_seeds(
+                &mut stored.config,
+                &existing.config,
+                &stored.meta.id,
+            );
             if stored.meta.proxy_id != existing.meta.proxy_id {
                 // An intentional rebind establishes a new trust boundary on
                 // the next launch; never carry the old proxy identity across.
@@ -466,10 +666,12 @@ pub fn save_raw(stored: &mut StoredProfile) -> Result<()> {
     if stored.meta.created_at.is_none() {
         stored.meta.created_at = Some(chrono_now_iso());
     }
-    // The id is now final (freshly minted for new profiles, carried through for
-    // edits) — derive per-profile noise seeds from it so each profile gets a
-    // unique-but-stable fingerprint instead of sharing the UI's placeholder.
-    fill_noise_seeds(&mut stored.config, &stored.meta.id);
+    // Only a genuinely fresh profile receives derived seeds here. Existing
+    // identities must round-trip their fingerprint verbatim during ordinary
+    // edits, runtime accounting, proxy binding, and metadata backfills.
+    if is_new {
+        fill_noise_seeds(&mut stored.config, &stored.meta.id);
+    }
     let path = path_for(&stored.meta.id)?;
     let body = serde_json::to_string_pretty(stored)?;
     store::atomic_write(&path, body.as_bytes())?;
@@ -557,11 +759,10 @@ pub fn clone_profile(id: &str) -> Result<ProfileMeta> {
     // Re-randomize CPU/RAM/platform_version so the copy doesn't collide on those axes.
     crate::randomize_platform_version(&mut src.config);
     crate::randomize_hardware(&mut src.config);
-    // Same reasoning for the fingerprint noise: drop the source's seeds so
-    // save_raw re-derives fresh ones from new_id, giving the copy its own
-    // canvas/audio/WebGL fingerprint instead of a clone of the original's.
-    clear_noise_seeds(&mut src.config);
-    save_raw(&mut src)?;
+    // A clone is a new browser identity. Keep the source untouched, but apply
+    // the current default noise policy and derive fresh seeds for the copy.
+    crate::apply_default_noise(&mut src.config);
+    save_new_unique(&mut src)?;
     Ok(ProfileMeta {
         id: src.meta.id,
         name: clone_name,
@@ -667,7 +868,11 @@ fn chrono_now_iso() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{session_location_changed, SessionNetworkIdentity};
+    use super::{
+        effective_fingerprint, fill_newly_enabled_noise_seeds, session_location_changed,
+        SessionNetworkIdentity,
+    };
+    use serde_json::json;
 
     fn identity(country_code: &str, timezone: &str) -> SessionNetworkIdentity {
         SessionNetworkIdentity {
@@ -709,5 +914,110 @@ mod tests {
 
         assert!(!session_location_changed(&known, &unknown));
         assert!(!session_location_changed(&unknown, &known));
+    }
+
+    #[test]
+    fn effective_fingerprint_ignores_launcher_text() {
+        let first = json!({
+            "name": "browser-a",
+            "notes": "first note",
+            "navigator": { "user_agent": "test-agent" }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let second = json!({
+            "name": "browser-b",
+            "notes": "second note",
+            "navigator": { "user_agent": "test-agent" }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        assert_eq!(effective_fingerprint(&first), effective_fingerprint(&second));
+    }
+
+    #[test]
+    fn effective_fingerprint_ignores_disabled_noise() {
+        let without_noise = json!({ "navigator": { "user_agent": "test-agent" } })
+            .as_object()
+            .unwrap()
+            .clone();
+        let disabled_noise = json!({
+            "navigator": { "user_agent": "test-agent" },
+            "noise": {
+                "canvas": { "enabled": false, "seed": 123 },
+                "webgl": { "enabled": false, "seed": 456, "intensity": 0.0005 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        assert_eq!(
+            effective_fingerprint(&without_noise),
+            effective_fingerprint(&disabled_noise)
+        );
+    }
+
+    #[test]
+    fn effective_fingerprint_preserves_enabled_noise_seed() {
+        let first = json!({
+            "navigator": { "user_agent": "test-agent" },
+            "noise": { "canvas": { "enabled": true, "seed": 123 } }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let second = json!({
+            "navigator": { "user_agent": "test-agent" },
+            "noise": { "canvas": { "enabled": true, "seed": 456 } }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        assert_ne!(effective_fingerprint(&first), effective_fingerprint(&second));
+    }
+
+    #[test]
+    fn newly_enabled_legacy_noise_gets_a_seed_without_reseeding_active_noise() {
+        let existing = json!({
+            "noise": {
+                "canvas": { "enabled": false, "seed": 0 },
+                "webgl": { "enabled": true, "seed": 0 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let mut incoming = json!({
+            "noise": {
+                "canvas": { "enabled": true, "seed": 0 },
+                "webgl": { "enabled": true, "seed": 0 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        fill_newly_enabled_noise_seeds(&mut incoming, &existing, "profile-id");
+
+        let noise = incoming
+            .get("noise")
+            .and_then(|value| value.as_object())
+            .unwrap();
+        let canvas_seed = noise
+            .get("canvas")
+            .and_then(|value| value.get("seed"))
+            .and_then(|value| value.as_u64());
+        let webgl_seed = noise
+            .get("webgl")
+            .and_then(|value| value.get("seed"))
+            .and_then(|value| value.as_u64());
+        assert!(canvas_seed.is_some());
+        assert_ne!(canvas_seed, Some(0));
+        assert_eq!(webgl_seed, Some(0));
     }
 }
