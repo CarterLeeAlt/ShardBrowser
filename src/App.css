@@ -1051,6 +1051,14 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   row-gap: 2px;
   height: 38px;
 }
+.browser-data-row .cell-status {
+  display: flex;
+  align-items: center;
+  height: 38px;
+}
+.browser-data-row .cell-proxy.cell-proxy-direct {
+  grid-template-rows: 1fr;
+}
 .rows-head.t-cols > .head-proxy,
 .browser-data-row.t-cols > .cell-proxy {
   width: 100%;
