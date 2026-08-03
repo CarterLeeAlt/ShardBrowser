@@ -960,6 +960,26 @@ mod bulk_import_tests {
         invalidate_proxy_tests(&request.entry.id);
         assert!(ticket.is_cancelled());
     }
+
+    #[test]
+    fn geo_provider_order_starts_at_preferred_and_wraps() {
+        assert_eq!(
+            geo_provider_order("country.is"),
+            vec![
+                "country.is",
+                "bigdatacloud.com",
+                "freeipapi.com",
+                "ipapi.is",
+                "ipwho.is",
+                "geojs.io",
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_geo_provider_uses_default_order() {
+        assert_eq!(geo_provider_order("removed.example"), GEO_PROVIDERS.to_vec());
+    }
 }
 
 // ---- UDP probe (SOCKS5 UDP_ASSOCIATE; RFC 1928 §7) ----
@@ -1107,21 +1127,106 @@ pub async fn geo_check(entry: &ProxyEntry, provider_override: Option<String>) ->
     geo_check_via(Some(entry), provider_override).await
 }
 
-/// Probe geo through `entry` if Some, else direct; provider default ip-api.com.
+const GEO_PROVIDERS: [&str; 6] = [
+    "ipwho.is",
+    "geojs.io",
+    "country.is",
+    "bigdatacloud.com",
+    "freeipapi.com",
+    "ipapi.is",
+];
+const GEO_PROVIDER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn normalize_geo_provider(provider: &str) -> &'static str {
+    GEO_PROVIDERS
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == provider)
+        .unwrap_or(GEO_PROVIDERS[0])
+}
+
+/// Return every provider once, starting at the preferred provider and wrapping
+/// around the Settings order.
+fn geo_provider_order(preferred: &str) -> Vec<&'static str> {
+    let preferred = normalize_geo_provider(preferred);
+    let start = GEO_PROVIDERS
+        .iter()
+        .position(|provider| *provider == preferred)
+        .unwrap_or(0);
+    GEO_PROVIDERS
+        .iter()
+        .cycle()
+        .skip(start)
+        .take(GEO_PROVIDERS.len())
+        .copied()
+        .collect()
+}
+
+fn geo_error_allows_fallback(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|request_error| {
+                request_error.is_timeout()
+                    || request_error.is_decode()
+                    || request_error.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS)
+            })
+    })
+}
+
+/// Probe geo through `entry` if Some, else direct. The configured provider is
+/// preferred; timeout, HTTP 429, and JSON decode failures advance to the next
+/// provider in Settings order.
 pub async fn geo_check_via(entry: Option<&ProxyEntry>, provider_override: Option<String>) -> Result<GeoInfo> {
-    let provider = provider_override
+    let requested_provider = provider_override
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| settings::load().ok().and_then(|s| s.geo_checker).unwrap_or_else(|| "ip-api.com".into()));
+        .unwrap_or_else(|| settings::load().ok().and_then(|s| s.geo_checker).unwrap_or_else(|| "ipwho.is".into()));
+    let preferred = normalize_geo_provider(&requested_provider);
+    let mut fallback_errors = Vec::new();
+
+    for provider in geo_provider_order(preferred) {
+        match geo_check_provider(entry, provider.to_string()).await {
+            Ok(info) => {
+                if provider != preferred {
+                    eprintln!(
+                        "[launcher] geo provider fallback succeeded: preferred={preferred}, actual={provider}"
+                    );
+                }
+                return Ok(info);
+            }
+            Err(error) if geo_error_allows_fallback(&error) => {
+                eprintln!(
+                    "[launcher] geo provider {provider} timed out, returned HTTP 429, or sent invalid JSON; trying next: {error}"
+                );
+                fallback_errors.push(format!("{provider}: {error}"));
+            }
+            Err(error) => {
+                return Err(error.context(format!("geo provider {provider} failed")));
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "all geo providers failed after starting with {preferred}: {}",
+        fallback_errors.join("; ")
+    )
+}
+
+async fn geo_check_provider(entry: Option<&ProxyEntry>, provider: String) -> Result<GeoInfo> {
 
     let url = match provider.as_str() {
-        "ip-api.com" => "http://ip-api.com/json/?fields=status,message,query,country,countryCode,regionName,city,isp,timezone,lat,lon",
-        "ipapi.co" => "https://ipapi.co/json/",
         "ipwho.is" => "https://ipwho.is/",
-        _ => "http://ip-api.com/json/?fields=status,message,query,country,countryCode,regionName,city,isp,timezone,lat,lon",
+        "geojs.io" => "https://get.geojs.io/v1/ip/geo.json",
+        "country.is" => "https://api.country.is/?fields=city,subdivision,location,asn",
+        "bigdatacloud.com" => "https://api.bigdatacloud.net/data/reverse-geocode-client?localityLanguage=en",
+        "freeipapi.com" => "https://free.freeipapi.com/api/json",
+        "ipapi.is" => "https://api.ipapi.is/",
+        _ => unreachable!("provider is normalized above"),
     };
 
     let mut builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8));
+        .user_agent(concat!("ShardX Launcher/", env!("CARGO_PKG_VERSION")))
+        .timeout(GEO_PROVIDER_TIMEOUT);
     if let Some(entry) = entry {
         let scheme = match entry.kind {
             ProxyKind::Socks5 => "socks5h", // DNS via proxy
@@ -1143,68 +1248,178 @@ pub async fn geo_check_via(entry: Option<&ProxyEntry>, provider_override: Option
     }
     let client = builder.build()?;
 
-    let body: serde_json::Value = client.get(url).send().await?.json().await?;
+    let body: serde_json::Value = client.get(url).send().await?.error_for_status()?.json().await?;
+    let client_info: Option<serde_json::Value> = if provider == "bigdatacloud.com" {
+        Some(
+            client
+                .get("https://api.bigdatacloud.net/data/client-info")
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?,
+        )
+    } else {
+        None
+    };
 
     let s = |v: &serde_json::Value, k: &str| {
         v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
     };
     let f = |v: &serde_json::Value, k: &str| {
-        v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0)
+        v.get(k)
+            .and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse::<f64>().ok())))
+            .unwrap_or(0.0)
     };
+    let path_s = |v: &serde_json::Value, path: &[&str]| {
+        let mut current = v;
+        for key in path {
+            let Some(next) = current.get(*key) else {
+                return String::new();
+            };
+            current = next;
+        }
+        current.as_str().unwrap_or("").to_string()
+    };
+    let path_f = |v: &serde_json::Value, path: &[&str]| {
+        let mut current = v;
+        for key in path {
+            let Some(next) = current.get(*key) else {
+                return 0.0;
+            };
+            current = next;
+        }
+        current
+            .as_f64()
+            .or_else(|| current.as_str().and_then(|s| s.parse::<f64>().ok()))
+            .unwrap_or(0.0)
+    };
+
     let info = match provider.as_str() {
-        "ip-api.com" => {
-            if s(&body, "status") == "fail" {
-                anyhow::bail!("ip-api.com: {}", s(&body, "message"));
+        "ipwho.is" => {
+            if body.get("success").and_then(|v| v.as_bool()) == Some(false) {
+                anyhow::bail!("ipwho.is: {}", s(&body, "message"));
             }
             GeoInfo {
-                ip: s(&body, "query"),
+                ip: s(&body, "ip"),
                 country: s(&body, "country"),
-                country_code: s(&body, "countryCode"),
-                region: s(&body, "regionName"),
+                country_code: s(&body, "country_code"),
+                region: s(&body, "region"),
                 city: s(&body, "city"),
-                isp: s(&body, "isp"),
-                timezone: s(&body, "timezone"),
-                latitude: f(&body, "lat"),
-                longitude: f(&body, "lon"),
+                isp: path_s(&body, &["connection", "isp"]),
+                timezone: path_s(&body, &["timezone", "id"]),
+                latitude: f(&body, "latitude"),
+                longitude: f(&body, "longitude"),
                 provider,
             }
         }
-        "ipapi.co" => GeoInfo {
+        "geojs.io" => GeoInfo {
             ip: s(&body, "ip"),
-            country: s(&body, "country_name"),
+            country: s(&body, "country"),
             country_code: s(&body, "country_code"),
             region: s(&body, "region"),
             city: s(&body, "city"),
-            isp: s(&body, "org"),
+            isp: s(&body, "organization"),
             timezone: s(&body, "timezone"),
             latitude: f(&body, "latitude"),
             longitude: f(&body, "longitude"),
             provider,
         },
-        "ipwho.is" => GeoInfo {
-            ip: s(&body, "ip"),
-            country: s(&body, "country"),
-            country_code: s(&body, "country_code"),
-            region: s(&body, "region"),
-            city: s(&body, "city"),
-            isp: body.get("connection").and_then(|c| c.get("isp")).and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            timezone: body.get("timezone").and_then(|t| t.get("id")).and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            latitude: f(&body, "latitude"),
-            longitude: f(&body, "longitude"),
-            provider,
-        },
-        _ => GeoInfo {
-            ip: s(&body, "query"),
-            country: s(&body, "country"),
-            country_code: s(&body, "countryCode"),
-            region: String::new(),
-            city: String::new(),
-            isp: String::new(),
-            timezone: String::new(),
-            latitude: 0.0,
-            longitude: 0.0,
-            provider,
-        },
+        "country.is" => {
+            let country_code = s(&body, "country");
+            GeoInfo {
+                ip: s(&body, "ip"),
+                country: country_code.clone(),
+                country_code,
+                region: s(&body, "subdivision"),
+                city: s(&body, "city"),
+                isp: path_s(&body, &["asn", "organization"]),
+                timezone: path_s(&body, &["location", "time_zone"]),
+                latitude: path_f(&body, &["location", "latitude"]),
+                longitude: path_f(&body, &["location", "longitude"]),
+                provider,
+            }
+        }
+        "bigdatacloud.com" => {
+            let timezone = body
+                .pointer("/localityInfo/informative")
+                .and_then(|v| v.as_array())
+                .and_then(|items| {
+                    items.iter().find(|item| {
+                        item.get("description")
+                            .and_then(|v| v.as_str())
+                            .map(|description| {
+                                description.eq_ignore_ascii_case("time zone")
+                                    || description.eq_ignore_ascii_case("timezone")
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .and_then(|item| item.get("name").or_else(|| item.get("isoName")))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let city = {
+                let city = s(&body, "city");
+                if city.is_empty() { s(&body, "locality") } else { city }
+            };
+            GeoInfo {
+                ip: client_info.as_ref().map(|v| s(v, "ipString")).unwrap_or_default(),
+                country: s(&body, "countryName"),
+                country_code: s(&body, "countryCode"),
+                region: s(&body, "principalSubdivision"),
+                city,
+                isp: String::new(),
+                timezone,
+                latitude: f(&body, "latitude"),
+                longitude: f(&body, "longitude"),
+                provider,
+            }
+        }
+        "freeipapi.com" => {
+            // FreeIPAPI returns every timezone used by the country, not an
+            // IP-specific zone. Only expose it when the country has one zone.
+            let timezone = body
+                .get("timeZones")
+                .and_then(|v| v.as_array())
+                .filter(|zones| zones.len() == 1)
+                .and_then(|zones| zones.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            GeoInfo {
+                ip: s(&body, "ipAddress"),
+                country: s(&body, "countryName"),
+                country_code: s(&body, "countryCode"),
+                region: s(&body, "regionName"),
+                city: s(&body, "cityName"),
+                isp: s(&body, "asnOrganization"),
+                timezone,
+                latitude: f(&body, "latitude"),
+                longitude: f(&body, "longitude"),
+                provider,
+            }
+        }
+        "ipapi.is" => {
+            if let Some(error) = body.get("error").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                anyhow::bail!("ipapi.is: {error}");
+            }
+            let company = path_s(&body, &["company", "name"]);
+            let isp = if company.is_empty() { path_s(&body, &["asn", "org"]) } else { company };
+            GeoInfo {
+                ip: s(&body, "ip"),
+                country: path_s(&body, &["location", "country"]),
+                country_code: path_s(&body, &["location", "country_code"]),
+                region: path_s(&body, &["location", "state"]),
+                city: path_s(&body, &["location", "city"]),
+                isp,
+                timezone: path_s(&body, &["location", "timezone"]),
+                latitude: path_f(&body, &["location", "latitude"]),
+                longitude: path_f(&body, &["location", "longitude"]),
+                provider,
+            }
+        }
+        _ => unreachable!("provider is normalized above"),
     };
     Ok(info)
 }
@@ -1447,13 +1662,11 @@ async fn collect_test_snapshot(entry: &ProxyEntry, lane: TestLane) -> Result<Tes
             None
         }
     };
-    let geo_probe = async {
-        tokio::time::timeout(LATENCY_TEST_TIMEOUT, geo_check(entry, None))
-            .await
-            .context(LATENCY_TIMEOUT_ERROR)?
-    };
-    // A full test is one user-visible operation. Run its network checks
-    // concurrently so a non-responsive proxy is classified within five seconds.
+    // Each provider owns its timeout so a timeout can advance to the next
+    // provider instead of cancelling the entire fallback chain.
+    let geo_probe = geo_check(entry, None);
+    // A full test is one user-visible operation. Run TCP, UDP, and the complete
+    // geo fallback chain concurrently; each geo provider owns its timeout.
     let (tcp_res, udp_res, geo_res) = tokio::join!(probe(entry), udp_probe, geo_probe);
 
     // TCP failure → zero geo so snapshot reads "Failed, no IP".
