@@ -3,8 +3,17 @@
 # be added to this workflow.
 #
 # Triggers:
-#   * pushing a tag like `v1.2.3`  → release named "ShardX Launcher v1.2.3"
-#   * manual dispatch via the Actions tab (handy for ad-hoc builds)
+#   * push to main             → publish the repo's current version, then bump
+#                                the version files for the next run
+#                                (2.0.2 → release v2.0.2 → files at 2.0.3)
+#   * pushing a tag like v1.2.3 → release exactly that version
+#   * manual dispatch via the Actions tab → fill in a tag to pin it, or leave
+#     it empty to publish the repo's current version
+#
+# Version increment: patch and minor roll over at 9 (2.0.9 → 2.1.0,
+# 2.9.9 → 3.0.0); a tag that already exists is skipped to the next free one.
+# The bump commit is authored by github-actions[bot] with [skip ci], and a
+# GITHUB_TOKEN push never triggers workflows in the first place.
 #
 # Artifact attached to the Release: Windows x64 portable .exe only.
 # No Authenticode certificate is configured, so SmartScreen may warn.
@@ -13,26 +22,39 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to publish (e.g. v0.1.0). Required for manual runs.'
-        required: true
+        description: 'Tag to publish (e.g. v2.0.5). Leave empty to publish the repo version.'
+        required: false
+
+# Queue concurrent runs (back-to-back pushes) instead of cancelling: the
+# second run resolves versions after the first one published, so its tag
+# never collides.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
-  contents: write   # needed to create / attach assets to releases
+  contents: write   # needed to create / attach assets to releases and to push the version bump
 
 jobs:
   prepare:
     runs-on: windows-latest
-    name: validate release version
+    name: resolve release version
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
+      next_version: ${{ steps.version.outputs.next_version }}
     steps:
-      - name: Validate and resolve version
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
         id: version
         shell: pwsh
         env:
@@ -40,16 +62,45 @@ jobs:
           INPUT_TAG: ${{ github.event.inputs.tag }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          $tag = if ($env:EVENT_NAME -eq "workflow_dispatch") {
-            $env:INPUT_TAG
+          $ErrorActionPreference = "Stop"
+
+          # Manual dispatch with a filled-in tag and tag pushes pin the
+          # version; everything else auto-publishes the repo's version.
+          $explicit = $null
+          if ($env:EVENT_NAME -eq "workflow_dispatch") {
+            if ($env:INPUT_TAG -and $env:INPUT_TAG.Trim()) {
+              $explicit = $env:INPUT_TAG.Trim()
+            }
+          } elseif ($env:EVENT_NAME -eq "push" -and $env:REF_NAME -like "v*") {
+            $explicit = $env:REF_NAME
+          }
+
+          $base = (node -p "require('./package.json').version").Trim()
+
+          # Tags that already exist on the origin, so the resolver can skip
+          # past any of them instead of failing on a duplicate release.
+          $taken = (git ls-remote --tags origin) | ForEach-Object {
+            if ($_ -match "refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+)$") { $Matches[1] }
+          } | Select-Object -Unique
+          $taken = ($taken -join " ").Trim()
+
+          if ($explicit) {
+            $out = node scripts/next-release-version.mjs --explicit $explicit --taken "$taken"
           } else {
-            $env:REF_NAME
+            $out = node scripts/next-release-version.mjs --base $base --taken "$taken"
           }
-          if ($tag -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
-            throw "Invalid release tag '$tag'. Expected vMAJOR.MINOR.PATCH (for example, v0.1.15)."
-          }
+          $tag = (($out | Where-Object { $_ -like "tag=*" }) -replace "^tag=", "").Trim()
+          $version = (($out | Where-Object { $_ -like "version=*" }) -replace "^version=", "").Trim()
+
+          # Version the next run should start from; written back after the
+          # release succeeds.
+          $next = (node scripts/next-release-version.mjs --base $version --next |
+            Where-Object { $_ -like "version=*" }) -replace "^version=", ""
+          $next = "$next".Trim()
+
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "version=$($tag.Substring(1))" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "next_version=$next" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
   build:
     needs: prepare
@@ -128,6 +179,11 @@ jobs:
     runs-on: windows-latest
     name: publish release
     steps:
+      - name: Checkout main (for the version bump)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
       - name: Download Windows x64 artifact
         uses: actions/download-artifact@v4
         with:
@@ -142,6 +198,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: ShardX Launcher ${{ needs.prepare.outputs.tag }}
           draft: false
           prerelease: false
@@ -154,3 +211,42 @@ jobs:
 
             On first launch the launcher downloads the patched ShardX browser, Widevine CDM and a starter library of 170 device profiles from our CDN.  After that it boots straight to the workspace.
           files: dist/*
+
+      - name: Bump version files for the next run
+        continue-on-error: true   # a failed bump must not fail the release
+        shell: pwsh
+        env:
+          NEW_VERSION: ${{ needs.prepare.outputs.next_version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $old = (node -p "require('./package.json').version").Trim()
+          if ([version]$env:NEW_VERSION -le [version]$old) {
+            "Version files already at $old; publishing $env:NEW_VERSION does not move the version forward (pinned tag?). Nothing to bump."
+            exit 0
+          }
+
+          # Keep only the tail of the files we touch intact: -Raw + -NoNewline
+          # preserves whatever line endings each file already uses.
+          $jsonOld = '"version": "' + $old + '"'
+          $jsonNew = '"version": "' + $env:NEW_VERSION + '"'
+          foreach ($file in @("package.json", "src-tauri/tauri.conf.json")) {
+            $text = Get-Content $file -Raw
+            if (-not $text.Contains($jsonOld)) {
+              throw "Expected '$jsonOld' not found in $file; refusing to bump blindly."
+            }
+            [System.IO.File]::WriteAllText($file, $text.Replace($jsonOld, $jsonNew), [System.Text.UTF8Encoding]::new($false))
+          }
+          $tomlOld = 'version = "' + $old + '"'
+          $tomlNew = 'version = "' + $env:NEW_VERSION + '"'
+          $toml = Get-Content src-tauri/Cargo.toml -Raw
+          if (-not $toml.Contains($tomlOld)) {
+            throw "Expected '$tomlOld' not found in src-tauri/Cargo.toml; refusing to bump blindly."
+          }
+          [System.IO.File]::WriteAllText("src-tauri/Cargo.toml", $toml.Replace($tomlOld, $tomlNew), [System.Text.UTF8Encoding]::new($false))
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
+          git commit -m "ci: bump version to $env:NEW_VERSION [skip ci]"
+          git push origin HEAD:main
