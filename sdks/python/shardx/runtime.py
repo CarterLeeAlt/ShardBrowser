@@ -27,6 +27,8 @@ CHROMIUM_VERSION = "149.0.7827.103"
 # Version manifest (GitHub raw) — one tiny GET tells us every archive's current
 # etag, so we never poll R2/S3 (no per-archive HEAD). Updated archives are then
 # pulled from PUB_BASE only when their etag changed.
+# The runtime channel is upstream's: manifest and bucket are republished
+# together, keeping metadata coherent with the downloaded archives.
 MANIFEST_URL = "https://raw.githubusercontent.com/ProxyShard/ShardBrowser/main/runtime.json"
 
 # Default cache: ~/Library/Application Support/shardx-sdk (mac),
