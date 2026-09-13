@@ -17,6 +17,8 @@ pub const PUB_BASE: &str = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev"
 pub const CHROMIUM_VERSION: &str = "149.0.7827.103";
 /// Version manifest (GitHub raw) — one tiny GET yields every archive's current
 /// etag, so we never poll R2/S3 (no per-archive HEAD).
+/// The runtime channel is upstream's: manifest and bucket are republished
+/// together, keeping metadata coherent with the downloaded archives.
 pub const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/ProxyShard/ShardBrowser/main/runtime.json";
 

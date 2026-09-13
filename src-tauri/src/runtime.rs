@@ -11,6 +11,12 @@ use tokio::io::AsyncWriteExt;
 const PUB_BASE: &str = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev";
 /// Version manifest (GitHub raw) — one tiny GET yields every archive's current
 /// etag, so install/status checks never poll R2/S3 per-archive.
+/// The runtime distribution channel is upstream's: the manifest and the R2
+/// bucket are republished together upstream, so following the upstream
+/// manifest keeps version/grease/etags coherent with the archives actually
+/// downloaded — zero fork-side maintenance per upstream roll. Update checks
+/// additionally compare etags against the bucket itself (`fetch_remote_etag`),
+/// so even a manifest that lags the bucket cannot loop updates.
 const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/ProxyShard/ShardBrowser/main/runtime.json";
 const BUNDLED_MANIFEST_JSON: &str = include_str!("../../runtime.json");
@@ -185,10 +191,13 @@ pub struct RuntimeUpdateStatus {
     pub chromium_installed_version: Option<String>,
     pub chromium_latest_version: Option<String>,
     pub chromium_update_available: bool,
+    pub chromium_download_url: Option<String>,
     pub fingerprints_installed: bool,
     pub fingerprints_update_available: bool,
+    pub fingerprints_download_url: Option<String>,
     pub widevine_installed: bool,
     pub widevine_update_available: bool,
+    pub widevine_download_url: Option<String>,
 }
 
 fn fingerprints_are_installed(local: &Manifest) -> bool {
@@ -247,6 +256,27 @@ struct RemoteManifest {
 
 fn bundled_manifest() -> RemoteManifest {
     serde_json::from_str(BUNDLED_MANIFEST_JSON).unwrap_or_default()
+}
+
+/// Current etag of an archive straight from the download bucket. The bucket
+/// can be republished without the manifest changing, so its own answer is the
+/// authoritative "is what I have current?" signal; manifest etags are only a
+/// fallback for when the bucket is unreachable.
+async fn fetch_remote_etag(key: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(4))
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .ok()?;
+    let resp = client.head(format!("{PUB_BASE}/{key}")).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.headers()
+        .get("etag")?
+        .to_str()
+        .ok()
+        .map(|s| s.trim_matches('"').to_string())
 }
 
 /// Fetch the single remote manifest used for every manually requested update
@@ -436,15 +466,20 @@ pub async fn runtime_check_updates() -> Result<RuntimeUpdateStatus, String> {
             .chromium_version
             .as_deref()
             .is_some_and(|candidate| version_is_newer(candidate, installed_version.as_deref()));
+    // Compare against the bucket's live etag, not the manifest's recorded one:
+    // after an update the stored etag comes from the download response, so it
+    // can only ever match the bucket. The manifest etag is the offline fallback.
+    let fingerprints_latest = fetch_remote_etag(FINGERPRINTS_ARCHIVE_KEY)
+        .await
+        .or_else(|| manifest.archives.get(FINGERPRINTS_ARCHIVE_KEY).cloned());
+    let widevine_latest = fetch_remote_etag(&spec.widevine.key)
+        .await
+        .or_else(|| manifest.archives.get(&spec.widevine.key).cloned());
     let fingerprints_update_available = status.fingerprints_installed
-        && manifest
-            .archives
-            .get(FINGERPRINTS_ARCHIVE_KEY)
+        && fingerprints_latest
             .is_some_and(|latest| local.fingerprints_etag.as_deref() != Some(latest.as_str()));
     let widevine_update_available = status.widevine_installed
-        && manifest
-            .archives
-            .get(&spec.widevine.key)
+        && widevine_latest
             .is_some_and(|latest| local.widevine_etag.as_deref() != Some(latest.as_str()));
 
     Ok(RuntimeUpdateStatus {
@@ -452,10 +487,13 @@ pub async fn runtime_check_updates() -> Result<RuntimeUpdateStatus, String> {
         chromium_installed_version: installed_version,
         chromium_latest_version: manifest.chromium_version,
         chromium_update_available,
+        chromium_download_url: Some(format!("{PUB_BASE}/{}", spec.browser.key)),
         fingerprints_installed: status.fingerprints_installed,
         fingerprints_update_available,
+        fingerprints_download_url: Some(format!("{PUB_BASE}/{FINGERPRINTS_ARCHIVE_KEY}")),
         widevine_installed: status.widevine_installed,
         widevine_update_available,
+        widevine_download_url: Some(format!("{PUB_BASE}/{}", spec.widevine.key)),
     })
 }
 
@@ -550,11 +588,108 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
         fingerprints_etag: fp_etag,
         applied_chromium_version: Some(target_ver.clone()),
         applied_signature: Some(sig),
-        // Authoritative: we just successfully extracted exactly target_ver (the
-        // old tree was wiped first). Recording the known value beats re-reading
-        // it off disk, which is what let a leftover `<old>.manifest` keep the
-        // version "stuck" and re-download every launch.
-        installed_chromium_version: Some(target_ver),
+        // Record the engine version actually on disk after the swap: the CDN
+        // archive can be newer than the manifest revision that requested it.
+        // Fall back to the manifest value when no sidecar is present.
+        installed_chromium_version: installed_engine_version().or(Some(target_ver)),
+    })
+    .map_err(|e| e.to_string())?;
+
+    let _ = window.emit("runtime:done", ());
+    runtime_local_status()
+}
+
+/// User-triggered per-component runtime update from the update-check card.
+/// Downloads and installs only the requested component, reusing the same
+/// transactional install/rollback paths as setup and repair.
+#[tauri::command]
+pub async fn runtime_apply_updates(
+    window: Window,
+    component: String,
+) -> Result<RuntimeStatus, String> {
+    let _install_guard = runtime_install_lock().lock().await;
+    let spec = host_spec();
+    let base = runtime_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+    recover_interrupted_runtime_swap(&base).map_err(|error| error.to_string())?;
+
+    // Engine and Widevine swaps replace directories a running browser holds
+    // open; fingerprint templates are plain JSON files, so they may sync live.
+    if component != "fingerprints"
+        && !crate::process::Tracker::shared().active_profile_ids().is_empty()
+    {
+        return Err(
+            "Stop all running or starting browsers before updating the runtime".into(),
+        );
+    }
+
+    let manifest = fetch_manifest().await;
+    let local = load_manifest();
+    let mut browser_etag = local.browser_etag.clone().unwrap_or_default();
+    let mut widevine_etag = local.widevine_etag.clone();
+    let mut fingerprints_etag = local.fingerprints_etag.clone();
+
+    match component.as_str() {
+        "chromium" => {
+            let (b, w) = install_complete_runtime_transactionally(&window, &spec, &base)
+                .await
+                .map_err(|error| error.to_string())?;
+            browser_etag = b;
+            widevine_etag = Some(w);
+        }
+        "widevine" => {
+            let w = install_widevine_transactionally(&window, &spec.widevine, &base)
+                .await
+                .map_err(|error| error.to_string())?;
+            widevine_etag = Some(w);
+        }
+        "fingerprints" => {
+            let fp_remote = manifest
+                .archives
+                .get(FINGERPRINTS_ARCHIVE_KEY)
+                .map(|s| s.as_str());
+            let etag = install_fingerprints(
+                &window,
+                true,
+                local.fingerprints_etag.as_deref(),
+                fp_remote,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            fingerprints_etag = etag.or(fingerprints_etag);
+        }
+        _ => return Err(format!("Unknown runtime component: {component}")),
+    }
+
+    // Migrate profiles and the fingerprint library to the engine descriptor
+    // the manifest now describes (same signature check as setup/repair).
+    let target_ver = manifest
+        .chromium_version
+        .clone()
+        .unwrap_or_else(|| CHROMIUM_VERSION.to_string());
+    let sig = format!(
+        "{target_ver}|{}|{}",
+        manifest.grease_brand.as_deref().unwrap_or(""),
+        manifest.grease_version.as_deref().unwrap_or(""),
+    );
+    if local.applied_signature.as_deref() != Some(sig.as_str()) {
+        let n = migrate_all_to(
+            &target_ver,
+            manifest.grease_brand.as_deref(),
+            manifest.grease_version.as_deref(),
+        );
+        if n > 0 {
+            eprintln!("[runtime] migrated {n} profile/fingerprint file(s) to {sig}");
+        }
+    }
+
+    save_manifest(&Manifest {
+        browser_etag: Some(browser_etag),
+        widevine_etag,
+        fingerprints_etag,
+        applied_chromium_version: Some(target_ver.clone()),
+        applied_signature: Some(sig),
+        installed_chromium_version: installed_engine_version().or(Some(target_ver)),
     })
     .map_err(|e| e.to_string())?;
 

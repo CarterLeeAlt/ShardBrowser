@@ -1428,6 +1428,7 @@ pub fn run() {
             profile_backup_import,
             cookies_import,
             mcp_download,
+            runtime::runtime_apply_updates,
             runtime::runtime_check_updates,
             runtime::runtime_local_status,
             runtime::runtime_install,

@@ -4676,10 +4676,13 @@ type RuntimeUpdateCheck = {
   chromium_installed_version: string | null;
   chromium_latest_version: string | null;
   chromium_update_available: boolean;
+  chromium_download_url: string | null;
   fingerprints_installed: boolean;
   fingerprints_update_available: boolean;
+  fingerprints_download_url: string | null;
   widevine_installed: boolean;
   widevine_update_available: boolean;
+  widevine_download_url: string | null;
 };
 
 type RuntimeUpdateTone = "unchecked" | "current" | "available" | "missing";
@@ -4687,11 +4690,17 @@ type RuntimeUpdateTone = "unchecked" | "current" | "available" | "missing";
 function RuntimeUpdateRow({
   label,
   detail,
+  url,
   tone,
+  onUpdate,
+  updating,
 }: {
   label: string;
   detail: string;
+  url?: string | null;
   tone: RuntimeUpdateTone;
+  onUpdate?: () => void;
+  updating?: boolean;
 }) {
   const status = tone === "current"
     ? "Up to date"
@@ -4706,13 +4715,38 @@ function RuntimeUpdateRow({
         <span className="runtime-update-label">{label}</span>
         <span className="runtime-update-detail">{detail}</span>
       </div>
-      <span className={`runtime-update-state runtime-update-${tone}`}>{status}</span>
+      {url && (
+        <a
+          className="runtime-update-url"
+          href={url}
+          title={url}
+          onClick={(e) => {
+            e.preventDefault();
+            openUrl(url).catch(() => {});
+          }}
+        >
+          {url}
+        </a>
+      )}
+      <div className="runtime-update-actions">
+        {tone === "available" && onUpdate && (
+          <button
+            className="runtime-update-apply"
+            onClick={onUpdate}
+            disabled={updating}
+          >
+            {updating ? "Updating…" : "Update"}
+          </button>
+        )}
+        <span className={`runtime-update-state runtime-update-${tone}`}>{status}</span>
+      </div>
     </div>
   );
 }
 
 function RuntimeUpdateCard() {
   const [checking, setChecking] = useState(false);
+  const [updating, setUpdating] = useState<string | null>(null);
   const [result, setResult] = useState<RuntimeUpdateCheck | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -4726,6 +4760,19 @@ function RuntimeUpdateCard() {
       setError(typeof e === "string" ? e : (e?.message ?? String(e)));
     } finally {
       setChecking(false);
+    }
+  };
+
+  const applyUpdate = async (component: string) => {
+    setUpdating(component);
+    setError(null);
+    try {
+      await invoke("runtime_apply_updates", { component });
+      await check();
+    } catch (e: any) {
+      setError(typeof e === "string" ? e : (e?.message ?? String(e)));
+    } finally {
+      setUpdating(null);
     }
   };
 
@@ -4747,7 +4794,7 @@ function RuntimeUpdateCard() {
         <div className="settings-card-heading">
           <h3>Runtime update check</h3>
           <p className="muted small">
-            Checks run only when you press the button. ShardX will not download or install updates automatically.
+            Checks run only when you press the button. Updates download and install only when you click Update.
           </p>
         </div>
         <button className="btn-ghost runtime-update-check" onClick={check} disabled={checking}>
@@ -4759,27 +4806,36 @@ function RuntimeUpdateCard() {
         <RuntimeUpdateRow
           label="Chromium browser runtime"
           detail={chromiumDetail}
+          url={result?.chromium_download_url}
           tone={tone(result?.chromium_installed ?? true, result?.chromium_update_available ?? false)}
+          onUpdate={() => applyUpdate("chromium")}
+          updating={updating === "chromium"}
         />
         <RuntimeUpdateRow
           label="Fingerprint library"
           detail={result?.fingerprints_installed === false
             ? "The bundled fingerprint templates are incomplete."
             : "Bundled multi-platform fingerprint templates."}
+          url={result?.fingerprints_download_url}
           tone={tone(result?.fingerprints_installed ?? true, result?.fingerprints_update_available ?? false)}
+          onUpdate={() => applyUpdate("fingerprints")}
+          updating={updating === "fingerprints"}
         />
         <RuntimeUpdateRow
           label="Widevine CDM"
           detail={result?.widevine_installed === false
             ? "Required Widevine runtime files are incomplete."
             : "DRM component bundled with the browser runtime."}
+          url={result?.widevine_download_url}
           tone={tone(result?.widevine_installed ?? true, result?.widevine_update_available ?? false)}
+          onUpdate={() => applyUpdate("widevine")}
+          updating={updating === "widevine"}
         />
       </div>
 
       {error && <div className="runtime-update-error">{error}</div>}
       <div className="runtime-update-note">
-        ShardX Launcher itself is excluded from update checks. This card never downloads or installs files.
+        ShardX Launcher itself is excluded from update checks. Engine and Widevine updates stop running browsers first.
       </div>
     </div>
   );
@@ -4819,7 +4875,10 @@ function SettingsView() {
   });
   const [api, setApi] = useState<ApiInfo | null>(null);
   const refreshApi = () => invoke<ApiInfo>("api_info").then(setApi).catch(() => {});
-  useEffect(() => { invoke<Settings>("settings_get").then(setS); refreshApi(); }, []);
+  // Snapshot of the last loaded/saved settings; Save stays disabled until the
+  // form actually differs from it.
+  const [saved, setSaved] = useState<Settings | null>(null);
+  useEffect(() => { invoke<Settings>("settings_get").then((v) => { setS(v); setSaved(v); }); refreshApi(); }, []);
   const regenToken = async () => {
     try { setApi(await invoke<ApiInfo>("api_regenerate_token")); toast.ok("Token regenerated"); }
     catch (e) { toast.err(String(e)); }
@@ -4836,9 +4895,10 @@ function SettingsView() {
     finally { setMcpBusy(false); }
   };
   const save = async () => {
-    try { await invoke("settings_save", { value: s }); toast.ok("Settings saved"); }
+    try { await invoke("settings_save", { value: s }); setSaved(s); toast.ok("Settings saved"); }
     catch (e) { toast.err(String(e)); }
   };
+  const settingsDirty = saved !== null && JSON.stringify(s) !== JSON.stringify(saved);
   return (
     <section className="page settings-page">
       <Topbar crumbs={["System", "Settings"]} search="" onSearch={() => {}} />
@@ -4949,7 +5009,7 @@ function SettingsView() {
       </div>
 
       <div className="card-actions">
-        <button className="btn-primary" onClick={async () => { await save(); refreshApi(); }}><ShardMini /> Save settings</button>
+        <button className="btn-primary" onClick={async () => { await save(); refreshApi(); }} disabled={!settingsDirty}><ShardMini /> Save settings</button>
       </div>
     </section>
   );

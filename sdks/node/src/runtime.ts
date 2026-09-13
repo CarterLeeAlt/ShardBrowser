@@ -17,6 +17,9 @@ export const CHROMIUM_VERSION = "149.0.7827.103";
 // Version manifest (GitHub raw) — one tiny GET yields every archive's current
 // etag, so we never poll R2/S3 (no per-archive HEAD). Changed archives are then
 // pulled from PUB_BASE.
+// The runtime channel is upstream's: manifest and bucket are republished
+// together, so this keeps metadata coherent with the downloaded archives
+// without fork-side maintenance.
 export const MANIFEST_URL = "https://raw.githubusercontent.com/ProxyShard/ShardBrowser/main/runtime.json";
 
 export function defaultCacheDir(): string {
