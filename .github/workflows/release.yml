@@ -165,7 +165,10 @@ jobs:
           if (-not (Test-Path -LiteralPath $src)) {
             $src = Join-Path $rel "shardx-launcher.exe"
           }
-          Copy-Item -LiteralPath $src -Destination "staging/ShardX-Launcher-portable-${{ needs.prepare.outputs.version }}-win-x64.exe" -Verbose
+          # Fixed asset name — no version in the filename, so shortcuts and
+          # download-replace workflows survive every update. The release tag
+          # carries the version.
+          Copy-Item -LiteralPath $src -Destination "staging/ShardX-Launcher-portable-win-x64.exe" -Verbose
           Get-ChildItem staging
 
       - name: Upload to workflow artifacts (intermediate)
@@ -208,7 +211,7 @@ jobs:
           body: |
             ## Install
 
-            **Windows x64 only** — run `ShardX-Launcher-portable-${{ needs.prepare.outputs.version }}-win-x64.exe` directly. No installer is produced. All launcher state is stored in the adjacent `shardx-launcher` directory, so keep that directory with the EXE when moving or backing up the launcher. The portable build uses the Evergreen WebView2 runtime included with Windows 10/11. Because the binary is not Authenticode-signed, SmartScreen may require **More info → Run anyway**.
+            **Windows x64 only** — run `ShardX-Launcher-portable-win-x64.exe` directly. The filename is version-free on purpose: replace the old exe in place and existing shortcuts keep working (the release tag shows the version). No installer is produced. All launcher state is stored in the adjacent `shardx-launcher` directory, so keep that directory with the EXE when moving or backing up the launcher. The portable build uses the Evergreen WebView2 runtime included with Windows 10/11. Because the binary is not Authenticode-signed, SmartScreen may require **More info → Run anyway**.
 
             On first launch the launcher downloads the patched ShardX browser, Widevine CDM and a starter library of 170 device profiles from our CDN.  After that it boots straight to the workspace.
           files: dist/*
