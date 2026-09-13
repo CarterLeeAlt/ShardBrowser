@@ -1,11 +1,50 @@
 {
   "archives": {
-    "ShardX-Fingerprints.zip": "68b048725229994f0a96a6131391b7e7",
+    "ShardX-Fingerprints.zip": "e2f22d25690c2590b3e087a79e141bf2",
+    "ShardX-Linux.zip": "3116458af9948b31324980680f7f1194-25",
+    "ShardX-Mac-arm64.zip": "753ea795c8949dca00fc73047db4f3de-20",
+    "ShardX-Widevine-Linux.zip": "9b7d2697bc8ede2bd9fe72ccaaa2f15f-3",
+    "ShardX-Widevine-Mac-arm64.zip": "c54f3fb0b47c47d8f4663ddd3b1f2cf4",
     "ShardX-Widevine-Win.zip": "8852779330edb7ac2096e0d21dc3afb5",
-    "ShardX-Windows.zip": "ec9b9550570b75914a49caeacfc63a45-4"
+    "ShardX-Windows.zip": "eb861fc080cb30f6e84bee3b449abee1-24"
   },
-  "chromium_version": "149.0.7827.103",
-  "grease_brand": "Not)A;Brand",
+  "chromium_version": "152.0.7977.65",
+  "engine_build": "4",
+  "min_launcher_version": "2.0.1",
+  "min_sdk_version": "2.0.2",
+  "grease_brand": "Not?A_Brand",
   "grease_version": "24",
-  "revision": 3
+  "tls": {
+    "signature_algorithms": [
+      2308,
+      2309,
+      2310,
+      1027,
+      2052,
+      1025,
+      1283,
+      2053,
+      1281,
+      2054,
+      1537
+    ],
+    "cipher_suites": [
+      4865,
+      4866,
+      4867,
+      49195,
+      49199,
+      49196,
+      49200,
+      52393,
+      52392,
+      49171,
+      49172,
+      156,
+      157,
+      47,
+      53
+    ]
+  },
+  "revision": 7
 }

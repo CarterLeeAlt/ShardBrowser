@@ -2,6 +2,7 @@
 //! Emits `runtime:progress` and `runtime:done` events to the Tauri frontend.
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,19 +10,34 @@ use tauri::{Emitter, Window};
 use tokio::io::AsyncWriteExt;
 
 const PUB_BASE: &str = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev";
-/// Version manifest (GitHub raw) — one tiny GET yields every archive's current
-/// etag, so install/status checks never poll R2/S3 per-archive.
+/// Version manifest source coordinates — every mirror below derives from
+/// these, so re-pointing the manifest channel is a one-constant edit.
 /// The runtime distribution channel is upstream's: the manifest and the R2
 /// bucket are republished together upstream, so following the upstream
 /// manifest keeps version/grease/etags coherent with the archives actually
 /// downloaded — zero fork-side maintenance per upstream roll. Update checks
 /// additionally compare etags against the bucket itself (`fetch_remote_etag`),
 /// so even a manifest that lags the bucket cannot loop updates.
-const MANIFEST_URL: &str =
-    "https://raw.githubusercontent.com/ProxyShard/ShardBrowser/main/runtime.json";
+const MANIFEST_REPO: &str = "ProxyShard/ShardBrowser";
+const MANIFEST_BRANCH: &str = "main";
+const MANIFEST_FILE: &str = "runtime.json";
+
+/// Manifest mirrors in priority order. raw.githubusercontent.com is
+/// DNS-unreachable on some networks; the GitHub contents API and the jsDelivr
+/// GitHub mirror serve the identical file and stay reachable there (jsDelivr
+/// caches branch refs for a few hours, so it is the last resort).
+fn manifest_urls() -> [String; 3] {
+    [
+        format!("https://raw.githubusercontent.com/{MANIFEST_REPO}/{MANIFEST_BRANCH}/{MANIFEST_FILE}"),
+        format!("https://api.github.com/repos/{MANIFEST_REPO}/contents/{MANIFEST_FILE}?ref={MANIFEST_BRANCH}"),
+        format!("https://cdn.jsdelivr.net/gh/{MANIFEST_REPO}@{MANIFEST_BRANCH}/{MANIFEST_FILE}"),
+    ]
+}
 const BUNDLED_MANIFEST_JSON: &str = include_str!("../../runtime.json");
-/// Chromium version baked into the current Windows runtime bundle.
-const CHROMIUM_VERSION: &str = "149.0.7827.103";
+/// Chromium version of the Windows runtime bundle this launcher defaults to,
+/// matching the pinned upstream manifest revision (7). Used only as the
+/// fallback when no manifest — remote or bundled — carries a version.
+const CHROMIUM_VERSION: &str = "152.0.7977.65";
 const MAX_RUNTIME_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_RUNTIME_EXTRACTED_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const MAX_RUNTIME_ARCHIVE_ENTRIES: usize = 250_000;
@@ -280,18 +296,64 @@ async fn fetch_remote_etag(key: &str) -> Option<String> {
 }
 
 /// Fetch the single remote manifest used for every manually requested update
-/// comparison. Startup integrity checks never call this function.
+/// comparison. Tries each source in `MANIFEST_URLS` order and returns the
+/// first parseable manifest, so the check survives one source being
+/// unreachable. Startup integrity checks never call this function.
 async fn fetch_remote_manifest() -> Option<RemoteManifest> {
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(4))
         .timeout(std::time::Duration::from_secs(8))
+        // GitHub's API rejects header-less clients; the other sources ignore it.
+        .user_agent("ShardBrowser-Launcher")
         .build()
         .ok()?;
-    let resp = client.get(MANIFEST_URL).send().await.ok()?;
+    for url in manifest_urls() {
+        let Some(text) = fetch_manifest_text(&client, &url).await else {
+            continue;
+        };
+        if let Some(manifest) = parse_remote_manifest(&text) {
+            return Some(manifest);
+        }
+    }
+    None
+}
+
+/// GET a manifest source and unwrap the response to the raw runtime.json
+/// text. The GitHub contents API wraps the file in a JSON envelope with the
+/// body base64-encoded; raw and jsDelivr return the manifest JSON directly.
+async fn fetch_manifest_text(client: &reqwest::Client, url: &str) -> Option<String> {
+    let resp = client.get(url).send().await.ok()?;
     if !resp.status().is_success() {
         return None;
     }
-    let v: serde_json::Value = resp.json().await.ok()?;
+    let body: serde_json::Value = resp.json().await.ok()?;
+    match body.get("encoding").and_then(|e| e.as_str()) {
+        Some("base64") => decode_base64_envelope(&body),
+        _ => Some(body.to_string()),
+    }
+}
+
+/// Decode the GitHub contents API envelope's base64 `content` field (which
+/// wraps lines in newlines) into file text.
+fn decode_base64_envelope(body: &serde_json::Value) -> Option<String> {
+    let content = body.get("content")?.as_str()?;
+    let cleaned: Vec<u8> = content
+        .as_bytes()
+        .iter()
+        .copied()
+        .filter(|&b| b != b'\n')
+        .collect();
+    let bytes = base64::engine::general_purpose::STANDARD.decode(&cleaned).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+/// Parse runtime.json text into a `RemoteManifest`. Requires
+/// `chromium_version` so an unrelated JSON body (API error, HTML error page)
+/// is rejected and the next source gets tried instead.
+fn parse_remote_manifest(text: &str) -> Option<RemoteManifest> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let str_field = |k: &str| v.get(k).and_then(|s| s.as_str()).map(String::from);
+    let chromium_version = str_field("chromium_version")?;
     let archives = v
         .get("archives")
         .and_then(|a| a.as_object())
@@ -301,10 +363,9 @@ async fn fetch_remote_manifest() -> Option<RemoteManifest> {
                 .collect()
         })
         .unwrap_or_default();
-    let str_field = |k: &str| v.get(k).and_then(|s| s.as_str()).map(String::from);
     Some(RemoteManifest {
         archives,
-        chromium_version: str_field("chromium_version"),
+        chromium_version: Some(chromium_version),
         grease_brand: str_field("grease_brand"),
         grease_version: str_field("grease_version"),
     })
@@ -1050,3 +1111,63 @@ fn place_widevine(base: &Path) -> Result<()> {
 }
 
 // Launcher self-update checks are intentionally disabled.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_full_manifest() {
+        let text = r#"{
+            "archives": {"ShardX-Windows.zip": "abc-4"},
+            "chromium_version": "149.0.7827.103",
+            "grease_brand": "Not)A;Brand",
+            "grease_version": "24",
+            "revision": 3
+        }"#;
+        let m = parse_remote_manifest(text).expect("manifest should parse");
+        assert_eq!(m.chromium_version.as_deref(), Some("149.0.7827.103"));
+        assert_eq!(m.archives.get("ShardX-Windows.zip").map(String::as_str), Some("abc-4"));
+        assert_eq!(m.grease_brand.as_deref(), Some("Not)A;Brand"));
+        assert_eq!(m.grease_version.as_deref(), Some("24"));
+    }
+
+    #[test]
+    fn rejects_json_without_chromium_version() {
+        // API error bodies are valid JSON but not manifests; the fallback loop
+        // must skip them instead of treating an empty manifest as success.
+        assert!(parse_remote_manifest(r#"{"message": "Not Found"}"#).is_none());
+        assert!(parse_remote_manifest("not json at all").is_none());
+    }
+
+    #[test]
+    fn decodes_github_contents_envelope() {
+        let text = r#"{"chromium_version":"150.0.0.0","archives":{}}"#;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+        // GitHub wraps encoded content in newlines every 60 chars.
+        let wrapped = encoded
+            .as_bytes()
+            .chunks(60)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let envelope: serde_json::Value = serde_json::json!({
+            "encoding": "base64",
+            "content": format!("{wrapped}\n"),
+        });
+        assert_eq!(decode_base64_envelope(&envelope).as_deref(), Some(text));
+    }
+
+    /// Live check of the manifest fallback chain. Ignored by default so unit
+    /// tests stay offline; run with `cargo test -- --ignored` on a network
+    /// where raw.githubusercontent.com may be DNS-blocked.
+    #[tokio::test]
+    #[ignore = "requires network"]
+    async fn fetches_manifest_via_fallback_chain() {
+        let m = fetch_remote_manifest()
+            .await
+            .expect("at least one manifest source should work");
+        assert!(m.chromium_version.is_some());
+        assert!(!m.archives.is_empty());
+    }
+}
