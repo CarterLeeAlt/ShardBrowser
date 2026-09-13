@@ -6,9 +6,12 @@
 #   * push to main             → publish the repo's current version, then bump
 #                                the version files for the next run
 #                                (2.0.2 → release v2.0.2 → files at 2.0.3)
-#   * pushing a tag like v1.2.3 → release exactly that version
 #   * manual dispatch via the Actions tab → fill in a tag to pin it, or leave
 #     it empty to publish the repo's current version
+#
+# (No `tags:` filter here on purpose: together with `branches:` GitHub treats
+# it as an AND, which can never match. Pinning a version is what the dispatch
+# input is for.)
 #
 # Version increment: patch and minor roll over at 9 (2.0.9 → 2.1.0,
 # 2.9.9 → 3.0.0); a tag that already exists is skipped to the next free one.
@@ -24,8 +27,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
