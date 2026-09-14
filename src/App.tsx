@@ -4678,14 +4678,23 @@ type RuntimeUpdateCheck = {
   chromium_update_available: boolean;
   chromium_download_url: string | null;
   fingerprints_installed: boolean;
+  fingerprints_check_available: boolean;
   fingerprints_update_available: boolean;
   fingerprints_download_url: string | null;
   widevine_installed: boolean;
+  widevine_check_available: boolean;
   widevine_update_available: boolean;
   widevine_download_url: string | null;
 };
 
-type RuntimeUpdateTone = "unchecked" | "current" | "available" | "missing";
+type RuntimeUpdateCheckSnapshot = {
+  last_attempt_at: string | null;
+  last_success_at: string | null;
+  result: RuntimeUpdateCheck | null;
+  error: string | null;
+};
+
+type RuntimeUpdateTone = "unchecked" | "current" | "available" | "missing" | "unavailable";
 
 function RuntimeUpdateRow({
   label,
@@ -4708,7 +4717,9 @@ function RuntimeUpdateRow({
       ? "Update available"
       : tone === "missing"
         ? "Missing files"
-        : "Not checked";
+        : tone === "unavailable"
+          ? "Check unavailable"
+          : "Not checked";
   return (
     <div className="runtime-update-row">
       <div className="runtime-update-copy">
@@ -4747,17 +4758,40 @@ function RuntimeUpdateRow({
 function RuntimeUpdateCard() {
   const [checking, setChecking] = useState(false);
   const [updating, setUpdating] = useState<string | null>(null);
-  const [result, setResult] = useState<RuntimeUpdateCheck | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [snapshot, setSnapshot] = useState<RuntimeUpdateCheckSnapshot | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const result = snapshot?.result ?? null;
+
+  useEffect(() => {
+    let disposed = false;
+    const keepNewestSnapshot = (next: RuntimeUpdateCheckSnapshot) => {
+      if (disposed) return;
+      setSnapshot((current) => {
+        const currentAttempt = current?.last_attempt_at ?? "";
+        const nextAttempt = next.last_attempt_at ?? "";
+        return currentAttempt > nextAttempt ? current : next;
+      });
+    };
+    const unlisten = listen<RuntimeUpdateCheckSnapshot>("runtime:update-check-complete", (event) => {
+      keepNewestSnapshot(event.payload);
+    });
+    unlisten
+      .then(() => invoke<RuntimeUpdateCheckSnapshot>("runtime_update_check_status"))
+      .then(keepNewestSnapshot)
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten.then((stop) => stop());
+    };
+  }, []);
 
   const check = async () => {
     setChecking(true);
-    setResult(null);
-    setError(null);
+    setActionError(null);
     try {
-      setResult(await invoke<RuntimeUpdateCheck>("runtime_check_updates"));
+      setSnapshot(await invoke<RuntimeUpdateCheckSnapshot>("runtime_check_updates"));
     } catch (e: any) {
-      setError(typeof e === "string" ? e : (e?.message ?? String(e)));
+      setActionError(typeof e === "string" ? e : (e?.message ?? String(e)));
     } finally {
       setChecking(false);
     }
@@ -4765,20 +4799,21 @@ function RuntimeUpdateCard() {
 
   const applyUpdate = async (component: string) => {
     setUpdating(component);
-    setError(null);
+    setActionError(null);
     try {
       await invoke("runtime_apply_updates", { component });
       await check();
     } catch (e: any) {
-      setError(typeof e === "string" ? e : (e?.message ?? String(e)));
+      setActionError(typeof e === "string" ? e : (e?.message ?? String(e)));
     } finally {
       setUpdating(null);
     }
   };
 
-  const tone = (installed: boolean, available: boolean): RuntimeUpdateTone => {
+  const tone = (installed: boolean, available: boolean, checkAvailable = true): RuntimeUpdateTone => {
     if (!result) return "unchecked";
     if (!installed) return "missing";
+    if (!checkAvailable) return "unavailable";
     return available ? "available" : "current";
   };
 
@@ -4787,6 +4822,9 @@ function RuntimeUpdateCard() {
       ? `Installed ${result.chromium_installed_version ?? "unknown"} · Latest ${result.chromium_latest_version ?? "unknown"}`
       : "The local Chromium runtime is incomplete."
     : "Compare the installed browser engine with the latest runtime manifest.";
+  const lastAttempt = snapshot?.last_attempt_at ?? null;
+  const lastSuccess = snapshot?.last_success_at ?? null;
+  const checkError = snapshot?.error ?? null;
 
   return (
     <div className="card settings-card runtime-update-card">
@@ -4794,7 +4832,13 @@ function RuntimeUpdateCard() {
         <div className="settings-card-heading">
           <h3>Runtime update check</h3>
           <p className="muted small">
-            Checks run only when you press the button. Updates download and install only when you click Update.
+            Checks run automatically at startup and every hour. Updates download and install only when you click Update.
+          </p>
+          <p className="runtime-update-last-check">
+            {lastAttempt
+              ? `Last checked ${fmtTs(lastAttempt)}`
+              : "No update check has completed yet."}
+            {lastSuccess && lastSuccess !== lastAttempt ? ` Last successful result ${fmtTs(lastSuccess)}.` : ""}
           </p>
         </div>
         <button className="btn-ghost runtime-update-check" onClick={check} disabled={checking}>
@@ -4815,9 +4859,15 @@ function RuntimeUpdateCard() {
           label="Fingerprint library"
           detail={result?.fingerprints_installed === false
             ? "The bundled fingerprint templates are incomplete."
-            : "Bundled multi-platform fingerprint templates."}
+            : result?.fingerprints_check_available === false
+              ? "Unable to confirm the latest fingerprint archive."
+              : "Bundled multi-platform fingerprint templates."}
           url={result?.fingerprints_download_url}
-          tone={tone(result?.fingerprints_installed ?? true, result?.fingerprints_update_available ?? false)}
+          tone={tone(
+            result?.fingerprints_installed ?? true,
+            result?.fingerprints_update_available ?? false,
+            result?.fingerprints_check_available ?? true,
+          )}
           onUpdate={() => applyUpdate("fingerprints")}
           updating={updating === "fingerprints"}
         />
@@ -4825,15 +4875,26 @@ function RuntimeUpdateCard() {
           label="Widevine CDM"
           detail={result?.widevine_installed === false
             ? "Required Widevine runtime files are incomplete."
-            : "DRM component bundled with the browser runtime."}
+            : result?.widevine_check_available === false
+              ? "Unable to confirm the latest Widevine archive."
+              : "DRM component bundled with the browser runtime."}
           url={result?.widevine_download_url}
-          tone={tone(result?.widevine_installed ?? true, result?.widevine_update_available ?? false)}
+          tone={tone(
+            result?.widevine_installed ?? true,
+            result?.widevine_update_available ?? false,
+            result?.widevine_check_available ?? true,
+          )}
           onUpdate={() => applyUpdate("widevine")}
           updating={updating === "widevine"}
         />
       </div>
 
-      {error && <div className="runtime-update-error">{error}</div>}
+      {checkError && (
+        <div className="runtime-update-error">
+          {lastAttempt ? `Last check failed ${fmtTs(lastAttempt)}: ` : "Last check failed: "}{checkError}
+        </div>
+      )}
+      {actionError && <div className="runtime-update-error">{actionError}</div>}
       <div className="runtime-update-note">
         ShardX Launcher itself is excluded from update checks. Engine and Widevine updates stop running browsers first.
       </div>
