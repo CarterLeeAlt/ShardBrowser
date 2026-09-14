@@ -140,7 +140,8 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked --target x86_64-pc-windows-msvc
 
       - name: Build portable Tauri executable (unsigned)
-        run: npx --no-install tauri build --no-bundle --target x86_64-pc-windows-msvc -- --locked
+        shell: pwsh
+        run: .\node_modules\.bin\tauri.cmd build --no-bundle --target x86_64-pc-windows-msvc -- --locked
 
       - name: Collect Windows portable binary
         shell: pwsh
