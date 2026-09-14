@@ -13,7 +13,7 @@ import AdmZip from "adm-zip";
 import { atomicWriteFileSync, readJsonWithBackupSync } from "./fsUtil.js";
 
 export const PUB_BASE = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev";
-export const CHROMIUM_VERSION = "149.0.7827.103";
+export const CHROMIUM_VERSION = "152.0.7977.65";
 // Version manifest (GitHub raw) — one tiny GET yields every archive's current
 // etag, so we never poll R2/S3 (no per-archive HEAD). Changed archives are then
 // pulled from PUB_BASE.

@@ -40,11 +40,11 @@ pub fn parse_proxy(url: &str) -> Result<ParsedProxy> {
         "https" => ProxyScheme::Https,
         other => return Err(anyhow!("Unsupported proxy scheme: {other}")),
     };
-    let host = u.host_str().ok_or_else(|| anyhow!("proxy URL missing host"))?;
+    let host = u
+        .host_str()
+        .ok_or_else(|| anyhow!("proxy URL missing host"))?;
     let port = u.port().ok_or_else(|| anyhow!("proxy URL missing port"))?;
-    let decode = |s: &str| {
-        percent_decode(s)
-    };
+    let decode = |s: &str| percent_decode(s);
     Ok(ParsedProxy {
         scheme,
         host: host.to_string(),
@@ -120,7 +120,11 @@ pub async fn probe_udp(entry: &ParsedProxy, timeout_ms: u64) -> Result<u128> {
     .await
     .context("connect timeout")??;
 
-    let auth_method: u8 = if entry.username.is_empty() { 0x00 } else { 0x02 };
+    let auth_method: u8 = if entry.username.is_empty() {
+        0x00
+    } else {
+        0x02
+    };
     tcp.write_all(&[0x05, 0x01, auth_method]).await?;
     let mut greet = [0u8; 2];
     tcp.read_exact(&mut greet).await?;
@@ -141,7 +145,8 @@ pub async fn probe_udp(entry: &ParsedProxy, timeout_ms: u64) -> Result<u128> {
         }
     }
     // UDP_ASSOCIATE: cmd=0x03, ATYP=IPv4, addr=0.0.0.0, port=0
-    tcp.write_all(&[0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+    tcp.write_all(&[0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+        .await?;
     let mut hdr = [0u8; 4];
     tcp.read_exact(&mut hdr).await?;
     if hdr[1] != 0x00 {

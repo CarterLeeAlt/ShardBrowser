@@ -11,47 +11,106 @@ use crate::proxy::ParsedProxy;
 
 fn country_to_locale(cc: &str) -> &'static str {
     match cc.to_ascii_uppercase().as_str() {
-        "US" => "en-US", "GB" | "UK" => "en-GB", "CA" => "en-CA", "AU" => "en-AU",
-        "NZ" => "en-NZ", "IE" => "en-IE", "ZA" => "en-ZA", "IN" => "en-IN",
-        "DE" => "de-DE", "AT" => "de-AT", "CH" => "de-CH",
-        "FR" => "fr-FR", "BE" => "fr-BE",
-        "ES" => "es-ES", "MX" => "es-MX", "AR" => "es-AR", "CO" => "es-CO", "CL" => "es-CL",
-        "IT" => "it-IT", "NL" => "nl-NL", "PL" => "pl-PL",
-        "BR" => "pt-BR", "PT" => "pt-PT",
-        "RO" => "ro-RO", "RU" => "ru-RU", "BY" => "be-BY", "UA" => "uk-UA",
-        "TR" => "tr-TR", "GR" => "el-GR",
-        "CZ" => "cs-CZ", "SK" => "sk-SK", "HU" => "hu-HU",
-        "SE" => "sv-SE", "FI" => "fi-FI", "NO" => "nb-NO", "DK" => "da-DK",
-        "BG" => "bg-BG", "HR" => "hr-HR", "SI" => "sl-SI", "RS" => "sr-RS",
+        "US" => "en-US",
+        "GB" | "UK" => "en-GB",
+        "CA" => "en-CA",
+        "AU" => "en-AU",
+        "NZ" => "en-NZ",
+        "IE" => "en-IE",
+        "ZA" => "en-ZA",
+        "IN" => "en-IN",
+        "DE" => "de-DE",
+        "AT" => "de-AT",
+        "CH" => "de-CH",
+        "FR" => "fr-FR",
+        "BE" => "fr-BE",
+        "ES" => "es-ES",
+        "MX" => "es-MX",
+        "AR" => "es-AR",
+        "CO" => "es-CO",
+        "CL" => "es-CL",
+        "IT" => "it-IT",
+        "NL" => "nl-NL",
+        "PL" => "pl-PL",
+        "BR" => "pt-BR",
+        "PT" => "pt-PT",
+        "RO" => "ro-RO",
+        "RU" => "ru-RU",
+        "BY" => "be-BY",
+        "UA" => "uk-UA",
+        "TR" => "tr-TR",
+        "GR" => "el-GR",
+        "CZ" => "cs-CZ",
+        "SK" => "sk-SK",
+        "HU" => "hu-HU",
+        "SE" => "sv-SE",
+        "FI" => "fi-FI",
+        "NO" => "nb-NO",
+        "DK" => "da-DK",
+        "BG" => "bg-BG",
+        "HR" => "hr-HR",
+        "SI" => "sl-SI",
+        "RS" => "sr-RS",
         "IL" => "he-IL",
         "SA" | "AE" | "EG" => "ar-SA",
-        "ID" => "id-ID", "MY" => "ms-MY", "PH" => "fil-PH", "VN" => "vi-VN", "TH" => "th-TH",
-        "CN" => "zh-CN", "HK" => "zh-HK", "TW" => "zh-TW",
-        "JP" => "ja-JP", "KR" => "ko-KR",
+        "ID" => "id-ID",
+        "MY" => "ms-MY",
+        "PH" => "fil-PH",
+        "VN" => "vi-VN",
+        "TH" => "th-TH",
+        "CN" => "zh-CN",
+        "HK" => "zh-HK",
+        "TW" => "zh-TW",
+        "JP" => "ja-JP",
+        "KR" => "ko-KR",
         _ => "en-US",
     }
 }
 
 fn country_to_timezone(cc: &str) -> &'static str {
     match cc.to_ascii_uppercase().as_str() {
-        "US" => "America/New_York", "CA" => "America/Toronto",
+        "US" => "America/New_York",
+        "CA" => "America/Toronto",
         "GB" | "UK" => "Europe/London",
-        "DE" => "Europe/Berlin", "FR" => "Europe/Paris", "ES" => "Europe/Madrid",
-        "IT" => "Europe/Rome", "NL" => "Europe/Amsterdam", "PL" => "Europe/Warsaw",
-        "PT" => "Europe/Lisbon", "RO" => "Europe/Bucharest", "RU" => "Europe/Moscow",
-        "UA" => "Europe/Kyiv", "TR" => "Europe/Istanbul", "GR" => "Europe/Athens",
-        "CZ" => "Europe/Prague", "HU" => "Europe/Budapest",
-        "SE" => "Europe/Stockholm", "FI" => "Europe/Helsinki",
-        "NO" => "Europe/Oslo", "DK" => "Europe/Copenhagen",
-        "CH" => "Europe/Zurich", "AT" => "Europe/Vienna",
-        "BR" => "America/Sao_Paulo", "AR" => "America/Argentina/Buenos_Aires",
+        "DE" => "Europe/Berlin",
+        "FR" => "Europe/Paris",
+        "ES" => "Europe/Madrid",
+        "IT" => "Europe/Rome",
+        "NL" => "Europe/Amsterdam",
+        "PL" => "Europe/Warsaw",
+        "PT" => "Europe/Lisbon",
+        "RO" => "Europe/Bucharest",
+        "RU" => "Europe/Moscow",
+        "UA" => "Europe/Kyiv",
+        "TR" => "Europe/Istanbul",
+        "GR" => "Europe/Athens",
+        "CZ" => "Europe/Prague",
+        "HU" => "Europe/Budapest",
+        "SE" => "Europe/Stockholm",
+        "FI" => "Europe/Helsinki",
+        "NO" => "Europe/Oslo",
+        "DK" => "Europe/Copenhagen",
+        "CH" => "Europe/Zurich",
+        "AT" => "Europe/Vienna",
+        "BR" => "America/Sao_Paulo",
+        "AR" => "America/Argentina/Buenos_Aires",
         "MX" => "America/Mexico_City",
-        "AU" => "Australia/Sydney", "NZ" => "Pacific/Auckland",
-        "IN" => "Asia/Kolkata", "ID" => "Asia/Jakarta", "MY" => "Asia/Kuala_Lumpur",
-        "SG" => "Asia/Singapore", "TH" => "Asia/Bangkok", "VN" => "Asia/Ho_Chi_Minh",
-        "CN" => "Asia/Shanghai", "HK" => "Asia/Hong_Kong", "TW" => "Asia/Taipei",
-        "JP" => "Asia/Tokyo", "KR" => "Asia/Seoul",
-        "IL" => "Asia/Jerusalem", "SA" => "Asia/Riyadh", "AE" => "Asia/Dubai",
+        "AU" => "Australia/Sydney",
+        "NZ" => "Pacific/Auckland",
+        "IN" => "Asia/Kolkata",
+        "ID" => "Asia/Jakarta",
+        "MY" => "Asia/Kuala_Lumpur",
+        "SG" => "Asia/Singapore",
+        "TH" => "Asia/Bangkok",
+        "VN" => "Asia/Ho_Chi_Minh",
+        "CN" => "Asia/Shanghai",
+        "HK" => "Asia/Hong_Kong",
+        "TW" => "Asia/Taipei",
+        "JP" => "Asia/Tokyo",
+        "KR" => "Asia/Seoul",
+        "IL" => "Asia/Jerusalem",
+        "SA" => "Asia/Riyadh",
+        "AE" => "Asia/Dubai",
         _ => "UTC",
     }
 }
@@ -145,8 +204,16 @@ pub async fn resolve_auto_fields(cfg: &mut Value, proxy: Option<&ParsedProxy>) -
                 g.timezone.clone()
             };
             let loc = country_to_locale(&g.country_code).to_string();
-            let lat = if g.latitude != 0.0 { Some(g.latitude) } else { None };
-            let lng = if g.longitude != 0.0 { Some(g.longitude) } else { None };
+            let lat = if g.latitude != 0.0 {
+                Some(g.latitude)
+            } else {
+                None
+            };
+            let lng = if g.longitude != 0.0 {
+                Some(g.longitude)
+            } else {
+                None
+            };
             (tz, loc, lat, lng)
         }
         None => (
@@ -162,7 +229,11 @@ pub async fn resolve_auto_fields(cfg: &mut Value, proxy: Option<&ParsedProxy>) -
     }
 
     if want_lang {
-        let base = resolved_locale.split('-').next().unwrap_or("en").to_string();
+        let base = resolved_locale
+            .split('-')
+            .next()
+            .unwrap_or("en")
+            .to_string();
         let accept = if resolved_locale == "en-US" {
             "en-US,en;q=0.9".to_string()
         } else {

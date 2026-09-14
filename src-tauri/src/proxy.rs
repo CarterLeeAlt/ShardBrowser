@@ -1,4 +1,4 @@
-use crate::{settings, store};
+use crate::{protected_data, settings, store};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -8,11 +8,13 @@ use std::path::PathBuf;
 
 const PROXY_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const PROXY_TEST_TIMEOUT_ERROR: &str = "proxy test timed out after 5 seconds";
+const PROXY_CREDENTIALS_PURPOSE: &[u8] = b"ShardX Launcher/proxy-credentials/v1";
+pub const CREDENTIALS_REENTRY_ERROR: &str =
+    "proxy credentials are unavailable for this Windows user; re-enter and save the credentials";
 pub const TEST_CANCELLED_ERROR: &str = "proxy test cancelled because the proxy changed";
 const BULK_TEST_CONCURRENCY: usize = 5;
 const BACKGROUND_TEST_CONCURRENCY: usize = 3;
-static TEST_CONCURRENCY: std::sync::OnceLock<tokio::sync::Semaphore> =
-    std::sync::OnceLock::new();
+static TEST_CONCURRENCY: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
 static BACKGROUND_TEST_LIMIT: std::sync::OnceLock<tokio::sync::Semaphore> =
     std::sync::OnceLock::new();
 static PROXY_TEST_REVISIONS: std::sync::OnceLock<
@@ -54,12 +56,297 @@ pub struct ProxyEntry {
     pub username: String,
     #[serde(default)]
     pub password: String,
+    /// True when the disk credential blob belonged to another Windows user.
+    #[serde(default)]
+    pub credentials_unavailable: bool,
+    /// Retains an unreadable DPAPI blob so metadata-only edits never discard it.
+    #[serde(skip, default)]
+    pub(crate) protected_credentials: Option<protected_data::ProtectedBlob>,
     /// "PL", "US", …
     #[serde(default)]
     pub country: String,
     /// Free-form note.
     #[serde(default)]
     pub notes: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ProxyCredentials {
+    #[serde(default)]
+    username: String,
+    #[serde(default)]
+    password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProxyDiskEntry {
+    #[serde(default)]
+    id: String,
+    name: String,
+    kind: ProxyKind,
+    host: String,
+    port: u16,
+    /// Legacy plaintext credential fields, consumed and removed on migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    password: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credentials_protected: Option<protected_data::ProtectedBlob>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    credentials_unavailable: bool,
+    #[serde(default)]
+    country: String,
+    #[serde(default)]
+    notes: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ProxyDiskStore {
+    #[serde(default)]
+    schema_version: u8,
+    #[serde(default)]
+    proxies: Vec<ProxyDiskEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProxyMetadata {
+    pub id: String,
+    pub name: String,
+    pub kind: ProxyKind,
+    pub host: String,
+    pub port: u16,
+    pub credentials_configured: bool,
+    pub credentials_unavailable: bool,
+    pub country: String,
+    pub notes: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ProxyCredentialsUpdate {
+    /// Preserve the encrypted credential blob while changing only metadata.
+    #[default]
+    Keep,
+    /// Replace the blob with these values. Empty values intentionally mean no
+    /// proxy authentication, but the caller must make that choice explicitly.
+    Replace { username: String, password: String },
+    /// Remove proxy credentials from the disk record.
+    Clear,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProxySaveRequest {
+    #[serde(default)]
+    pub id: String,
+    pub name: String,
+    pub kind: ProxyKind,
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub country: String,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub credentials: ProxyCredentialsUpdate,
+}
+
+impl From<ProxyEntry> for ProxyMetadata {
+    fn from(entry: ProxyEntry) -> Self {
+        Self {
+            id: entry.id,
+            name: entry.name,
+            kind: entry.kind,
+            host: entry.host,
+            port: entry.port,
+            credentials_configured: !entry.username.is_empty()
+                || !entry.password.is_empty()
+                || entry.credentials_unavailable,
+            credentials_unavailable: entry.credentials_unavailable,
+            country: entry.country,
+            notes: entry.notes,
+        }
+    }
+}
+
+pub fn metadata(entry: &ProxyEntry) -> ProxyMetadata {
+    entry.clone().into()
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn credentials_blob(
+    credentials: &ProxyCredentials,
+) -> Result<Option<protected_data::ProtectedBlob>> {
+    if credentials.username.is_empty() && credentials.password.is_empty() {
+        return Ok(None);
+    }
+    let plaintext = serde_json::to_vec(credentials)?;
+    Ok(Some(protected_data::protect(
+        PROXY_CREDENTIALS_PURPOSE,
+        &plaintext,
+    )?))
+}
+
+fn entry_from_disk(disk: ProxyDiskEntry) -> Result<ProxyEntry> {
+    let protected_credentials = disk.credentials_protected.clone();
+    let (username, password, credentials_unavailable) = match disk.credentials_protected {
+        Some(value) => match protected_data::unprotect(PROXY_CREDENTIALS_PURPOSE, &value) {
+            Ok(plaintext) => {
+                let credentials: ProxyCredentials = serde_json::from_slice(&plaintext)
+                    .context("protected proxy credentials are malformed")?;
+                (credentials.username, credentials.password, false)
+            }
+            Err(protected_data::UnprotectError::Unavailable) => {
+                (String::new(), String::new(), true)
+            }
+            Err(error) => anyhow::bail!("cannot read protected proxy credentials: {error}"),
+        },
+        None => (
+            disk.username.unwrap_or_default(),
+            disk.password.unwrap_or_default(),
+            disk.credentials_unavailable,
+        ),
+    };
+    Ok(ProxyEntry {
+        id: disk.id,
+        name: disk.name,
+        kind: disk.kind,
+        host: disk.host,
+        port: disk.port,
+        username,
+        password,
+        credentials_unavailable,
+        protected_credentials,
+        country: disk.country,
+        notes: disk.notes,
+    })
+}
+
+fn disk_from_entry(
+    entry: &ProxyEntry,
+    previous: Option<&ProxyDiskEntry>,
+    preserve_existing_credentials: bool,
+) -> Result<ProxyDiskEntry> {
+    let credentials_protected = if entry.credentials_unavailable {
+        Some(
+            entry
+                .protected_credentials
+                .clone()
+                .or_else(|| previous.and_then(|disk| disk.credentials_protected.clone()))
+                .ok_or_else(|| anyhow::anyhow!(CREDENTIALS_REENTRY_ERROR))?,
+        )
+    } else if preserve_existing_credentials {
+        match entry.protected_credentials.clone() {
+            Some(credentials) => Some(credentials),
+            None => credentials_blob(&ProxyCredentials {
+                username: entry.username.clone(),
+                password: entry.password.clone(),
+            })?,
+        }
+    } else {
+        credentials_blob(&ProxyCredentials {
+            username: entry.username.clone(),
+            password: entry.password.clone(),
+        })?
+    };
+    Ok(ProxyDiskEntry {
+        id: entry.id.clone(),
+        name: entry.name.clone(),
+        kind: entry.kind.clone(),
+        host: entry.host.clone(),
+        port: entry.port,
+        username: None,
+        password: None,
+        credentials_protected,
+        credentials_unavailable: entry.credentials_unavailable,
+        country: entry.country.clone(),
+        notes: entry.notes.clone(),
+    })
+}
+
+fn disk_from_store(
+    store_data: &ProxyStore,
+    previous: Option<&ProxyDiskStore>,
+    clear_credentials_for: Option<&str>,
+) -> Result<ProxyDiskStore> {
+    Ok(ProxyDiskStore {
+        schema_version: 1,
+        proxies: store_data
+            .proxies
+            .iter()
+            .map(|entry| {
+                let prior = previous.and_then(|store| {
+                    store
+                        .proxies
+                        .iter()
+                        .find(|candidate| candidate.id == entry.id)
+                });
+                disk_from_entry(
+                    entry,
+                    prior,
+                    clear_credentials_for != Some(entry.id.as_str()),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?,
+    })
+}
+
+fn disk_has_legacy_credentials(disk: &ProxyDiskStore) -> bool {
+    disk.schema_version != 1
+        || disk
+            .proxies
+            .iter()
+            .any(|entry| entry.username.is_some() || entry.password.is_some())
+}
+
+pub fn serialize_protected_inline_entry(entry: &ProxyEntry) -> Result<serde_json::Value> {
+    serde_json::to_value(disk_from_entry(entry, None, false)?).map_err(Into::into)
+}
+
+pub fn serialize_protected_backup_entry(entry: &ProxyEntry) -> Result<Vec<u8>> {
+    serde_json::to_vec_pretty(&disk_from_entry(entry, None, false)?).map_err(Into::into)
+}
+
+pub fn deserialize_backup_entry(bytes: &[u8], version: u32) -> Result<ProxyEntry> {
+    if version == 2 {
+        let mut entry: ProxyEntry = serde_json::from_slice(bytes)?;
+        entry.credentials_unavailable = false;
+        entry.protected_credentials = None;
+        return Ok(entry);
+    }
+    entry_from_disk(serde_json::from_slice(bytes)?)
+}
+
+pub mod protected_proxy_serde {
+    use super::*;
+
+    pub fn serialize<S>(
+        entry: &Option<ProxyEntry>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        entry
+            .as_ref()
+            .map(|entry| disk_from_entry(entry, None, false))
+            .transpose()
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<Option<ProxyEntry>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Option::<ProxyDiskEntry>::deserialize(deserializer)?
+            .map(entry_from_disk)
+            .transpose()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 pub struct PreparedProxyTest {
@@ -78,8 +365,7 @@ struct ManualTestGuard {
 
 impl Drop for ManualTestGuard {
     fn drop(&mut self) {
-        let counts = MANUAL_TEST_COUNTS
-            .get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+        let counts = MANUAL_TEST_COUNTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
         let mut counts = counts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -106,8 +392,7 @@ impl TestTicket {
 }
 
 fn revision_sender(proxy_id: &str) -> tokio::sync::watch::Sender<u64> {
-    let revisions = PROXY_TEST_REVISIONS
-        .get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let revisions = PROXY_TEST_REVISIONS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let mut revisions = revisions
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -121,8 +406,7 @@ fn proxy_test_lock(proxy_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
     if proxy_id.is_empty() {
         return std::sync::Arc::new(tokio::sync::Mutex::new(()));
     }
-    let locks = PROXY_TEST_LOCKS
-        .get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let locks = PROXY_TEST_LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let mut locks = locks
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -136,8 +420,7 @@ fn begin_manual_test(proxy_id: &str) -> Option<ManualTestGuard> {
     if proxy_id.is_empty() {
         return None;
     }
-    let counts = MANUAL_TEST_COUNTS
-        .get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let counts = MANUAL_TEST_COUNTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let mut counts = counts
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -265,7 +548,10 @@ fn validate_host(host: &str) -> Result<()> {
     if host.is_empty() {
         anyhow::bail!("host is required");
     }
-    if host.chars().any(|character| character.is_whitespace() || character.is_control()) {
+    if host
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
         anyhow::bail!("host must not contain whitespace or control characters");
     }
 
@@ -295,8 +581,7 @@ fn normalize_entry(mut entry: ProxyEntry) -> Result<ProxyEntry> {
     if entry.port == 0 {
         anyhow::bail!("port must be between 1 and 65535");
     }
-    if entry.username.chars().any(char::is_control)
-        || entry.password.chars().any(char::is_control)
+    if entry.username.chars().any(char::is_control) || entry.password.chars().any(char::is_control)
     {
         anyhow::bail!("credentials must not contain control characters");
     }
@@ -304,8 +589,7 @@ fn normalize_entry(mut entry: ProxyEntry) -> Result<ProxyEntry> {
         anyhow::bail!("password requires a username");
     }
     if matches!(entry.kind, ProxyKind::Socks5)
-        && (entry.username.as_bytes().len() > u8::MAX as usize
-            || entry.password.as_bytes().len() > u8::MAX as usize)
+        && (entry.username.len() > u8::MAX as usize || entry.password.len() > u8::MAX as usize)
     {
         anyhow::bail!("SOCKS5 username and password must each be at most 255 bytes");
     }
@@ -328,6 +612,13 @@ fn normalize_entry(mut entry: ProxyEntry) -> Result<ProxyEntry> {
     Ok(entry)
 }
 
+fn credentials_available(entry: &ProxyEntry) -> Result<()> {
+    if entry.credentials_unavailable {
+        anyhow::bail!(CREDENTIALS_REENTRY_ERROR);
+    }
+    Ok(())
+}
+
 impl ProxyEntry {
     /// Build `--proxy-server=<scheme>://[user:pass@]host:port` for ShardX.
     pub fn to_proxy_server_arg(&self) -> String {
@@ -340,10 +631,10 @@ impl ProxyEntry {
         if self.username.is_empty() && self.password.is_empty() {
             format!("{scheme}://{host_port}")
         } else {
-            let user = url::form_urlencoded::byte_serialize(self.username.as_bytes())
-                .collect::<String>();
-            let pass = url::form_urlencoded::byte_serialize(self.password.as_bytes())
-                .collect::<String>();
+            let user =
+                url::form_urlencoded::byte_serialize(self.username.as_bytes()).collect::<String>();
+            let pass =
+                url::form_urlencoded::byte_serialize(self.password.as_bytes()).collect::<String>();
             format!("{scheme}://{user}:{pass}@{host_port}")
         }
     }
@@ -355,35 +646,67 @@ pub struct ProxyStore {
     pub proxies: Vec<ProxyEntry>,
 }
 
-fn load_unlocked() -> Result<ProxyStore> {
+fn load_disk_unlocked() -> Result<Option<ProxyDiskStore>> {
     let path = store::proxies_path()?;
     if !path.exists() {
-        return Ok(ProxyStore::default());
+        return Ok(None);
     }
-    store::load_json_with_backup(&path)
+    Ok(Some(store::load_json_with_backup(&path)?))
+}
+
+fn load_unlocked() -> Result<ProxyStore> {
+    let Some(disk) = load_disk_unlocked()? else {
+        return Ok(ProxyStore::default());
+    };
+    let proxies = disk
+        .proxies
+        .into_iter()
+        .map(entry_from_disk)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(ProxyStore { proxies })
 }
 
 pub fn load() -> Result<ProxyStore> {
     let _guard = PROXY_STORE_LOCK
-        .read()
+        .write()
         .map_err(|_| anyhow::anyhow!("proxy store lock poisoned"))?;
-    load_unlocked()
+    let disk = load_disk_unlocked()?;
+    let store_data = match disk.as_ref() {
+        Some(disk) => ProxyStore {
+            proxies: disk
+                .proxies
+                .clone()
+                .into_iter()
+                .map(entry_from_disk)
+                .collect::<Result<Vec<_>>>()?,
+        },
+        None => ProxyStore::default(),
+    };
+    if disk.as_ref().is_some_and(disk_has_legacy_credentials) {
+        save(&store_data)?;
+    }
+    Ok(store_data)
 }
 
 fn save(s: &ProxyStore) -> Result<()> {
-    let body = serde_json::to_string_pretty(s)?;
-    store::atomic_write(&store::proxies_path()?, body.as_bytes())?;
-    Ok(())
+    save_with_credential_policy(s, None)
+}
+
+fn save_with_credential_policy(s: &ProxyStore, clear_credentials_for: Option<&str>) -> Result<()> {
+    let previous = load_disk_unlocked()?;
+    let disk = disk_from_store(s, previous.as_ref(), clear_credentials_for)?;
+    let body = serde_json::to_vec_pretty(&disk)?;
+    store::atomic_write_sensitive(&store::proxies_path()?, &body)
 }
 
 pub fn list() -> Result<Vec<ProxyEntry>> {
     Ok(load()?.proxies)
 }
 
-fn restore_store_snapshot_unlocked(snapshot: Option<&[u8]>) -> Result<()> {
+pub fn restore_store_snapshot_unlocked(snapshot: Option<&[u8]>) -> Result<()> {
     let path = store::proxies_path()?;
     match snapshot {
-        Some(bytes) => store::atomic_write(&path, bytes)?,
+        Some(bytes) => store::atomic_write_sensitive(&path, bytes)?,
         None if path.exists() => fs::remove_file(path)?,
         None => {}
     }
@@ -391,17 +714,48 @@ fn restore_store_snapshot_unlocked(snapshot: Option<&[u8]>) -> Result<()> {
 }
 
 pub fn upsert_with_status(
-    mut entry: ProxyEntry,
+    request: ProxySaveRequest,
 ) -> Result<(ProxyEntry, bool, bool, Option<PreparedProxyTest>)> {
-    entry = normalize_entry(entry)?;
     let _resource_guard = crate::process::lock_profile_resources()?;
-    if !entry.id.is_empty() {
-        crate::profile::ensure_proxy_not_active(&entry.id)?;
+    if !request.id.is_empty() {
+        crate::profile::ensure_proxy_not_active(&request.id)?;
     }
     let _guard = PROXY_STORE_LOCK
         .write()
         .map_err(|_| anyhow::anyhow!("proxy store lock poisoned"))?;
     let mut s = load_unlocked()?;
+    let existing_index = s.proxies.iter().position(|proxy| proxy.id == request.id);
+    let existing = existing_index.and_then(|index| s.proxies.get(index));
+    let mut entry = ProxyEntry {
+        id: request.id,
+        name: request.name,
+        kind: request.kind,
+        host: request.host,
+        port: request.port,
+        username: String::new(),
+        password: String::new(),
+        credentials_unavailable: false,
+        protected_credentials: None,
+        country: request.country,
+        notes: request.notes,
+    };
+    let clear_credentials = matches!(&request.credentials, ProxyCredentialsUpdate::Clear);
+    match request.credentials {
+        ProxyCredentialsUpdate::Keep => {
+            if let Some(existing) = existing {
+                entry.username = existing.username.clone();
+                entry.password = existing.password.clone();
+                entry.credentials_unavailable = existing.credentials_unavailable;
+                entry.protected_credentials = existing.protected_credentials.clone();
+            }
+        }
+        ProxyCredentialsUpdate::Replace { username, password } => {
+            entry.username = username;
+            entry.password = password;
+        }
+        ProxyCredentialsUpdate::Clear => {}
+    }
+    entry = normalize_entry(entry)?;
     let key = duplicate_key(&entry);
     if s.proxies
         .iter()
@@ -426,7 +780,7 @@ pub fn upsert_with_status(
         s.proxies.push(entry.clone());
     }
     if changed {
-        save(&s)?;
+        save_with_credential_policy(&s, clear_credentials.then_some(entry.id.as_str()))?;
         if !created {
             // The edit is now durable. Wake and invalidate any test that was
             // prepared from the previous configuration before releasing the
@@ -447,11 +801,23 @@ fn insert_or_reuse_dedup(
 ) -> Result<(ProxyEntry, bool)> {
     entry = normalize_entry(entry)?;
     let key = duplicate_key(&entry);
-    if let Some(existing) = store_data
+    for existing in store_data
         .proxies
         .iter()
-        .find(|proxy| duplicate_key(proxy) == key)
+        .filter(|proxy| duplicate_key(proxy) == key)
     {
+        // A DPAPI blob that cannot be read in this Windows account is not
+        // equivalent to an unauthenticated proxy with an empty username. Reuse
+        // it only when the exact opaque credential record already exists.
+        if existing.credentials_unavailable || entry.credentials_unavailable {
+            if existing.credentials_unavailable
+                && entry.credentials_unavailable
+                && existing.protected_credentials == entry.protected_credentials
+            {
+                return Ok((existing.clone(), false));
+            }
+            continue;
+        }
         if existing.password != entry.password {
             anyhow::bail!(
                 "proxy already exists with the same type, host, port, and username but a different password"
@@ -459,12 +825,7 @@ fn insert_or_reuse_dedup(
         }
         return Ok((existing.clone(), false));
     }
-    if entry.id.is_empty()
-        || store_data
-            .proxies
-            .iter()
-            .any(|proxy| proxy.id == entry.id)
-    {
+    if entry.id.is_empty() || store_data.proxies.iter().any(|proxy| proxy.id == entry.id) {
         entry.id = uuid::Uuid::new_v4().to_string();
     }
     store_data.proxies.push(entry.clone());
@@ -563,17 +924,64 @@ pub fn get(id: &str) -> Result<Option<ProxyEntry>> {
     Ok(load()?.proxies.into_iter().find(|p| p.id == id))
 }
 
+pub fn resolve_for_use(entry: ProxyEntry) -> Result<ProxyEntry> {
+    if entry.id.is_empty() {
+        credentials_available(&entry)?;
+        return Ok(entry);
+    }
+    let stored = get(&entry.id)?.unwrap_or(entry);
+    credentials_available(&stored)?;
+    Ok(stored)
+}
+
 /// SOCKS5/HTTP CONNECT probe; returns RTT in ms on success.
 pub async fn probe(entry: &ProxyEntry) -> Result<u128> {
+    credentials_available(entry)?;
     tokio::time::timeout(PROXY_TEST_TIMEOUT, probe_inner(entry))
         .await
         .context(PROXY_TEST_TIMEOUT_ERROR)?
 }
 
 async fn probe_inner(entry: &ProxyEntry) -> Result<u128> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use tokio::net::TcpStream;
     use tokio::time::Instant;
+
+    async fn probe_connect<S>(stream: &mut S, entry: &ProxyEntry) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let mut req = String::from(
+            "CONNECT example.com:443 HTTP/1.1\r\n\
+             Host: example.com:443\r\n",
+        );
+        if !entry.username.is_empty() || !entry.password.is_empty() {
+            let creds = format!("{}:{}", entry.username, entry.password);
+            let encoded = STANDARD.encode(creds.as_bytes());
+            req.push_str(&format!("Proxy-Authorization: Basic {encoded}\r\n"));
+        }
+        req.push_str("Proxy-Connection: keep-alive\r\n\r\n");
+        stream.write_all(req.as_bytes()).await?;
+
+        let mut buf = Vec::with_capacity(512);
+        let mut tmp = [0u8; 256];
+        let head: String = loop {
+            let n = stream.read(&mut tmp).await?;
+            if n == 0 {
+                break String::from_utf8_lossy(&buf).to_string();
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() > 4096 {
+                break String::from_utf8_lossy(&buf).to_string();
+            }
+        };
+        let first_line = head.lines().next().unwrap_or("");
+        if !first_line.starts_with("HTTP/1.1 200") && !first_line.starts_with("HTTP/1.0 200") {
+            anyhow::bail!("CONNECT failed: {first_line}");
+        }
+        Ok(())
+    }
 
     let started = Instant::now();
     let addr = format!("{}:{}", entry.host, entry.port);
@@ -582,7 +990,11 @@ async fn probe_inner(entry: &ProxyEntry) -> Result<u128> {
     match entry.kind {
         ProxyKind::Socks5 => {
             // RFC 1928 §3 greeting
-            let auth_method: u8 = if entry.username.is_empty() { 0x00 } else { 0x02 };
+            let auth_method: u8 = if entry.username.is_empty() {
+                0x00
+            } else {
+                0x02
+            };
             stream.write_all(&[0x05, 0x01, auth_method]).await?;
             let mut resp = [0u8; 2];
             stream.read_exact(&mut resp).await?;
@@ -607,36 +1019,25 @@ async fn probe_inner(entry: &ProxyEntry) -> Result<u128> {
                 }
             }
         }
-        ProxyKind::Http | ProxyKind::Https => {
-            // CONNECT with Basic auth; read until CRLFCRLF to avoid clipping headers.
-            use base64::{engine::general_purpose::STANDARD, Engine as _};
-            let mut req = String::from(
-                "CONNECT example.com:443 HTTP/1.1\r\n\
-                 Host: example.com:443\r\n",
-            );
-            if !entry.username.is_empty() || !entry.password.is_empty() {
-                let creds = format!("{}:{}", entry.username, entry.password);
-                let encoded = STANDARD.encode(creds.as_bytes());
-                req.push_str(&format!("Proxy-Authorization: Basic {encoded}\r\n"));
-            }
-            req.push_str("Proxy-Connection: keep-alive\r\n\r\n");
-            stream.write_all(req.as_bytes()).await?;
+        ProxyKind::Http => probe_connect(&mut stream, entry).await?,
+        ProxyKind::Https => {
+            use rustls::pki_types::ServerName;
+            use std::sync::Arc;
+            use tokio_rustls::TlsConnector;
 
-            // Read until CRLFCRLF or 4 KB cap.
-            let mut buf = Vec::with_capacity(512);
-            let mut tmp = [0u8; 256];
-            let head: String = loop {
-                let n = stream.read(&mut tmp).await?;
-                if n == 0 { break String::from_utf8_lossy(&buf).to_string(); }
-                buf.extend_from_slice(&tmp[..n]);
-                if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() > 4096 {
-                    break String::from_utf8_lossy(&buf).to_string();
-                }
-            };
-            let first_line = head.lines().next().unwrap_or("");
-            if !first_line.starts_with("HTTP/1.1 200") && !first_line.starts_with("HTTP/1.0 200") {
-                anyhow::bail!("CONNECT failed: {first_line}");
-            }
+            let mut roots = rustls::RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            let config = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            let server_name = ServerName::try_from(entry.host.clone())
+                .map_err(|_| anyhow::anyhow!("HTTPS proxy host is not a valid TLS server name"))?;
+            let connector = TlsConnector::from(Arc::new(config));
+            let mut tls = connector
+                .connect(server_name, stream)
+                .await
+                .context("TLS handshake with HTTPS proxy failed")?;
+            probe_connect(&mut tls, entry).await?;
         }
     }
     Ok(started.elapsed().as_millis())
@@ -806,6 +1207,8 @@ fn parse_one_checked(line: &str, default_kind: &ProxyKind) -> Result<ProxyEntry>
         port,
         username: user,
         password: pass,
+        credentials_unavailable: false,
+        protected_credentials: None,
         country,
         notes,
     })
@@ -865,13 +1268,151 @@ mod bulk_import_tests {
             port,
             username: username.to_string(),
             password: String::new(),
+            credentials_unavailable: false,
+            protected_credentials: None,
             country: String::new(),
             notes: String::new(),
         }
     }
 
     #[test]
-    fn validation_rejects_invalid_endpoints() {
+    fn legacy_credentials_migrate_to_a_protected_disk_entry() {
+        let legacy = ProxyDiskEntry {
+            id: "proxy-1".into(),
+            name: "proxy".into(),
+            kind: ProxyKind::Socks5,
+            host: "proxy.example".into(),
+            port: 1080,
+            username: Some("user".into()),
+            password: Some("secret".into()),
+            credentials_protected: None,
+            credentials_unavailable: false,
+            country: "US".into(),
+            notes: "note".into(),
+        };
+        let entry = entry_from_disk(legacy).unwrap();
+        let disk = disk_from_entry(&entry, None, false).unwrap();
+        let json = serde_json::to_string(&disk).unwrap();
+
+        assert!(!json.contains("secret"));
+        assert!(!json.contains("\"username\""));
+        assert!(disk.credentials_protected.is_some());
+    }
+
+    #[test]
+    fn credential_write_policy_preserves_replaces_and_clears_blobs() {
+        let existing = ProxyDiskEntry {
+            id: "proxy-1".into(),
+            name: "proxy".into(),
+            kind: ProxyKind::Http,
+            host: "proxy.example".into(),
+            port: 8080,
+            username: None,
+            password: None,
+            credentials_protected: Some(protected_data::ProtectedBlob {
+                version: 2,
+                scheme: "windows-dpapi-current-user".into(),
+                blob: "existing-ciphertext".into(),
+                sha256: Some("a".repeat(64)),
+            }),
+            credentials_unavailable: false,
+            country: "US".into(),
+            notes: "old".into(),
+        };
+        let mut current = entry(ProxyKind::Http, "proxy.example", 8080, "user");
+        current.id = "proxy-1".into();
+        current.password = "secret".into();
+        current.protected_credentials = existing.credentials_protected.clone();
+
+        let kept = disk_from_entry(&current, Some(&existing), true).unwrap();
+        assert_eq!(kept.credentials_protected, existing.credentials_protected);
+
+        current.username = "new-user".into();
+        current.password = "new-secret".into();
+        current.protected_credentials = None;
+        let replaced = disk_from_entry(&current, Some(&existing), false).unwrap();
+        assert_ne!(
+            replaced.credentials_protected,
+            existing.credentials_protected
+        );
+        assert!(replaced.credentials_protected.is_some());
+
+        current.username.clear();
+        current.password.clear();
+        let cleared = disk_from_entry(&current, Some(&existing), false).unwrap();
+        assert!(cleared.credentials_protected.is_none());
+    }
+
+    #[test]
+    fn metadata_only_edit_preserves_unavailable_credentials() {
+        let protected = protected_data::ProtectedBlob {
+            version: 2,
+            scheme: "windows-dpapi-current-user".into(),
+            blob: "unavailable-ciphertext".into(),
+            sha256: Some("b".repeat(64)),
+        };
+        let entry = ProxyEntry {
+            id: "proxy-1".into(),
+            name: "renamed".into(),
+            kind: ProxyKind::Https,
+            host: "proxy.example".into(),
+            port: 443,
+            username: String::new(),
+            password: String::new(),
+            credentials_unavailable: true,
+            protected_credentials: Some(protected.clone()),
+            country: "US".into(),
+            notes: "metadata only".into(),
+        };
+
+        let disk = disk_from_entry(&entry, None, true).unwrap();
+        assert_eq!(disk.credentials_protected, Some(protected));
+        assert!(disk.credentials_unavailable);
+    }
+
+    #[test]
+    fn inline_proxy_serializer_omits_plaintext_credentials() {
+        let mut inline = entry(ProxyKind::Socks5, "proxy.example", 1080, "user");
+        inline.password = "secret".into();
+        let value = serialize_protected_inline_entry(&inline).unwrap();
+        let encoded = serde_json::to_string(&value).unwrap();
+
+        assert!(!encoded.contains("secret"));
+        assert!(value.get("credentials_protected").is_some());
+    }
+
+    #[test]
+    fn backup_v2_proxy_payload_remains_readable() {
+        let legacy = serde_json::json!({
+            "id": "legacy-proxy",
+            "name": "legacy",
+            "kind": "http",
+            "host": "proxy.example",
+            "port": 8080,
+            "username": "user",
+            "password": "secret",
+            "country": "US",
+            "notes": ""
+        });
+        let restored = deserialize_backup_entry(&serde_json::to_vec(&legacy).unwrap(), 2).unwrap();
+
+        assert_eq!(restored.username, "user");
+        assert_eq!(restored.password, "secret");
+        assert!(!restored.credentials_unavailable);
+    }
+
+    #[test]
+    fn unavailable_credentials_block_runtime_use() {
+        let mut proxy = entry(ProxyKind::Socks5, "proxy.example", 1080, "");
+        proxy.credentials_unavailable = true;
+        assert_eq!(
+            credentials_available(&proxy).unwrap_err().to_string(),
+            CREDENTIALS_REENTRY_ERROR
+        );
+    }
+
+    #[test]
+    fn normalization_rejects_invalid_proxy_fields() {
         assert!(normalize_entry(entry(ProxyKind::Socks5, "", 1080, "")).is_err());
         assert!(normalize_entry(entry(ProxyKind::Socks5, "bad host", 1080, "")).is_err());
         assert!(normalize_entry(entry(ProxyKind::Socks5, "127.0.0.1", 0, "")).is_err());
@@ -924,13 +1465,42 @@ mod bulk_import_tests {
             ProxyKind::Socks5,
             &[],
         );
-        let parsed_ports: Vec<u16> = preview
-            .entries
-            .iter()
-            .map(|proxy| proxy.port)
-            .collect();
+        let parsed_ports: Vec<u16> = preview.entries.iter().map(|proxy| proxy.port).collect();
 
         assert_eq!(parsed_ports, vec![1081, 1082, 1083]);
+    }
+
+    #[test]
+    fn unavailable_credentials_do_not_reuse_an_unauthenticated_proxy() {
+        let mut store_data = ProxyStore::default();
+        let unauthenticated = entry(ProxyKind::Socks5, "proxy.example", 1080, "");
+        let (stored, created) = insert_or_reuse_dedup(&mut store_data, unauthenticated).unwrap();
+        assert!(created);
+
+        let unavailable = ProxyEntry {
+            id: "source-proxy".into(),
+            name: "protected".into(),
+            kind: ProxyKind::Socks5,
+            host: "proxy.example".into(),
+            port: 1080,
+            username: String::new(),
+            password: String::new(),
+            credentials_unavailable: true,
+            protected_credentials: Some(protected_data::ProtectedBlob {
+                version: 2,
+                scheme: "windows-dpapi-current-user".into(),
+                blob: "other-user-ciphertext".into(),
+                sha256: Some("c".repeat(64)),
+            }),
+            country: String::new(),
+            notes: String::new(),
+        };
+        let (restored, created) = insert_or_reuse_dedup(&mut store_data, unavailable).unwrap();
+
+        assert!(created);
+        assert_ne!(restored.id, stored.id);
+        assert!(restored.credentials_unavailable);
+        assert_eq!(store_data.proxies.len(), 2);
     }
 
     #[test]
@@ -994,7 +1564,10 @@ mod bulk_import_tests {
 
     #[test]
     fn unknown_geo_provider_uses_default_order() {
-        assert_eq!(geo_provider_order("removed.example"), GEO_PROVIDERS.to_vec());
+        assert_eq!(
+            geo_provider_order("removed.example"),
+            GEO_PROVIDERS.to_vec()
+        );
     }
 }
 
@@ -1020,6 +1593,7 @@ async fn resolve_stun_ipv4() -> Result<(std::net::Ipv4Addr, u16)> {
 }
 
 pub async fn probe_udp(entry: &ProxyEntry) -> Result<u128> {
+    credentials_available(entry)?;
     tokio::time::timeout(PROXY_TEST_TIMEOUT, probe_udp_inner(entry))
         .await
         .context(PROXY_TEST_TIMEOUT_ERROR)?
@@ -1038,7 +1612,11 @@ async fn probe_udp_inner(entry: &ProxyEntry) -> Result<u128> {
         .await
         .context("connect failed")?;
 
-    let auth_method: u8 = if entry.username.is_empty() { 0x00 } else { 0x02 };
+    let auth_method: u8 = if entry.username.is_empty() {
+        0x00
+    } else {
+        0x02
+    };
     tcp.write_all(&[0x05, 0x01, auth_method]).await?;
     let mut greet = [0u8; 2];
     tcp.read_exact(&mut greet).await?;
@@ -1088,7 +1666,10 @@ async fn probe_udp_inner(entry: &ProxyEntry) -> Result<u128> {
             tcp.read_exact(&mut ip).await?;
             let mut p = [0u8; 2];
             tcp.read_exact(&mut p).await?;
-            SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::from(ip)), u16::from_be_bytes(p))
+            SocketAddr::new(
+                std::net::IpAddr::V6(std::net::Ipv6Addr::from(ip)),
+                u16::from_be_bytes(p),
+            )
         }
         _ => anyhow::bail!("unsupported ATYP in UDP reply"),
     };
@@ -1140,6 +1721,7 @@ pub struct GeoInfo {
 
 /// Probe IP/country the world sees when traffic exits the proxy.
 pub async fn geo_check(entry: &ProxyEntry, provider_override: Option<String>) -> Result<GeoInfo> {
+    credentials_available(entry)?;
     geo_check_via(Some(entry), provider_override).await
 }
 
@@ -1192,10 +1774,18 @@ fn geo_error_allows_fallback(error: &anyhow::Error) -> bool {
 /// Probe geo through `entry` if Some, else direct. The configured provider is
 /// preferred; timeout, HTTP 429, and JSON decode failures advance to the next
 /// provider in Settings order.
-pub async fn geo_check_via(entry: Option<&ProxyEntry>, provider_override: Option<String>) -> Result<GeoInfo> {
+pub async fn geo_check_via(
+    entry: Option<&ProxyEntry>,
+    provider_override: Option<String>,
+) -> Result<GeoInfo> {
     let requested_provider = provider_override
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| settings::load().ok().and_then(|s| s.geo_checker).unwrap_or_else(|| "ipwho.is".into()));
+        .unwrap_or_else(|| {
+            settings::load()
+                .ok()
+                .and_then(|s| s.geo_checker)
+                .unwrap_or_else(|| "ipwho.is".into())
+        });
     let preferred = normalize_geo_provider(&requested_provider);
     let mut fallback_errors = Vec::new();
 
@@ -1228,12 +1818,13 @@ pub async fn geo_check_via(entry: Option<&ProxyEntry>, provider_override: Option
 }
 
 async fn geo_check_provider(entry: Option<&ProxyEntry>, provider: String) -> Result<GeoInfo> {
-
     let url = match provider.as_str() {
         "ipwho.is" => "https://ipwho.is/",
         "geojs.io" => "https://get.geojs.io/v1/ip/geo.json",
         "country.is" => "https://api.country.is/?fields=city,subdivision,location,asn",
-        "bigdatacloud.com" => "https://api.bigdatacloud.net/data/reverse-geocode-client?localityLanguage=en",
+        "bigdatacloud.com" => {
+            "https://api.bigdatacloud.net/data/reverse-geocode-client?localityLanguage=en"
+        }
         "freeipapi.com" => "https://free.freeipapi.com/api/json",
         "ipapi.is" => "https://api.ipapi.is/",
         _ => unreachable!("provider is normalized above"),
@@ -1251,8 +1842,10 @@ async fn geo_check_provider(entry: Option<&ProxyEntry>, provider: String) -> Res
         let proxy_url = if entry.username.is_empty() && entry.password.is_empty() {
             format!("{scheme}://{}:{}", entry.host, entry.port)
         } else {
-            let user = url::form_urlencoded::byte_serialize(entry.username.as_bytes()).collect::<String>();
-            let pass = url::form_urlencoded::byte_serialize(entry.password.as_bytes()).collect::<String>();
+            let user =
+                url::form_urlencoded::byte_serialize(entry.username.as_bytes()).collect::<String>();
+            let pass =
+                url::form_urlencoded::byte_serialize(entry.password.as_bytes()).collect::<String>();
             format!("{scheme}://{user}:{pass}@{}:{}", entry.host, entry.port)
         };
         let proxy = reqwest::Proxy::all(&proxy_url).context("bad proxy URL")?;
@@ -1263,7 +1856,13 @@ async fn geo_check_provider(entry: Option<&ProxyEntry>, provider: String) -> Res
     }
     let client = builder.build()?;
 
-    let body: serde_json::Value = client.get(url).send().await?.error_for_status()?.json().await?;
+    let body: serde_json::Value = client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
     let client_info: Option<serde_json::Value> = if provider == "bigdatacloud.com" {
         Some(
             client
@@ -1283,7 +1882,10 @@ async fn geo_check_provider(entry: Option<&ProxyEntry>, provider: String) -> Res
     };
     let f = |v: &serde_json::Value, k: &str| {
         v.get(k)
-            .and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse::<f64>().ok())))
+            .and_then(|x| {
+                x.as_f64()
+                    .or_else(|| x.as_str().and_then(|s| s.parse::<f64>().ok()))
+            })
             .unwrap_or(0.0)
     };
     let path_s = |v: &serde_json::Value, path: &[&str]| {
@@ -1376,10 +1978,17 @@ async fn geo_check_provider(entry: Option<&ProxyEntry>, provider: String) -> Res
                 .to_string();
             let city = {
                 let city = s(&body, "city");
-                if city.is_empty() { s(&body, "locality") } else { city }
+                if city.is_empty() {
+                    s(&body, "locality")
+                } else {
+                    city
+                }
             };
             GeoInfo {
-                ip: client_info.as_ref().map(|v| s(v, "ipString")).unwrap_or_default(),
+                ip: client_info
+                    .as_ref()
+                    .map(|v| s(v, "ipString"))
+                    .unwrap_or_default(),
                 country: s(&body, "countryName"),
                 country_code: s(&body, "countryCode"),
                 region: s(&body, "principalSubdivision"),
@@ -1416,11 +2025,19 @@ async fn geo_check_provider(entry: Option<&ProxyEntry>, provider: String) -> Res
             }
         }
         "ipapi.is" => {
-            if let Some(error) = body.get("error").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+            if let Some(error) = body
+                .get("error")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
                 anyhow::bail!("ipapi.is: {error}");
             }
             let company = path_s(&body, &["company", "name"]);
-            let isp = if company.is_empty() { path_s(&body, &["asn", "org"]) } else { company };
+            let isp = if company.is_empty() {
+                path_s(&body, &["asn", "org"])
+            } else {
+                company
+            };
             GeoInfo {
                 ip: s(&body, "ip"),
                 country: path_s(&body, &["location", "country"]),
@@ -1936,24 +2553,21 @@ where
 
     let mut results: Vec<Option<BatchTestResult>> = (0..count).map(|_| None).collect();
     while let Some(joined) = tasks.join_next().await {
-        match joined {
-            Ok((index, result)) => {
-                let result = match result {
-                    Ok(snapshot) => BatchTestResult {
-                        index,
-                        snapshot: Some(snapshot),
-                        error: None,
-                    },
-                    Err(error) => BatchTestResult {
-                        index,
-                        snapshot: None,
-                        error: Some(error.to_string()),
-                    },
-                };
-                on_result(&result);
-                results[index] = Some(result);
-            }
-            Err(_) => {}
+        if let Ok((index, result)) = joined {
+            let result = match result {
+                Ok(snapshot) => BatchTestResult {
+                    index,
+                    snapshot: Some(snapshot),
+                    error: None,
+                },
+                Err(error) => BatchTestResult {
+                    index,
+                    snapshot: None,
+                    error: Some(error.to_string()),
+                },
+            };
+            on_result(&result);
+            results[index] = Some(result);
         }
         while tasks.len() < BULK_TEST_CONCURRENCY {
             let Some((index, request)) = queue.pop_front() else {
@@ -1989,15 +2603,6 @@ where
 /// its full timeout; queued entries are never failed because the batch is busy.
 pub async fn full_test_batch(entries: Vec<ProxyEntry>) -> Vec<BatchTestResult> {
     full_test_batch_in_lane(prepare_proxy_tests(entries), TestLane::Manual, 1, |_| {}).await
-}
-
-/// Run automatic tests without consuming the capacity reserved for manual
-/// tests. Failed TCP checks are retried up to `max_attempts` in total.
-pub async fn full_test_batch_background(
-    requests: Vec<PreparedProxyTest>,
-    max_attempts: usize,
-) -> Vec<BatchTestResult> {
-    full_test_batch_background_with_progress(requests, max_attempts, |_| {}).await
 }
 
 /// Run automatic tests and report each result immediately after its persisted

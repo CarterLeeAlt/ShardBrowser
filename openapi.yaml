@@ -71,8 +71,8 @@ info:
     CDP. It is a separate Node process — **not** part of this HTTP API and
     not hosted by it. Get it from the launcher (**Settings → MCP server →
     Download MCP server**, or the sidebar "Download MCP" button), which
-    saves the source to a folder you choose; or from the repo at
-    `rust/shardx-launcher/mcp/`.
+    saves the source to the launcher's portable data directory as `mcp/`; or
+    get it from this repository's `mcp/` directory.
 
     Under the hood it just calls this API: configure it with
     `SHARDX_API` (this base URL) and `SHARDX_TOKEN` (the Bearer token from
@@ -416,8 +416,8 @@ paths:
       summary: Export cookies
       description: |
         Reads the profile's Chromium cookie store and returns all cookies
-        **decrypted**. Works whether the profile is running or stopped.
-        Empty array if the profile has never launched.
+        **decrypted**. The profile must be stopped so Chromium has flushed its
+        cookie database; empty array if the profile has never launched.
       parameters:
         - $ref: "#/components/parameters/ProfileId"
       responses:
@@ -432,6 +432,11 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/Cookie" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: Profile is running — stop it first so Chromium flushes the cookie database.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500":
           description: Cookie DB read/decrypt failed.
           content:
@@ -908,7 +913,8 @@ components:
             proxy_id: { type: string, nullable: true }
             inline_proxy:
               nullable: true
-              allOf: [{ $ref: "#/components/schemas/ProxyEntry" }]
+              description: Inline proxy endpoint. Credentials are protected with the Windows user DPAPI at rest and are not returned by this API.
+              allOf: [{ $ref: "#/components/schemas/ProxySummary" }]
             last_launched_at: { type: string, nullable: true }
             created_at: { type: string, nullable: true }
             pinned: { type: boolean }
@@ -970,14 +976,17 @@ components:
 
     ProxySummary:
       type: object
-      description: Stored proxy without credentials.
+      description: Stored proxy metadata. Credentials are protected with Windows DPAPI at rest and are never returned.
       properties:
         id: { type: string }
         name: { type: string }
         kind: { type: string, enum: [socks5, http, https] }
         host: { type: string }
         port: { type: integer }
+        credentials_configured: { type: boolean }
+        credentials_unavailable: { type: boolean, description: True when credentials were protected by another Windows user and must be re-entered before test or launch. }
         country: { type: string, description: Informational tag (e.g. "US"). }
+        notes: { type: string }
 
     Cookie:
       type: object
@@ -1006,7 +1015,7 @@ components:
 
     ProxyEntry:
       type: object
-      description: Full proxy (as embedded in `_meta.inline_proxy`).
+      description: Full proxy input. Credentials are accepted only when creating or updating a proxy and are protected with Windows DPAPI at rest; responses omit them.
       properties:
         id: { type: string }
         name: { type: string }

@@ -144,7 +144,11 @@ impl Browser {
         Self { runtime }
     }
 
-    pub async fn launch(&self, mut profile: Profile, opts: LaunchOptions) -> Result<BrowserSession> {
+    pub async fn launch(
+        &self,
+        mut profile: Profile,
+        opts: LaunchOptions,
+    ) -> Result<BrowserSession> {
         self.runtime.install(false).await?;
 
         let parsed: Option<ParsedProxy> = match &opts.proxy {
@@ -166,7 +170,9 @@ impl Browser {
         let mut proxy_udp_ms: Option<u128> = None;
         if let Some(p) = &parsed {
             if p.scheme == ProxyScheme::Socks5 {
-                proxy_udp_ms = probe_udp(p, opts.probe_timeout_ms.unwrap_or(6000)).await.ok();
+                proxy_udp_ms = probe_udp(p, opts.probe_timeout_ms.unwrap_or(6000))
+                    .await
+                    .ok();
             }
         }
         let udp_ok = proxy_udp_ms.is_some();
@@ -209,7 +215,14 @@ impl Browser {
         }
         if let Some(p) = &parsed {
             argv.push(format!("--proxy-server={}", proxy_to_arg(p)));
-            argv.push(if quic_enabled { "--enable-quic" } else { "--disable-quic" }.into());
+            argv.push(
+                if quic_enabled {
+                    "--enable-quic"
+                } else {
+                    "--disable-quic"
+                }
+                .into(),
+            );
         }
         match webrtc_mode {
             WebRtcMode::Block => {

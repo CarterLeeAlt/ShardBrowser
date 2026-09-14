@@ -18,8 +18,8 @@ pub const WINDOWS_PLATFORM_VERSIONS: &[&str] = &[
 ];
 
 pub const LINUX_PLATFORM_VERSIONS: &[&str] = &[
-    "5.15.0", "6.1.0", "6.5.0", "6.6.0", "6.8.0", "6.10.0", "6.11.0", "6.12.0", "6.14.0",
-    "6.15.0", "6.16.0",
+    "5.15.0", "6.1.0", "6.5.0", "6.6.0", "6.8.0", "6.10.0", "6.11.0", "6.12.0", "6.14.0", "6.15.0",
+    "6.16.0",
 ];
 
 /// Real x86 logical-core counts (SMT + Intel hybrid). Same array as the launcher.
@@ -70,7 +70,9 @@ pub fn randomize_platform_version(cfg: &mut Value) {
         _ => return,
     };
     let mut rng = rand::thread_rng();
-    let Some(v) = pool.choose(&mut rng) else { return };
+    let Some(v) = pool.choose(&mut rng) else {
+        return;
+    };
     let v = v.to_string();
     ensure_obj(cfg, "navigator").insert("platform_version".into(), json!(v));
     if let Some(ch) = cfg.get_mut("client_hints").and_then(|c| c.as_object_mut()) {

@@ -66,7 +66,7 @@ proxy service with full **SOCKS5 UDP relay** (RFC 1928 §7) and active
 claims to be on actually matches the SYN/ACK shape sites see). ShardX
 is the in-house anti-detect browser stack we built to get the most out
 of those proxies: the launcher manages profiles, binds proxies, and
-ships the patched **Chromium 149** browser that does the actual
+ships the patched **Chromium 152** browser that does the actual
 spoofing at the engine level.
 
 * **Site:**     [https://proxyshard.com](https://proxyshard.com?utm_source=shardx&utm_medium=referral&utm_campaign=shardx-launcher)
@@ -157,7 +157,7 @@ across iframes, web workers, devtools and headless inspection.
   proxy's exit IP; host GPS / Wi-Fi is never used.
 * **Network capability** — connection type, downlink, RTT, save-data,
   storage quota, JS heap limit, battery state, media-device counts.
-* **TLS ClientHello** — Chrome-149 cipher + signature-algorithm
+* **TLS ClientHello** — bundled Chromium cipher + signature-algorithm
   selection, extension shuffling, so JA4 / Akamai / Peetprint fingerprints
   match real Chrome.
 * **UDP relay remains available** — SOCKS5 UDP support is still tested and
@@ -227,7 +227,7 @@ launcher now forces QUIC off. With WebRTC enabled explicitly,
 every WebRTC probe (UDP / TCP / TLS) passes against Twilio's test
 suite without leaking the host IP.
 
-| browserleaks.com/quic — QUIC `True`, JA4 matches Chrome 149 | networktest.twilio.com — every probe `Pass`               |
+| browserleaks.com/quic — QUIC `True`, JA4 matches the bundled Chromium | networktest.twilio.com — every probe `Pass`               |
 |-------------------------------------------------------------|------------------------------------------------------------|
 | ![QUIC](docs/screenshots/01-browserleaks-quic.jpg)          | ![Twilio](docs/screenshots/04-twilio-webrtc.jpg)           |
 
@@ -263,7 +263,7 @@ around the engine.
 | Client Hints (Sec-CH-UA-* full stack with GREASE)             | ✅ full                       | ❌ partial / inconsistent     | ✅ full on Multilogin / AdsPower, ❌ Dolphin     |
 | Font enumeration pinned per profile                           | ✅ system-level               | ❌ JS-only, host fonts still leak via CSS / canvas font-render | ⚠️ partial          |
 | V8 / CDP side-channel hardening (preview-getters, inspector)  | ✅ closed                     | ❌ open — CDP automation detectable | ⚠️ partial                                |
-| TLS ClientHello fingerprint (JA4)                             | ✅ matches real Chrome 149    | ⚠️ static / drifts on uprev   | ✅ matches the forked Chrome version            |
+| TLS ClientHello fingerprint (JA4)                             | ✅ matches the bundled Chromium | ⚠️ static / drifts on uprev   | ✅ matches the forked Chrome version            |
 | QUIC / HTTP-3 over SOCKS5                                     | ✅ stable end-to-end via UDP relay | ⚠️ implemented but unstable — falls back to TCP / drops mid-session | ❌ disabled when proxy is set |
 | WebRTC over SOCKS5 (no real-IP leak via STUN)                 | ✅ proxy UDP relay or synth candidates | ⚠️ same UDP relay path, same instability | ⚠️ disable-only            |
 | Consistency of generated profiles                             | ✅ coherent device (GPU ↔ CPU ↔ RAM ↔ UA ↔ fonts) | ❌ frequent contradictions (Win UA + Mac GPU, mobile UA + desktop screen, etc.) | ⚠️ varies |
@@ -420,9 +420,10 @@ language model can:
   profile, with the profile auto-starting when needed.
 
 The app doesn't run the server itself — open *Settings → MCP server →
-Download MCP server*, pick a folder, then `npm install` and register
-with your MCP client. Full setup, env vars and tool list in
-**[mcp/README.md](mcp/README.md)**.
+Download MCP server*; the source is installed to the launcher's portable
+`mcp` data directory. Install its dependencies there, then register
+`<launcher-data-directory>/mcp/index.js` with your MCP client. Full setup,
+env vars and tool list in **[mcp/README.md](mcp/README.md)**.
 
 Minimal stdio registration:
 
@@ -431,7 +432,7 @@ Minimal stdio registration:
   "mcpServers": {
     "shardx": {
       "command": "node",
-      "args": ["/ABSOLUTE/PATH/mcp/index.js"],
+      "args": ["/ABSOLUTE/PATH/TO/LAUNCHER-DATA/mcp/index.js"],
       "env": {
         "SHARDX_API": "http://127.0.0.1:40325",
         "SHARDX_TOKEN": "<Bearer token>"
@@ -463,12 +464,12 @@ job / server-side worker without installing the GUI.
 
 ## Licensing
 
-The **launcher** (everything in this `rust/shardx-launcher/` directory
-— Tauri shell, React UI, Rust source) is open source under the **MIT
+The **launcher** (everything in this repository — Tauri shell, React UI and
+Rust source) is open source under the **MIT
 License** — see [LICENSE](LICENSE). Use it, fork it, modify it, ship
 it, commercially or otherwise.
 
-The **browser engine** (the patched Chromium 149 binary that the
+The **browser engine** (the patched Chromium 152 binary that the
 launcher downloads from our CDN on first run) is distributed as a
 **closed-source binary**. Its source is not published in this
 repository or elsewhere, and the following are explicitly **not

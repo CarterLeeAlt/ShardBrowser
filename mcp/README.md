@@ -10,9 +10,9 @@ An [MCP](https://modelcontextprotocol.io) server that lets an AI client
   (a stealth-patched Playwright) so the automation stays undetected.
 
 Requires **Node ≥ 18**. The app itself does **not** run this server — it
-only downloads the source for you (**Settings → MCP server → Download MCP
-server**, pick a folder). You then install deps and register it with your
-MCP client.
+only downloads the source into its portable data directory as `mcp/`
+(**Settings → MCP server → Download MCP server**). You then install deps and
+register it with your MCP client.
 
 ### 1. Install deps
 
@@ -21,8 +21,8 @@ patchright's own Chromium is never needed — install with the browser
 download skipped to keep `node_modules` small:
 
 ```bash
-cd <downloaded>/mcp
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PATCHRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install
+cd <launcher-data-directory>/mcp
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PATCHRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci
 ```
 
 ### 2. Register with your MCP client (stdio)
@@ -32,7 +32,7 @@ PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PATCHRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm instal
   "mcpServers": {
     "shardx": {
       "command": "node",
-      "args": ["/ABSOLUTE/PATH/mcp/index.js"],
+      "args": ["/ABSOLUTE/PATH/TO/LAUNCHER-DATA/mcp/index.js"],
       "env": {
         "SHARDX_API": "http://127.0.0.1:40325",
         "SHARDX_TOKEN": "<Bearer token from Settings → Automation API>"

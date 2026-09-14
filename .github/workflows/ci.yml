@@ -1,0 +1,114 @@
+name: Pull Request CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  quality:
+    name: launcher quality (Windows x64)
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}\.cache\npm
+      CARGO_HOME: ${{ github.workspace }}\.cache\tools\cargo
+      RUSTUP_HOME: ${{ github.workspace }}\.cache\tools\rustup
+      CARGO_TARGET_DIR: ${{ github.workspace }}\.cache\target
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Restore repository-local toolchains and dependencies
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .cache
+          key: pr-win2022-x64-node22.14.0-rust1.98.1-${{ hashFiles('package-lock.json', 'mcp/package-lock.json', 'sdks/node/package-lock.json', 'sdks/rust/Cargo.lock', 'src-tauri/Cargo.lock') }}
+          restore-keys: |
+            pr-win2022-x64-node22.14.0-rust1.98.1-
+
+      - name: Bootstrap repository-local Node and Rust
+        shell: pwsh
+        run: ./scripts/bootstrap-ci-toolchains.ps1 -Node -Rust
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Check release version declarations
+        run: npm run check:versions
+
+      - name: Type-check and build frontend
+        run: npm run build
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: Lint launcher Rust
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings
+
+      - name: Test launcher Rust
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --target x86_64-pc-windows-msvc
+
+  ecosystem:
+    name: SDK and MCP checks (Windows x64)
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}\.cache\npm
+      CARGO_HOME: ${{ github.workspace }}\.cache\tools\cargo
+      RUSTUP_HOME: ${{ github.workspace }}\.cache\tools\rustup
+      CARGO_TARGET_DIR: ${{ github.workspace }}\.cache\sdk-rust\target
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Restore repository-local toolchains and dependencies
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .cache
+          key: ecosystem-win2022-x64-node22.14.0-rust1.98.1-py3.12.8-${{ hashFiles('mcp/package-lock.json', 'sdks/node/package-lock.json', 'sdks/rust/Cargo.lock') }}
+          restore-keys: |
+            ecosystem-win2022-x64-node22.14.0-rust1.98.1-py3.12.8-
+
+      - name: Bootstrap repository-local toolchains
+        shell: pwsh
+        run: ./scripts/bootstrap-ci-toolchains.ps1 -Node -Rust -Python
+
+      - name: Install MCP dependencies without browser downloads
+        working-directory: mcp
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci --ignore-scripts
+
+      - name: Check MCP syntax
+        run: node --check mcp/index.js
+
+      - name: Install Node SDK dependencies
+        working-directory: sdks/node
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci --ignore-scripts
+
+      - name: Build Node SDK
+        working-directory: sdks/node
+        run: npm run build
+
+      - name: Compile Python SDK source
+        run: python -m compileall -q sdks/python/shardx
+
+      - name: Check Rust SDK formatting
+        run: cargo fmt --manifest-path sdks/rust/Cargo.toml --all -- --check
+
+      - name: Lint Rust SDK
+        run: cargo clippy --manifest-path sdks/rust/Cargo.toml --locked --all-features --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+
+      - name: Check Rust SDK
+        run: cargo check --manifest-path sdks/rust/Cargo.toml --locked --all-features --target x86_64-pc-windows-msvc
+
+      - name: Test Rust SDK
+        run: cargo test --manifest-path sdks/rust/Cargo.toml --locked --all-features --target x86_64-pc-windows-msvc
