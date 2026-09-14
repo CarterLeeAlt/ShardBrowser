@@ -4,7 +4,7 @@ Self-contained Node/TypeScript SDK for the **ShardX anti-detect
 browser** by the [ProxyShard](https://proxyshard.com?utm_source=shardx&utm_medium=referral&utm_campaign=shardx-launcher) team.
 
 Does **not** depend on the desktop launcher. On first use it downloads
-the patched Chromium 149 engine, Widevine CDM, and the 170-profile
+the patched Chromium 152 engine, Widevine CDM, and the 170-profile
 fingerprint library from our CDN into a local cache, then launches
 isolated browser sessions on demand.
 

@@ -14,8 +14,9 @@
 //! let sdk = ShardX::new(ShardXOptions::default())?;
 //!
 //! // Launch a random profile through a proxy AND attach a CDP browser.
+//! let profile = sdk.create_profile(None).await?;
 //! let session = sdk
-//!     .session(None, LaunchOptions {
+//!     .session(profile, LaunchOptions {
 //!         proxy: Some("socks5://user:pass@host:1080".into()),
 //!         ..Default::default()
 //!     })
@@ -134,7 +135,9 @@ impl ShardX {
         let id = ids.choose(&mut rand::thread_rng()).ok_or_else(|| {
             anyhow!(
                 "No bundled profiles found{}.",
-                platform.map(|p| format!(" for platform={p}")).unwrap_or_default()
+                platform
+                    .map(|p| format!(" for platform={p}"))
+                    .unwrap_or_default()
             )
         })?;
         self.library.load(id)
@@ -174,7 +177,10 @@ impl ShardX {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        storage::atomic_write(&path, serde_json::to_string_pretty(&profile.config)?.as_bytes())?;
+        storage::atomic_write(
+            &path,
+            serde_json::to_string_pretty(&profile.config)?.as_bytes(),
+        )?;
         Ok(())
     }
 
@@ -250,11 +256,7 @@ impl ShardX {
     ///
     /// Requires the default `control` feature.
     #[cfg(feature = "control")]
-    pub async fn session(
-        &self,
-        profile: Profile,
-        mut opts: LaunchOptions,
-    ) -> Result<Session> {
+    pub async fn session(&self, profile: Profile, mut opts: LaunchOptions) -> Result<Session> {
         opts.cdp = true;
         let engine = self.launch(profile, opts).await?;
         if engine.cdp_url.is_none() {

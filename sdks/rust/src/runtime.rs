@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
 pub const PUB_BASE: &str = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev";
-pub const CHROMIUM_VERSION: &str = "149.0.7827.103";
+pub const CHROMIUM_VERSION: &str = "152.0.7977.65";
 /// Version manifest (GitHub raw) — one tiny GET yields every archive's current
 /// etag, so we never poll R2/S3 (no per-archive HEAD).
 /// The runtime channel is upstream's: manifest and bucket are republished
@@ -64,7 +64,13 @@ pub fn host_spec() -> Result<HostSpec> {
         return Ok(HostSpec {
             browser: arc("ShardX-Mac-arm64.zip", "ShardX browser (macOS arm64)"),
             widevine: Some(arc("ShardX-Widevine-Mac-arm64.zip", "Widevine CDM")),
-            binary_subpath: p(&["ShardX-Mac-arm64", "ShardX.app", "Contents", "MacOS", "ShardX"]),
+            binary_subpath: p(&[
+                "ShardX-Mac-arm64",
+                "ShardX.app",
+                "Contents",
+                "MacOS",
+                "ShardX",
+            ]),
             widevine_subpath: p(&[
                 "ShardX-Mac-arm64",
                 "ShardX.app",
@@ -108,7 +114,10 @@ pub fn default_cache_dir() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     #[cfg(target_os = "macos")]
     {
-        return home.join("Library").join("Application Support").join("shardx-sdk");
+        return home
+            .join("Library")
+            .join("Application Support")
+            .join("shardx-sdk");
     }
     #[cfg(target_os = "windows")]
     {
@@ -239,13 +248,14 @@ impl Runtime {
         {
             // Only accept a `<version>.manifest` whose stem parses as a version,
             // so a stray/leftover manifest can't pin a bogus version.
-            for ent in fs::read_dir(self.root.join("ShardX-Windows")).ok()?.flatten() {
+            for ent in fs::read_dir(self.root.join("ShardX-Windows"))
+                .ok()?
+                .flatten()
+            {
                 let p = ent.path();
                 if p.extension().and_then(|s| s.to_str()) == Some("manifest") {
                     if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                        if stem.contains('.')
-                            && stem.starts_with(|c: char| c.is_ascii_digit())
-                        {
+                        if stem.contains('.') && stem.starts_with(|c: char| c.is_ascii_digit()) {
                             return Some(stem.to_string());
                         }
                     }
@@ -301,8 +311,7 @@ impl Runtime {
             .chromium_version
             .clone()
             .unwrap_or_else(|| CHROMIUM_VERSION.to_string());
-        *self.grease.lock().unwrap() =
-            (remote.grease_brand.clone(), remote.grease_version.clone());
+        *self.grease.lock().unwrap() = (remote.grease_brand.clone(), remote.grease_version.clone());
 
         // Re-download when the engine's on-disk version differs from the
         // manifest's chromium version — VERSION-based, not etag, so it fires for
@@ -359,7 +368,9 @@ impl Runtime {
         let _ = fs::remove_dir_all(&stage);
         fs::create_dir_all(&stage)?;
         let result = async {
-            let browser_etag = self.download_and_extract(&self.spec.browser, &stage).await?;
+            let browser_etag = self
+                .download_and_extract(&self.spec.browser, &stage)
+                .await?;
             let widevine_etag = if let Some(widevine) = &self.spec.widevine {
                 let etag = self.download_and_extract(widevine, &stage).await?;
                 self.place_widevine(&stage)?;
@@ -388,7 +399,11 @@ impl Runtime {
     }
 
     async fn install_widevine(&self) -> Result<String> {
-        let widevine = self.spec.widevine.as_ref().context("Widevine unavailable")?;
+        let widevine = self
+            .spec
+            .widevine
+            .as_ref()
+            .context("Widevine unavailable")?;
         let stage = self.root.join(".runtime-stage");
         let _ = fs::remove_dir_all(&stage);
         fs::create_dir_all(&stage)?;
@@ -457,7 +472,10 @@ impl Runtime {
                 let path = engine.join(name);
                 let metadata = fs::metadata(&path)?;
                 if !metadata.is_file() || metadata.len() == 0 {
-                    anyhow::bail!("staged Runtime file is missing or empty: {}", path.display());
+                    anyhow::bail!(
+                        "staged Runtime file is missing or empty: {}",
+                        path.display()
+                    );
                 }
             }
         }
@@ -549,7 +567,9 @@ impl Runtime {
     }
 
     fn place_widevine(&self, root: &Path) -> Result<()> {
-        let Some(wv) = &self.spec.widevine else { return Ok(()) };
+        let Some(wv) = &self.spec.widevine else {
+            return Ok(());
+        };
         let wrapper = wv.key.trim_end_matches(".zip");
         let src = root.join(wrapper).join("WidevineCdm");
         if !src.exists() {
@@ -572,13 +592,19 @@ impl Runtime {
 }
 
 fn joined(root: &Path, parts: &[String]) -> PathBuf {
-    parts.iter().fold(root.to_path_buf(), |path, part| path.join(part))
+    parts
+        .iter()
+        .fold(root.to_path_buf(), |path, part| path.join(part))
 }
 
 fn validate_widevine(root: &Path) -> Result<()> {
     let manifest = root.join("manifest.json");
-    let metadata = fs::metadata(&manifest)
-        .with_context(|| format!("staged Widevine manifest is missing: {}", manifest.display()))?;
+    let metadata = fs::metadata(&manifest).with_context(|| {
+        format!(
+            "staged Widevine manifest is missing: {}",
+            manifest.display()
+        )
+    })?;
     if !metadata.is_file() || metadata.len() == 0 {
         anyhow::bail!("staged Widevine manifest is empty: {}", manifest.display());
     }
@@ -731,7 +757,7 @@ fn validate_zip_archive<R: std::io::Read + std::io::Seek>(
     let mut names = Vec::with_capacity(archive.len());
     let mut symlinks = Vec::new();
     for index in 0..archive.len() {
-        let mut entry = archive.by_index(index)?;
+        let entry = archive.by_index(index)?;
         if entry.enclosed_name().is_none() || entry.name().contains('\\') {
             anyhow::bail!("Runtime archive contains an unsafe path: {}", entry.name());
         }
@@ -750,7 +776,10 @@ fn validate_zip_archive<R: std::io::Read + std::io::Seek>(
             if target.len() > 4096
                 || target_path.is_absolute()
                 || target_path.components().any(|component| {
-                    matches!(component, std::path::Component::ParentDir | std::path::Component::Prefix(_))
+                    matches!(
+                        component,
+                        std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                    )
                 })
             {
                 anyhow::bail!("Runtime archive contains an unsafe symbolic link: {name}");
@@ -766,10 +795,9 @@ fn validate_zip_archive<R: std::io::Read + std::io::Seek>(
         names.push(name);
     }
     for name in names {
-        if symlinks
-            .iter()
-            .any(|link| name.len() > link.len() && name.starts_with(link) && name.as_bytes()[link.len()] == b'/')
-        {
+        if symlinks.iter().any(|link| {
+            name.len() > link.len() && name.starts_with(link) && name.as_bytes()[link.len()] == b'/'
+        }) {
             anyhow::bail!("Runtime archive writes through a symbolic link: {name}");
         }
     }
@@ -792,7 +820,9 @@ fn fix_unix_exec_bits(root: &Path) {
         [0xbe, 0xba, 0xfe, 0xca],
     ];
     fn walk(dir: &Path) {
-        let Ok(entries) = fs::read_dir(dir) else { return };
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
         for ent in entries.flatten() {
             let p = ent.path();
             let Ok(ft) = ent.file_type() else { continue };
@@ -807,7 +837,9 @@ fn fix_unix_exec_bits(root: &Path) {
                 continue;
             }
             let mut head = [0u8; 4];
-            let Ok(mut f) = fs::File::open(&p) else { continue };
+            let Ok(mut f) = fs::File::open(&p) else {
+                continue;
+            };
             if f.read_exact(&mut head).is_err() {
                 continue;
             }

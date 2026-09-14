@@ -65,15 +65,14 @@ impl Crypt {
         })
     }
 
-    fn decrypt(&self, encrypted: &[u8], plain: &str) -> String {
+    fn decrypt(&self, encrypted: &[u8], plain: &str) -> Result<String> {
         // Legacy rows: value in `value` column, no v10 blob.
         if encrypted.len() < 3 || &encrypted[..3] != b"v10" {
-            return plain.to_string();
+            return Ok(plain.to_string());
         }
-        match cipher_decrypt(&self.key, &encrypted[3..]) {
-            Some(pt) => String::from_utf8_lossy(&strip_host_prefix(pt)).into_owned(),
-            None => String::new(),
-        }
+        let plaintext = cipher_decrypt(&self.key, &encrypted[3..])
+            .context("could not authenticate encrypted Chromium cookie")?;
+        Ok(String::from_utf8_lossy(&strip_host_prefix(plaintext)).into_owned())
     }
 
     fn encrypt(&self, host: &str, value: &str) -> Vec<u8> {
@@ -133,10 +132,10 @@ mod win {
     use anyhow::{anyhow, Context, Result};
     use base64::{engine::general_purpose::STANDARD, Engine};
     use std::path::Path;
+    use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Cryptography::{
         CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB,
     };
-    use windows_sys::Win32::Foundation::LocalFree;
 
     const DPAPI_TAG: &[u8] = b"DPAPI";
 
@@ -205,8 +204,7 @@ mod win {
                 if protect { "protect" } else { "unprotect" }
             ));
         }
-        let out =
-            std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec();
+        let out = std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec();
         LocalFree(out_blob.pbData as _);
         Ok(out)
     }
@@ -317,16 +315,14 @@ pub fn export(profile_id: &str) -> Result<Vec<Cookie>> {
     }
     let crypt = Crypt::open(&udd)?;
     // Read-only keeps stopped-profile exports from mutating the database.
-    let conn = rusqlite::Connection::open_with_flags(
-        &path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(|e| {
-        anyhow::anyhow!(
-            "cannot read Cookie database {}: {e}; stop the browser profile and try again",
-            path.display()
-        )
-    })?;
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "cannot read Cookie database {}: {e}; stop the browser profile and try again",
+                    path.display()
+                )
+            })?;
 
     let mut stmt = conn.prepare(
         "SELECT host_key, name, value, encrypted_value, path, expires_utc, \
@@ -344,7 +340,13 @@ pub fn export(profile_id: &str) -> Result<Vec<Cookie>> {
         let has_expires: i64 = r.get(8)?;
         let samesite: i64 = r.get(9)?;
         Ok(Cookie {
-            value: crypt.decrypt(&enc, &plain),
+            value: crypt.decrypt(&enc, &plain).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    3,
+                    rusqlite::types::Type::Blob,
+                    Box::new(std::io::Error::other(error.to_string())),
+                )
+            })?,
             domain: host,
             name,
             path,
@@ -374,8 +376,8 @@ pub fn import(profile_id: &str, cookies: &[Cookie]) -> Result<usize> {
         std::fs::create_dir_all(parent).ok();
     }
     let crypt = Crypt::open(&udd)?;
-    let conn = rusqlite::Connection::open(&path)
-        .with_context(|| format!("open {}", path.display()))?;
+    let conn =
+        rusqlite::Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     ensure_schema(&conn)?;
 
     let now = now_chromium();

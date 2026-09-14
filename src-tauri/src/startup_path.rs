@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -57,8 +57,8 @@ fn ensure_portable_storage_writable(directory: &Path) -> Result<(), String> {
 }
 
 fn current_launcher_directory() -> Result<PathBuf, String> {
-    let executable = std::env::current_exe()
-        .map_err(|error| format!("无法获取启动器路径：{error}"))?;
+    let executable =
+        std::env::current_exe().map_err(|error| format!("无法获取启动器路径：{error}"))?;
     executable
         .parent()
         .map(Path::to_path_buf)
@@ -115,9 +115,7 @@ fn show_unwritable_path_and_exit(directory: &Path, detail: &str) -> ! {
 }
 
 pub(crate) fn show_fatal_startup_error_and_exit(detail: &str) -> ! {
-    let message = format!(
-        "ShardX Launcher 启动失败，软件将彻底退出。\n\n错误详情：{detail}"
-    );
+    let message = format!("ShardX Launcher 启动失败，软件将彻底退出。\n\n错误详情：{detail}");
     show_error_message(&message, "ShardX Launcher - 启动失败");
     std::process::exit(1);
 }
@@ -164,11 +162,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_directory_characters() {
-        for directory in [
-            r"C:\Shard.X",
-            r"C:\浏览器\ShardX",
-            r"C:\ShardX!",
-        ] {
+        for directory in [r"C:\Shard.X", r"C:\浏览器\ShardX", r"C:\ShardX!"] {
             assert!(
                 !is_valid_launcher_directory(Path::new(directory)),
                 "directory should be rejected: {directory}"

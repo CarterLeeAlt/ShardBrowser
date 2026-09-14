@@ -65,11 +65,19 @@ fn cap_to_host(cfg: &mut Value, hw: i64, hh: i64) {
 
     let fp_aw = {
         let v = as_int(scr.get("avail_width"));
-        if v > 0 { v } else { fp_w }
+        if v > 0 {
+            v
+        } else {
+            fp_w
+        }
     };
     let fp_ah = {
         let v = as_int(scr.get("avail_height"));
-        if v > 0 { v } else { fp_h }
+        if v > 0 {
+            v
+        } else {
+            fp_h
+        }
     };
 
     let scr_mut = cfg["screen"].as_object_mut().unwrap();

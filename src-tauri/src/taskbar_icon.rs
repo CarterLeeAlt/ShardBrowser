@@ -52,15 +52,13 @@ mod windows {
 
     const BASE_ICON_ICO: &[u8] = include_bytes!("../icons/shardx-browser-taskbar-base.ico");
     const LAUNCHER_ICON_ICO: &[u8] = include_bytes!("../icons/icon.ico");
-    const CASCADIA_MONO_REGULAR_TTF: &[u8] =
-        include_bytes!("../fonts/CascadiaMono-Regular.ttf");
+    const CASCADIA_MONO_REGULAR_TTF: &[u8] = include_bytes!("../fonts/CascadiaMono-Regular.ttf");
     const ICON_SIZE: i32 = 256;
     const ICON_SIZES: [u32; 10] = [16, 20, 24, 30, 32, 40, 48, 64, 128, 256];
     const TASKBAR_ICON_SIZES: [i32; 6] = [24, 30, 32, 40, 48, 64];
     const BADGE_FONT_HEIGHT_AT_256: i32 = 104;
     const BADGE_FONT_WIDTH_AT_256: i32 = 48;
-    const BADGE_LAYOUT_REVISION: &[u8] =
-        b"taskbar-badge-layout-v17-native-live-window-frame";
+    const BADGE_LAYOUT_REVISION: &[u8] = b"taskbar-badge-layout-v17-native-live-window-frame";
     const RT_ICON: *const u16 = 3usize as *const u16;
     const RT_GROUP_ICON: *const u16 = 14usize as *const u16;
     const DIB_RGB_COLORS: u32 = 0;
@@ -155,16 +153,12 @@ mod windows {
 
     #[repr(C)]
     struct PropertyStoreVTable {
-        query_interface: unsafe extern "system" fn(
-            *mut PropertyStore,
-            *const Guid,
-            *mut *mut c_void,
-        ) -> i32,
+        query_interface:
+            unsafe extern "system" fn(*mut PropertyStore, *const Guid, *mut *mut c_void) -> i32,
         add_ref: unsafe extern "system" fn(*mut PropertyStore) -> u32,
         release: unsafe extern "system" fn(*mut PropertyStore) -> u32,
         get_count: unsafe extern "system" fn(*mut PropertyStore, *mut u32) -> i32,
-        get_at:
-            unsafe extern "system" fn(*mut PropertyStore, u32, *mut PropertyKey) -> i32,
+        get_at: unsafe extern "system" fn(*mut PropertyStore, u32, *mut PropertyKey) -> i32,
         get_value: unsafe extern "system" fn(
             *mut PropertyStore,
             *const PropertyKey,
@@ -397,9 +391,7 @@ mod windows {
             let icons = match LoadedIcons::from_icon_file(&icon_path) {
                 Ok(icons) => icons,
                 Err(error) => {
-                    eprintln!(
-                        "[launcher] cannot load taskbar icons for {profile_id}: {error:#}"
-                    );
+                    eprintln!("[launcher] cannot load taskbar icons for {profile_id}: {error:#}");
                     return;
                 }
             };
@@ -412,12 +404,7 @@ mod windows {
                 // window owned by the same per-profile executable. Chromium
                 // can hand startup off to another process, so PID-only
                 // matching made the icon work on some launches but not others.
-                let matched = apply_profile_windows(
-                    pid,
-                    &executable,
-                    &icons,
-                    &app_id,
-                );
+                let matched = apply_profile_windows(pid, &executable, &icons, &app_id);
                 let tracked = crate::process::Tracker::shared().is_running_pid(pid);
                 if !tracked
                     && matched == 0
@@ -479,9 +466,30 @@ mod windows {
 
         fn profile_window_icons(&self, window: isize) -> (isize, isize) {
             let dpi = unsafe { GetDpiForWindow(window) };
-            let (big, small) =
-                profile_window_icon_indices(if dpi == 0 { 96 } else { dpi });
+            let (big, small) = profile_window_icon_indices(if dpi == 0 { 96 } else { dpi });
             (self.taskbar[big], self.taskbar[small])
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct RoundedRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        radius: i32,
+    }
+
+    impl RoundedRect {
+        fn contains(self, x: i32, y: i32) -> bool {
+            if x < self.left || x >= self.right || y < self.top || y >= self.bottom {
+                return false;
+            }
+            let nearest_x = x.clamp(self.left + self.radius, self.right - self.radius - 1);
+            let nearest_y = y.clamp(self.top + self.radius, self.bottom - self.radius - 1);
+            let dx = x - nearest_x;
+            let dy = y - nearest_y;
+            dx * dx + dy * dy <= self.radius * self.radius
         }
     }
 
@@ -491,12 +499,11 @@ mod windows {
         // the larger frame so Windows downsamples instead of upsampling.
         let target = ((24 * dpi + 48) / 96) as i32;
         let mut best = 0;
-        for index in 1..TASKBAR_ICON_SIZES.len() {
-            let distance = (TASKBAR_ICON_SIZES[index] - target).abs();
+        for (index, size) in TASKBAR_ICON_SIZES.iter().enumerate().skip(1) {
+            let distance = (*size - target).abs();
             let best_distance = (TASKBAR_ICON_SIZES[best] - target).abs();
             if distance < best_distance
-                || (distance == best_distance
-                    && TASKBAR_ICON_SIZES[index] > TASKBAR_ICON_SIZES[best])
+                || (distance == best_distance && *size > TASKBAR_ICON_SIZES[best])
             {
                 best = index;
             }
@@ -602,9 +609,7 @@ mod windows {
         let context = &*(param as *const WindowApplyContext);
         let mut window_pid = 0u32;
         GetWindowThreadProcessId(window, &mut window_pid);
-        if window_pid != context.pid
-            && !process_uses_executable(window_pid, &*context.executable)
-        {
+        if window_pid != context.pid && !process_uses_executable(window_pid, &*context.executable) {
             return 1;
         }
 
@@ -700,9 +705,7 @@ mod windows {
             let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
                 continue;
             };
-            if name.starts_with(&prefix)
-                && (name.ends_with(".exe") || name.ends_with(".ico"))
-            {
+            if name.starts_with(&prefix) && (name.ends_with(".exe") || name.ends_with(".ico")) {
                 // A still-running previous launcher remains locked by Windows and
                 // simply survives until the next launch-time cleanup.
                 let _ = fs::remove_file(path);
@@ -715,7 +718,9 @@ mod windows {
     }
 
     fn write_icon_sidecar(icon_path: &Path, icon: &[u8]) -> Result<()> {
-        let parent = icon_path.parent().context("profile icon has no parent directory")?;
+        let parent = icon_path
+            .parent()
+            .context("profile icon has no parent directory")?;
         let file_name = icon_path
             .file_name()
             .and_then(|name| name.to_str())
@@ -773,52 +778,34 @@ mod windows {
             return Ok(());
         }
         let badge_height = scaled(132, icon_size);
-        let radius = scaled(20, icon_size).max(1);
-        let left = 0;
-        let top = icon_size - badge_height;
-        let right = icon_size;
-        let bottom = icon_size;
-        fill_rounded_rect(
-            rgba,
-            icon_size,
-            left,
-            top,
-            right,
-            bottom,
-            radius,
-            [3, 8, 15, 252],
-        );
+        let badge = RoundedRect {
+            left: 0,
+            top: icon_size - badge_height,
+            right: icon_size,
+            bottom: icon_size,
+            radius: scaled(20, icon_size).max(1),
+        };
+        fill_rounded_rect(rgba, icon_size, badge, [3, 8, 15, 252]);
 
         // Native bitmap strikes are used only through 32px. Their fixed cells
         // are written directly into the RGBA frame: no GDI, antialiasing, or
         // resize step can introduce grey edge pixels. Unsupported legacy text
         // falls through to the existing Cascadia renderer instead of breaking
         // browser launch.
-        if render_pixel_badge_text(rgba, label, icon_size, top, badge_height, radius) {
-            force_rounded_alpha(rgba, icon_size, left, top, right, bottom, radius);
+        if render_pixel_badge_text(rgba, label, icon_size, badge_height, badge) {
+            force_rounded_alpha(rgba, icon_size, badge);
             return Ok(());
         }
 
-        render_cascadia_badge_text(
-            rgba,
-            label,
-            icon_size,
-            top,
-            badge_height,
-            left,
-            right,
-            bottom,
-            radius,
-        )
+        render_cascadia_badge_text(rgba, label, icon_size, badge_height, badge)
     }
 
     fn render_pixel_badge_text(
         rgba: &mut [u8],
         label: &str,
         icon_size: i32,
-        top: i32,
         badge_height: i32,
-        radius: i32,
+        badge: RoundedRect,
     ) -> bool {
         let Some(font) = crate::pixel_font_data::for_icon_size(icon_size) else {
             return false;
@@ -831,13 +818,9 @@ mod windows {
         {
             return false;
         }
-        let Some((text_x, text_y)) = pixel_text_origin(
-            font,
-            &characters,
-            icon_size,
-            top,
-            badge_height,
-        ) else {
+        let Some((text_x, text_y)) =
+            pixel_text_origin(font, &characters, icon_size, badge.top, badge_height)
+        else {
             return false;
         };
 
@@ -855,7 +838,7 @@ mod windows {
                     }
                     let x = glyph_x + column;
                     let y = text_y + row;
-                    if !inside_rounded_rect(x, y, 0, top, icon_size, icon_size, radius) {
+                    if !badge.contains(x, y) {
                         continue;
                     }
                     let offset = ((y * icon_size + x) * 4) as usize;
@@ -888,17 +871,12 @@ mod windows {
         Some(((icon_size - text_width) / 2, text_y))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_cascadia_badge_text(
         rgba: &mut [u8],
         label: &str,
         icon_size: i32,
-        top: i32,
         badge_height: i32,
-        left: i32,
-        right: i32,
-        bottom: i32,
-        radius: i32,
+        badge: RoundedRect,
     ) -> Result<()> {
         let text: Vec<u16> = label.encode_utf16().collect();
         if text.is_empty() {
@@ -919,7 +897,8 @@ mod windows {
         unsafe {
             let dc = CreateCompatibleDC(0);
             if dc == 0 {
-                return Err(std::io::Error::last_os_error()).context("create badge drawing context");
+                return Err(std::io::Error::last_os_error())
+                    .context("create badge drawing context");
             }
 
             let mut info: BitmapInfo = zeroed();
@@ -939,7 +918,7 @@ mod windows {
             }
 
             let mut bgra = Vec::with_capacity(rgba.len());
-            for pixel in rgba.chunks_exact(4) {
+            for pixel in rgba.as_chunks::<4>().0 {
                 bgra.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
             }
             copy_nonoverlapping(bgra.as_ptr(), bits.cast::<u8>(), bgra.len());
@@ -961,8 +940,7 @@ mod windows {
                 SelectObject(dc, old_bitmap);
                 DeleteObject(bitmap);
                 DeleteDC(dc);
-                return Err(std::io::Error::last_os_error())
-                    .context("set badge character spacing");
+                return Err(std::io::Error::last_os_error()).context("set badge character spacing");
             }
             let mut final_size = Size::default();
             if GetTextExtentPoint32W(dc, text.as_ptr(), text.len() as i32, &mut final_size) == 0 {
@@ -980,11 +958,11 @@ mod windows {
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, 0x00ff_ffff);
             let text_x = (icon_size - final_size.cx) / 2;
-            let text_y = top + (badge_height - final_size.cy) / 2;
+            let text_y = badge.top + (badge_height - final_size.cy) / 2;
             let drawn = TextOutW(dc, text_x, text_y, text.as_ptr(), text.len() as i32);
 
             let rendered = slice::from_raw_parts(bits.cast::<u8>(), rgba.len());
-            for (index, pixel) in rendered.chunks_exact(4).enumerate() {
+            for (index, pixel) in rendered.as_chunks::<4>().0.iter().enumerate() {
                 let offset = index * 4;
                 rgba[offset] = pixel[2];
                 rgba[offset + 1] = pixel[1];
@@ -993,15 +971,7 @@ mod windows {
             }
             // GDI does not maintain alpha for glyph pixels. The whole badge is
             // intentionally opaque, so restore alpha for its rounded footprint.
-            force_rounded_alpha(
-                rgba,
-                icon_size,
-                left,
-                top,
-                right,
-                bottom,
-                radius,
-            );
+            force_rounded_alpha(rgba, icon_size, badge);
 
             SelectObject(dc, old_font);
             DeleteObject(font);
@@ -1070,19 +1040,10 @@ mod windows {
         Ok(font)
     }
 
-    fn fill_rounded_rect(
-        rgba: &mut [u8],
-        icon_size: i32,
-        left: i32,
-        top: i32,
-        right: i32,
-        bottom: i32,
-        radius: i32,
-        color: [u8; 4],
-    ) {
-        for y in top.max(0)..bottom.min(icon_size) {
-            for x in left.max(0)..right.min(icon_size) {
-                if inside_rounded_rect(x, y, left, top, right, bottom, radius) {
+    fn fill_rounded_rect(rgba: &mut [u8], icon_size: i32, rect: RoundedRect, color: [u8; 4]) {
+        for y in rect.top.max(0)..rect.bottom.min(icon_size) {
+            for x in rect.left.max(0)..rect.right.min(icon_size) {
+                if rect.contains(x, y) {
                     let offset = ((y * icon_size + x) * 4) as usize;
                     rgba[offset..offset + 4].copy_from_slice(&color);
                 }
@@ -1090,42 +1051,15 @@ mod windows {
         }
     }
 
-    fn force_rounded_alpha(
-        rgba: &mut [u8],
-        icon_size: i32,
-        left: i32,
-        top: i32,
-        right: i32,
-        bottom: i32,
-        radius: i32,
-    ) {
-        for y in top.max(0)..bottom.min(icon_size) {
-            for x in left.max(0)..right.min(icon_size) {
-                if inside_rounded_rect(x, y, left, top, right, bottom, radius) {
+    fn force_rounded_alpha(rgba: &mut [u8], icon_size: i32, rect: RoundedRect) {
+        for y in rect.top.max(0)..rect.bottom.min(icon_size) {
+            for x in rect.left.max(0)..rect.right.min(icon_size) {
+                if rect.contains(x, y) {
                     let offset = ((y * icon_size + x) * 4 + 3) as usize;
                     rgba[offset] = 255;
                 }
             }
         }
-    }
-
-    fn inside_rounded_rect(
-        x: i32,
-        y: i32,
-        left: i32,
-        top: i32,
-        right: i32,
-        bottom: i32,
-        radius: i32,
-    ) -> bool {
-        if x < left || x >= right || y < top || y >= bottom {
-            return false;
-        }
-        let nearest_x = x.clamp(left + radius, right - radius - 1);
-        let nearest_y = y.clamp(top + radius, bottom - radius - 1);
-        let dx = x - nearest_x;
-        let dy = y - nearest_y;
-        dx * dx + dy * dy <= radius * radius
     }
 
     fn scaled(value_at_256: i32, icon_size: i32) -> i32 {
@@ -1141,7 +1075,8 @@ mod windows {
         unsafe {
             let update = BeginUpdateResourceW(executable_wide.as_ptr(), 0);
             if update == 0 {
-                return Err(std::io::Error::last_os_error()).context("open profile launcher resources");
+                return Err(std::io::Error::last_os_error())
+                    .context("open profile launcher resources");
             }
 
             let result = (|| -> Result<()> {
@@ -1181,7 +1116,8 @@ mod windows {
                 return result;
             }
             if EndUpdateResourceW(update, 0) == 0 {
-                return Err(std::io::Error::last_os_error()).context("commit profile launcher icon");
+                return Err(std::io::Error::last_os_error())
+                    .context("commit profile launcher icon");
             }
         }
         Ok(())
@@ -1215,7 +1151,9 @@ mod windows {
             let offset = 6 + index * 16;
             let size = read_u32(bytes, offset + 8)? as usize;
             let image_offset = read_u32(bytes, offset + 12)? as usize;
-            let end = image_offset.checked_add(size).context("ICO image overflow")?;
+            let end = image_offset
+                .checked_add(size)
+                .context("ICO image overflow")?;
             let data = bytes
                 .get(image_offset..end)
                 .context("truncated ICO image")?
@@ -1278,9 +1216,9 @@ mod windows {
     mod tests {
         use super::{
             build_badged_icon, nearest_taskbar_icon_index, parse_ico, pixel_text_origin,
-            profile_window_icon_indices, render_badge, scaled, BASE_ICON_ICO,
-            BADGE_FONT_HEIGHT_AT_256, BADGE_FONT_WIDTH_AT_256, CASCADIA_MONO_REGULAR_TTF,
-            ICON_SIZES, LAUNCHER_ICON_ICO, TASKBAR_ICON_SIZES, inside_rounded_rect,
+            profile_window_icon_indices, render_badge, scaled, RoundedRect,
+            BADGE_FONT_HEIGHT_AT_256, BADGE_FONT_WIDTH_AT_256, BASE_ICON_ICO,
+            CASCADIA_MONO_REGULAR_TTF, ICON_SIZES, LAUNCHER_ICON_ICO, TASKBAR_ICON_SIZES,
         };
         use ico::IconDir;
         use std::io::Cursor;
@@ -1335,10 +1273,7 @@ mod windows {
 
         #[test]
         fn taskbar_icon_uses_native_24px_at_96_dpi() {
-            assert_eq!(
-                TASKBAR_ICON_SIZES[nearest_taskbar_icon_index(96)],
-                24
-            );
+            assert_eq!(TASKBAR_ICON_SIZES[nearest_taskbar_icon_index(96)], 24);
         }
 
         #[test]
@@ -1350,22 +1285,10 @@ mod windows {
 
         #[test]
         fn taskbar_icon_selects_the_closest_native_frame_for_scaled_dpi() {
-            assert_eq!(
-                TASKBAR_ICON_SIZES[nearest_taskbar_icon_index(120)],
-                30
-            );
-            assert_eq!(
-                TASKBAR_ICON_SIZES[nearest_taskbar_icon_index(128)],
-                32
-            );
-            assert_eq!(
-                TASKBAR_ICON_SIZES[nearest_taskbar_icon_index(144)],
-                40
-            );
-            assert_eq!(
-                TASKBAR_ICON_SIZES[nearest_taskbar_icon_index(192)],
-                48
-            );
+            assert_eq!(TASKBAR_ICON_SIZES[nearest_taskbar_icon_index(120)], 30);
+            assert_eq!(TASKBAR_ICON_SIZES[nearest_taskbar_icon_index(128)], 32);
+            assert_eq!(TASKBAR_ICON_SIZES[nearest_taskbar_icon_index(144)], 40);
+            assert_eq!(TASKBAR_ICON_SIZES[nearest_taskbar_icon_index(192)], 48);
         }
 
         #[test]
@@ -1394,9 +1317,12 @@ mod windows {
                 expected.len()
             );
             for (icon_size, cell_width, cell_height, fixed_y_offset) in expected {
-                let font = crate::pixel_font_data::for_icon_size(icon_size)
-                    .expect("native pixel strike");
-                assert_eq!((font.cell_width, font.cell_height), (cell_width, cell_height));
+                let font =
+                    crate::pixel_font_data::for_icon_size(icon_size).expect("native pixel strike");
+                assert_eq!(
+                    (font.cell_width, font.cell_height),
+                    (cell_width, cell_height)
+                );
                 assert_eq!(font.fixed_y_offset, fixed_y_offset);
                 for character in
                     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-?".chars()
@@ -1442,8 +1368,8 @@ mod windows {
                     .chars()
                     .collect();
             for icon_size in crate::pixel_font_data::PIXEL_ICON_SIZES {
-                let font = crate::pixel_font_data::for_icon_size(icon_size)
-                    .expect("native pixel strike");
+                let font =
+                    crate::pixel_font_data::for_icon_size(icon_size).expect("native pixel strike");
                 let badge_height = scaled(132, icon_size);
                 let top = icon_size - badge_height;
                 let expected_y = pixel_text_origin(font, &['A'], icon_size, top, badge_height)
@@ -1459,15 +1385,10 @@ mod windows {
                         vec!['A', *character, 'A'],
                         vec!['A', 'A', *character],
                     ] {
-                        let actual_y = pixel_text_origin(
-                            font,
-                            &label,
-                            icon_size,
-                            top,
-                            badge_height,
-                        )
-                        .expect("supported fixed-anchor label")
-                        .1;
+                        let actual_y =
+                            pixel_text_origin(font, &label, icon_size, top, badge_height)
+                                .expect("supported fixed-anchor label")
+                                .1;
                         assert_eq!(
                             actual_y, expected_y,
                             "{icon_size}px vertical anchor changed for {label:?}"
@@ -1484,11 +1405,16 @@ mod windows {
                     .chars()
                     .collect();
             for icon_size in crate::pixel_font_data::PIXEL_ICON_SIZES {
-                let font = crate::pixel_font_data::for_icon_size(icon_size)
-                    .expect("native pixel strike");
+                let font =
+                    crate::pixel_font_data::for_icon_size(icon_size).expect("native pixel strike");
                 let badge_height = scaled(132, icon_size);
-                let top = icon_size - badge_height;
-                let radius = scaled(20, icon_size).max(1);
+                let badge = RoundedRect {
+                    left: 0,
+                    top: icon_size - badge_height,
+                    right: icon_size,
+                    bottom: icon_size,
+                    radius: scaled(20, icon_size).max(1),
+                };
                 for character in &characters {
                     for label_characters in [
                         vec![*character],
@@ -1514,7 +1440,7 @@ mod windows {
                         render_badge(&mut rgba, &label, icon_size)
                             .expect("render native pixel badge");
                         let mut white_pixels = 0usize;
-                        for (pixel_index, pixel) in rgba.chunks_exact(4).enumerate() {
+                        for (pixel_index, pixel) in rgba.as_chunks::<4>().0.iter().enumerate() {
                             match pixel {
                                 [0, 0, 0, 0] | [3, 8, 15, 255] => {}
                                 [255, 255, 255, 255] => {
@@ -1522,15 +1448,7 @@ mod windows {
                                     let x = pixel_index as i32 % icon_size;
                                     let y = pixel_index as i32 / icon_size;
                                     assert!(
-                                        inside_rounded_rect(
-                                            x,
-                                            y,
-                                            0,
-                                            top,
-                                            icon_size,
-                                            icon_size,
-                                            radius,
-                                        ),
+                                        badge.contains(x, y),
                                         "{icon_size}px {label:?} escaped the badge at ({x}, {y})"
                                     );
                                 }

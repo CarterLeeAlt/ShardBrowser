@@ -2,8 +2,7 @@
 //
 // Used by .github/workflows/release.yml. Modes:
 //   * explicit  — `--explicit v2.0.5` publishes exactly that tag (manual runs)
-//   * auto      — publishes `--base` (the repo's version files), bumping past
-//                 any tag that already exists
+//   * auto      — `--base 2.0.5` publishes exactly the source-tree version
 // After a successful publish the workflow writes bump(base) back into the
 // version files, so the next push publishes the next number: 2.0.2 → 2.0.3.
 //
@@ -11,8 +10,8 @@
 // 2.9.9 → 3.0.0); major is unbounded.
 //
 // Usage:
-//   node scripts/next-release-version.mjs --base 2.0.2 --taken "v1.0.1 v1.0.2"
-//   node scripts/next-release-version.mjs --base 2.0.2 --explicit v3.1.4
+//   node scripts/next-release-version.mjs --base 2.0.2
+//   node scripts/next-release-version.mjs --explicit v3.1.4
 //   node scripts/next-release-version.mjs --base 2.0.9 --next   (post-release write-back)
 // Output (KEY=VALUE lines, consumed via GITHUB_OUTPUT):
 //   tag=v2.0.3
@@ -41,18 +40,11 @@ const { values } = parseArgs({
   options: {
     base: { type: "string" },
     explicit: { type: "string" },
-    taken: { type: "string", default: "" },
     // Resolve the version AFTER the input one instead of publishing the input
     // (used to write the next number back into the version files).
     next: { type: "boolean", default: false },
   },
 });
-
-const taken = new Set(
-  values.taken
-    .split(/\s+/)
-    .filter(Boolean),
-);
 
 let version;
 if (values.explicit) {
@@ -75,11 +67,6 @@ if (values.explicit) {
 
 if (values.next) {
   version = bump(version);
-} else {
-  // Never republish an existing tag: keep rolling until the tag is free.
-  while (taken.has(`v${version}`)) {
-    version = bump(version);
-  }
 }
 
 console.log(`tag=v${version}`);
