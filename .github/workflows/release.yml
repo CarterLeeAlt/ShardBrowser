@@ -155,6 +155,32 @@ jobs:
           Copy-Item -LiteralPath $src -Destination "staging/ShardX-Launcher-portable-win-x64.exe" -Verbose
           Get-ChildItem staging
 
+      # The self-contained bundle is assembled from the archives snapshotted on
+      # the `runtime-archive` release by the "Sync runtime archive" workflow.
+      # That release must exist and be seeded before this workflow can succeed.
+      - name: Download runtime archive snapshot
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force .runtime-archive | Out-Null
+          gh release download runtime-archive --repo ${{ github.repository }} --dir .runtime-archive --clobber
+          $required = "ShardX-Windows.zip", "ShardX-Widevine-Win.zip", "ShardX-Fingerprints.zip", "runtime-archive.json"
+          foreach ($name in $required) {
+            if (-not (Test-Path -LiteralPath (Join-Path ".runtime-archive" $name))) {
+              throw "The runtime-archive release is missing $name; run the 'Sync runtime archive' workflow first."
+            }
+          }
+
+      - name: Build self-contained bundle
+        shell: pwsh
+        run: |
+          node scripts/build-selfcontained.mjs `
+            --exe "staging/ShardX-Launcher-portable-win-x64.exe" `
+            --zips ".runtime-archive" `
+            --out "staging/ShardX-Launcher-selfcontained-win-x64.zip"
+          Get-ChildItem staging
+
       - name: Upload to workflow artifacts (intermediate)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -201,6 +227,8 @@ jobs:
             **Windows x64 only** — run `ShardX-Launcher-portable-win-x64.exe` directly. The filename is version-free on purpose: replace the old exe in place and existing shortcuts keep working (the release tag shows the version). No installer is produced. All launcher state is stored in the adjacent `shardx-launcher` directory, so keep that directory with the EXE when moving or backing up the launcher. The portable build uses the Evergreen WebView2 runtime included with Windows 10/11. Because the binary is not Authenticode-signed, SmartScreen may require **More info → Run anyway**.
 
             On first launch the launcher downloads the patched ShardX browser, Widevine CDM and a starter library of 170 device profiles from our CDN. After that it boots straight to the workspace.
+
+            **Self-contained variant** — `ShardX-Launcher-selfcontained-win-x64.zip` bundles the launcher with the browser runtime, Widevine CDM and fingerprint library already installed: extract the folder anywhere and run `ShardX Launcher.exe`, no first-run download. Keep the `shardx-launcher` directory next to the EXE. The bundled runtime is the snapshot taken when this release was built; later runtime updates arrive through the launcher's own update check as usual.
           files: dist/*
 
       - name: Bump version files for the next run
