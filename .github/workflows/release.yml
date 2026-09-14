@@ -216,25 +216,7 @@ jobs:
             exit 0
           }
 
-          function Replace-One([string]$Path, [string]$Pattern, [string]$Replacement) {
-            $text = [System.IO.File]::ReadAllText($Path)
-            $matches = [regex]::Matches($text, $Pattern)
-            if ($matches.Count -ne 1) {
-              throw "Expected exactly one version entry in $Path; found $($matches.Count)."
-            }
-            $updated = [regex]::Replace($text, $Pattern, $Replacement)
-          [System.IO.File]::WriteAllText($Path, $updated, [System.Text.UTF8Encoding]::new($false))
-          }
-
-          $oldEscaped = [regex]::Escape($old)
-          $new = $env:NEW_VERSION
-          Replace-One "package.json" "(?m)^(  \"version\": )\"$oldEscaped\"$" "`${1}`"$new`""
-          Replace-One "package-lock.json" "(?m)^(  \"version\": )\"$oldEscaped\"$" "`${1}`"$new`""
-          Replace-One "package-lock.json" "(?ms)(^  \"packages\": \{\r?\n    \"\": \{\r?\n      \"name\": \"shardx-launcher\",\r?\n      \"version\": )\"$oldEscaped\"" "`${1}`"$new`""
-          Replace-One "src-tauri/tauri.conf.json" "(?m)^(  \"version\": )\"$oldEscaped\"$" "`${1}`"$new`""
-          Replace-One "src-tauri/Cargo.toml" "(?m)^(version = )\"$oldEscaped\"$" "`${1}`"$new`""
-          Replace-One "src-tauri/Cargo.lock" "(?ms)(\[\[package\]\]\r?\nname = \"shardx-launcher\"\r?\nversion = )\"$oldEscaped\"" "`${1}`"$new`""
-
+          node scripts/bump-release-version.mjs --from $old --to $env:NEW_VERSION
           node scripts/check-version-consistency.mjs
 
           git config user.name "github-actions[bot]"
