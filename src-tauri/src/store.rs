@@ -67,6 +67,19 @@ pub fn display_order_path() -> Result<PathBuf> {
     Ok(config_root()?.join("display-order.json"))
 }
 
+/// Durable ownership records for browser processes that can survive a launcher
+/// restart. The tracker owns its JSON schema; this module only owns its path.
+pub fn process_leases_path() -> Result<PathBuf> {
+    Ok(config_root()?.join("process-leases.json"))
+}
+
+/// Durable journal for profile folder and deletion transactions. It is recovered
+/// before temporary-profile cleanup so an interrupted operation cannot leave a
+/// partially retagged profile set or detached user-data directory.
+pub fn profile_operation_journal_path() -> Result<PathBuf> {
+    Ok(config_root()?.join("profile-operations.json"))
+}
+
 pub fn backup_path(path: &Path) -> Result<PathBuf> {
     let name = path
         .file_name()
@@ -88,12 +101,21 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     publish_bytes(path, bytes)
 }
 
+/// Publish a secret-bearing document and its recovery copy without ever
+/// reproducing the legacy plaintext payload in a fresh backup.
+pub fn atomic_write_sensitive(path: &Path, bytes: &[u8]) -> Result<()> {
+    let backup = backup_path(path)?;
+    publish_bytes(&backup, bytes)
+        .with_context(|| format!("update protected backup {}", backup.display()))?;
+    publish_bytes(path, bytes)
+}
+
 /// Parse a critical JSON file, recovering from its last-known-good backup when
 /// the primary was truncated by a crash or power loss. Recovery also restores
 /// the primary without overwriting the good backup with corrupted bytes.
 pub fn load_json_with_backup<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    let primary = std::fs::read(path)
-        .with_context(|| format!("read persistent file {}", path.display()))?;
+    let primary =
+        std::fs::read(path).with_context(|| format!("read persistent file {}", path.display()))?;
     match serde_json::from_slice(&primary) {
         Ok(value) => Ok(value),
         Err(primary_error) => {
@@ -133,10 +155,7 @@ fn publish_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
         .file_name()
         .and_then(|value| value.to_str())
         .context("persistent file has an invalid name")?;
-    let temporary = parent.join(format!(
-        ".{name}.{}.tmp",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let temporary = parent.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
     let result = (|| -> Result<()> {
         let mut output = std::fs::OpenOptions::new()
             .write(true)

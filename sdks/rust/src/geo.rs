@@ -34,7 +34,11 @@ fn url_for(provider: &str) -> &'static str {
 
 /// Probe the geo `proxy` exits at, or direct geo when `proxy` is `None`.
 pub async fn geo_check_via(proxy: Option<&ParsedProxy>, provider: &str) -> Result<GeoInfo> {
-    let provider = if provider.is_empty() { "ip-api.com" } else { provider };
+    let provider = if provider.is_empty() {
+        "ip-api.com"
+    } else {
+        provider
+    };
     let url = url_for(provider);
 
     let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(8));
@@ -47,7 +51,8 @@ pub async fn geo_check_via(proxy: Option<&ParsedProxy>, provider: &str) -> Resul
         let proxy_url = if p.username.is_empty() && p.password.is_empty() {
             format!("{scheme}://{}:{}", p.host, p.port)
         } else {
-            let enc = |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
+            let enc =
+                |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
             format!(
                 "{scheme}://{}:{}@{}:{}",
                 enc(&p.username),
@@ -63,7 +68,12 @@ pub async fn geo_check_via(proxy: Option<&ParsedProxy>, provider: &str) -> Resul
 
     let body: Value = builder.build()?.get(url).send().await?.json().await?;
 
-    let s = |k: &str| body.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let s = |k: &str| {
+        body.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
     let f = |k: &str| body.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
 
     Ok(match provider {

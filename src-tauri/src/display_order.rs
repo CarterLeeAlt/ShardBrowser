@@ -156,13 +156,7 @@ pub fn move_profile(
         .lock()
         .map_err(|_| anyhow::anyhow!("display order lock poisoned"))?;
     let mut saved = load_unlocked()?;
-    saved.profiles = move_in_order(
-        &saved.profiles,
-        default_ids,
-        id,
-        anchor_id,
-        placement,
-    )?;
+    saved.profiles = move_in_order(&saved.profiles, default_ids, id, anchor_id, placement)?;
     save_unlocked(&saved)
 }
 
@@ -204,13 +198,7 @@ pub fn move_proxy(
         .lock()
         .map_err(|_| anyhow::anyhow!("display order lock poisoned"))?;
     let mut saved = load_unlocked()?;
-    saved.proxies = move_in_order(
-        &saved.proxies,
-        default_ids,
-        id,
-        anchor_id,
-        placement,
-    )?;
+    saved.proxies = move_in_order(&saved.proxies, default_ids, id, anchor_id, placement)?;
     save_unlocked(&saved)
 }
 
@@ -225,10 +213,7 @@ mod tests {
     #[test]
     fn reconcile_appends_new_items_and_prunes_stale_ids() {
         assert_eq!(
-            reconcile_order(
-                &ids(&["b", "missing", "a", "b"]),
-                &ids(&["c", "b", "a"]),
-            ),
+            reconcile_order(&ids(&["b", "missing", "a", "b"]), &ids(&["c", "b", "a"]),),
             ids(&["b", "a", "c"]),
         );
     }
@@ -261,67 +246,26 @@ mod tests {
     #[test]
     fn move_supports_before_and_after_anchors() {
         let defaults = ids(&["a", "b", "c", "d"]);
-        let before = move_in_order(
-            &[],
-            &defaults,
-            "d",
-            Some("b"),
-            Placement::Before,
-        )
-        .unwrap();
+        let before = move_in_order(&[], &defaults, "d", Some("b"), Placement::Before).unwrap();
         assert_eq!(before, ids(&["a", "d", "b", "c"]));
-        let after = move_in_order(
-            &before,
-            &defaults,
-            "a",
-            Some("c"),
-            Placement::After,
-        )
-        .unwrap();
+        let after = move_in_order(&before, &defaults, "a", Some("c"), Placement::After).unwrap();
         assert_eq!(after, ids(&["d", "b", "c", "a"]));
     }
 
     #[test]
     fn move_without_anchor_supports_list_edges() {
         let defaults = ids(&["new", "a", "b"]);
-        let end = move_in_order(
-            &ids(&["a", "b"]),
-            &defaults,
-            "new",
-            None,
-            Placement::After,
-        )
-        .unwrap();
+        let end =
+            move_in_order(&ids(&["a", "b"]), &defaults, "new", None, Placement::After).unwrap();
         assert_eq!(end, ids(&["a", "b", "new"]));
-        let start = move_in_order(
-            &end,
-            &defaults,
-            "b",
-            None,
-            Placement::Before,
-        )
-        .unwrap();
+        let start = move_in_order(&end, &defaults, "b", None, Placement::Before).unwrap();
         assert_eq!(start, ids(&["b", "a", "new"]));
     }
 
     #[test]
     fn move_rejects_missing_source_or_anchor() {
         let defaults = ids(&["a", "b"]);
-        assert!(move_in_order(
-            &[],
-            &defaults,
-            "missing",
-            Some("a"),
-            Placement::Before,
-        )
-        .is_err());
-        assert!(move_in_order(
-            &[],
-            &defaults,
-            "a",
-            Some("missing"),
-            Placement::Before,
-        )
-        .is_err());
+        assert!(move_in_order(&[], &defaults, "missing", Some("a"), Placement::Before,).is_err());
+        assert!(move_in_order(&[], &defaults, "a", Some("missing"), Placement::Before,).is_err());
     }
 }

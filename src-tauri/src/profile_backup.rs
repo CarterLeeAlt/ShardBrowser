@@ -1,10 +1,12 @@
 //! Complete, versioned ShardX profile backups.
 //!
-//! A v2 `.shardx-backup` is a binary ZIP container holding the exact launcher
+//! A v3 `.shardx-backup` is a binary ZIP container holding the exact launcher
 //! profile, its bound proxy, the complete Chromium user-data tree, and the raw
-//! OSCrypt key. The key is re-wrapped with the destination Windows user's
-//! DPAPI credentials during restore, so Chromium keeps the same encrypted
-//! database key even though the launcher assigns a fresh profile UUID.
+//! OSCrypt key. Proxy credentials are encrypted with the exporting Windows
+//! user's DPAPI; v2 plaintext proxy payloads remain import-compatible. The key
+//! is re-wrapped with the destination Windows user's DPAPI credentials during
+//! restore, so Chromium keeps the same encrypted database key even though the
+//! launcher assigns a fresh profile UUID.
 
 use crate::{cookies, display_order, fingerprints, process, profile, proxy, store};
 use anyhow::{anyhow, bail, Context, Result};
@@ -18,7 +20,8 @@ use std::sync::Mutex;
 use zip::write::SimpleFileOptions;
 
 const BACKUP_FORMAT: &str = "shardx-profile-backup";
-const BACKUP_VERSION: u32 = 2;
+const BACKUP_VERSION: u32 = 3;
+const MIN_BACKUP_VERSION: u32 = 2;
 const MANIFEST_ENTRY: &str = "manifest.json";
 const PROFILE_ENTRY: &str = "profile.json";
 const PROXY_ENTRY: &str = "proxy.json";
@@ -149,12 +152,17 @@ fn unix_timestamp() -> Result<(u128, String)> {
 }
 
 fn should_skip_user_data(relative: &Path) -> bool {
-    let mut components = relative.components().filter_map(|component| match component {
-        Component::Normal(value) => value.to_str(),
-        _ => None,
-    });
+    let mut components = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => value.to_str(),
+            _ => None,
+        });
     let values: Vec<&str> = components.by_ref().collect();
-    if values.iter().any(|value| value.eq_ignore_ascii_case("Crashpad")) {
+    if values
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case("Crashpad"))
+    {
         return true;
     }
     let Some(name) = values.last() else {
@@ -193,7 +201,10 @@ fn collect_user_data_entries(
         }
         let metadata = fs::symlink_metadata(&source)?;
         if is_link_or_reparse_point(&metadata) {
-            bail!("user-data contains an unsupported link or reparse point: {}", relative.display());
+            bail!(
+                "user-data contains an unsupported link or reparse point: {}",
+                relative.display()
+            );
         }
         if metadata.is_dir() {
             entries.push(SourceEntry {
@@ -224,7 +235,7 @@ fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
     {
         use std::os::windows::fs::MetadataExt;
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
     #[cfg(not(windows))]
     false
@@ -369,7 +380,7 @@ fn build_backup_archive(profile_id: &str, stamp: u128, exported_at: &str) -> Res
     }
     let proxy_json = bound_proxy
         .as_ref()
-        .map(serde_json::to_vec_pretty)
+        .map(proxy::serialize_protected_backup_entry)
         .transpose()?;
     if proxy_json
         .as_ref()
@@ -456,7 +467,9 @@ fn build_backup_archive(profile_id: &str, stamp: u128, exported_at: &str) -> Res
     result
 }
 
-pub(crate) fn export(profile_ids: Vec<String>) -> std::result::Result<ProfileBackupSummary, String> {
+pub(crate) fn export(
+    profile_ids: Vec<String>,
+) -> std::result::Result<ProfileBackupSummary, String> {
     let _backup_guard = BACKUP_OPERATION_LOCK
         .lock()
         .map_err(|_| "profile backup operation lock is poisoned".to_string())?;
@@ -533,7 +546,11 @@ fn validate_archive_entry_name(name: &str) -> Result<()> {
 fn validate_record_path(record: &BackupEntry) -> Result<()> {
     validate_archive_entry_name(&record.path)?;
     if let Some(relative) = record.path.strip_prefix(USER_DATA_PREFIX) {
-        let depth = relative.trim_end_matches('/').split('/').filter(|part| !part.is_empty()).count();
+        let depth = relative
+            .trim_end_matches('/')
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .count();
         if depth > MAX_USER_DATA_DEPTH {
             bail!("backup user-data directory nesting exceeds the safety limit");
         }
@@ -585,7 +602,10 @@ fn extract_record(
     }
     if record.kind == BackupEntryKind::Directory {
         if !entry.is_dir() {
-            bail!("backup directory record is not a directory: {}", record.path);
+            bail!(
+                "backup directory record is not a directory: {}",
+                record.path
+            );
         }
         if record.path.starts_with(USER_DATA_PREFIX) {
             let relative = record.path[USER_DATA_PREFIX.len()..].trim_end_matches('/');
@@ -626,7 +646,10 @@ fn extract_record(
         }
         let digest = format!("{:x}", hasher.finalize());
         if digest != record.sha256 {
-            bail!("backup entry failed integrity verification: {}", record.path);
+            bail!(
+                "backup entry failed integrity verification: {}",
+                record.path
+            );
         }
         return Ok(None);
     }
@@ -641,7 +664,10 @@ fn extract_record(
     total = bytes.len() as u64;
     hasher.update(&bytes);
     if total != record.size || format!("{:x}", hasher.finalize()) != record.sha256 {
-        bail!("backup metadata failed integrity verification: {}", record.path);
+        bail!(
+            "backup metadata failed integrity verification: {}",
+            record.path
+        );
     }
     Ok(Some(bytes))
 }
@@ -701,8 +727,10 @@ fn prepare_import_inner(
     };
     let manifest: BackupManifest =
         serde_json::from_slice(&manifest_bytes).context("backup manifest is invalid")?;
-    if manifest.format != BACKUP_FORMAT || manifest.version != BACKUP_VERSION {
-        bail!("backup is not a supported ShardX v2 profile backup");
+    if manifest.format != BACKUP_FORMAT
+        || !(MIN_BACKUP_VERSION..=BACKUP_VERSION).contains(&manifest.version)
+    {
+        bail!("backup is not a supported ShardX v2 or v3 profile backup");
     }
     if manifest.entries.len() > MAX_ARCHIVE_ENTRIES + 4 {
         bail!("backup manifest contains too many entries");
@@ -788,7 +816,8 @@ fn prepare_import_inner(
         }
     }
 
-    let profile_bytes = profile_bytes.ok_or_else(|| anyhow!("backup profile payload is missing"))?;
+    let profile_bytes =
+        profile_bytes.ok_or_else(|| anyhow!("backup profile payload is missing"))?;
     let mut stored: profile::StoredProfile =
         serde_json::from_slice(&profile_bytes).context("backup profile payload is invalid")?;
     if stored.meta.id != manifest.source_profile_id {
@@ -803,7 +832,7 @@ fn prepare_import_inner(
         bail!("backup profile name does not match its manifest");
     }
     let bound_proxy = proxy_bytes
-        .map(|bytes| serde_json::from_slice::<proxy::ProxyEntry>(&bytes))
+        .map(|bytes| proxy::deserialize_backup_entry(&bytes, manifest.version))
         .transpose()
         .context("backup proxy payload is invalid")?;
     let key = os_crypt_key.ok_or_else(|| anyhow!("backup OSCrypt key is missing"))?;
@@ -832,7 +861,10 @@ fn prepare_import_inner(
 }
 
 fn prepare_import(path: &Path, remaining_batch_bytes: u64) -> Result<PreparedImport> {
-    if path.extension().and_then(|value| value.to_str()).map(str::to_ascii_lowercase)
+    if path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
         != Some("shardx-backup".to_string())
     {
         bail!("{} is not a .shardx-backup file", path.display());
@@ -974,9 +1006,8 @@ pub(crate) fn import(paths: Vec<String>) -> std::result::Result<ProfileBackupSum
         .iter()
         .map(|item| item.bound_proxy.clone())
         .collect();
-    let commit = proxy::with_restored_proxy_bindings(
-        bound_proxies,
-        |restored_proxy_ids| -> Result<()> {
+    let commit =
+        proxy::with_restored_proxy_bindings(bound_proxies, |restored_proxy_ids| -> Result<()> {
             let mut imported_ids = Vec::with_capacity(prepared.len());
             for (item, restored_proxy_id) in prepared.iter_mut().zip(restored_proxy_ids) {
                 let created_fingerprint_id;
@@ -1023,8 +1054,7 @@ pub(crate) fn import(paths: Vec<String>) -> std::result::Result<ProfileBackupSum
                 .collect::<Vec<_>>();
             display_order::append_profiles(&current_profile_ids, &imported_ids)?;
             Ok(())
-        },
-    );
+        });
 
     if let Err(error) = commit {
         return Err(import_failure(error, &prepared, &imported));
@@ -1087,9 +1117,15 @@ mod tests {
     fn excludes_only_transient_browser_files() {
         assert!(should_skip_user_data(Path::new("DevToolsActivePort")));
         assert!(should_skip_user_data(Path::new("SingletonLock")));
-        assert!(should_skip_user_data(Path::new("Crashpad/reports/report.dmp")));
+        assert!(should_skip_user_data(Path::new(
+            "Crashpad/reports/report.dmp"
+        )));
         assert!(!should_skip_user_data(Path::new("Default/Network/Cookies")));
-        assert!(!should_skip_user_data(Path::new("Default/Service Worker/CacheStorage/data")));
-        assert!(!should_skip_user_data(Path::new("Default/IndexedDB/site.leveldb")));
+        assert!(!should_skip_user_data(Path::new(
+            "Default/Service Worker/CacheStorage/data"
+        )));
+        assert!(!should_skip_user_data(Path::new(
+            "Default/IndexedDB/site.leveldb"
+        )));
     }
 }

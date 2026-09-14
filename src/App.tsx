@@ -401,18 +401,34 @@ type ProxyEntry = {
   kind: "socks5" | "http" | "https";
   host: string;
   port: number;
-  username: string;
-  password: string;
+  username?: string;
+  password?: string;
+  credentials_configured?: boolean;
+  credentials_unavailable?: boolean;
   country: string;
   notes: string;
+};
+type ProxyCredentialsUpdate =
+  | { mode: "keep" }
+  | { mode: "replace"; username: string; password: string }
+  | { mode: "clear" };
+type ProxySaveRequest = {
+  id: string;
+  name: string;
+  kind: ProxyEntry["kind"];
+  host: string;
+  port: number;
+  country: string;
+  notes: string;
+  credentials: ProxyCredentialsUpdate;
 };
 type Settings = {
   theme: string;
   geo_checker?: string | null;
   screen_resolution_mode?: string | null;
+  minimize_to_tray?: boolean;
   api_enabled?: boolean;
   api_port?: number;
-  api_secret?: string;
 };
 type ApiInfo = {
   enabled: boolean;
@@ -3208,7 +3224,7 @@ function ProxiesView() {
         String(p.port).includes(q) ||
         p.country.toLowerCase().includes(q) ||
         p.notes.toLowerCase().includes(q) ||
-        p.username.toLowerCase().includes(q) ||
+        (p.username ?? "").toLowerCase().includes(q) ||
         ip.includes(q) ||
         city.includes(q) ||
         isp.includes(q)
@@ -3262,7 +3278,17 @@ function ProxiesView() {
     const newName = renaming.draft.trim();
     if (newName === entry.name) { setRenaming(null); return; }
     try {
-      await invoke("proxy_save", { entry: { ...entry, name: newName } });
+      const request: ProxySaveRequest = {
+        id: entry.id,
+        name: newName,
+        kind: entry.kind,
+        host: entry.host,
+        port: entry.port,
+        country: entry.country,
+        notes: entry.notes,
+        credentials: { mode: "keep" },
+      };
+      await invoke("proxy_save", { entry: request });
       setRenaming(null);
       reload();
     } catch (e) { toast.err(String(e)); }
@@ -3417,7 +3443,7 @@ function ProxiesView() {
     const targets = proxies.filter((p) => proxySel.has(p.id));
     if (targets.length === 0) return;
     const lines = targets.map((p) => {
-      const auth = p.username || p.password ? `${p.username}:${p.password}@` : "";
+      const auth = p.username || p.password ? `${p.username ?? ""}:${p.password ?? ""}@` : "";
       const base = `${p.kind}://${auth}${p.host}:${p.port}`;
       const tag = p.country ? `  # country=${p.country}` : "";
       return base + tag;
@@ -4208,13 +4234,31 @@ host:8080               # no auth
 }
 
 function ProxyEditor({ initial, onClose }: { initial: ProxyEntry; onClose: () => void }) {
-  const [p, setP] = useState<ProxyEntry>(initial);
+  const [p, setP] = useState<ProxyEntry>({ ...initial, username: "", password: "" });
+  const [credentialsMode, setCredentialsMode] = useState<"keep" | "replace" | "clear">("keep");
   const save = async () => {
     try {
-      await invoke("proxy_save", { entry: p });
+      const credentials: ProxyCredentialsUpdate = credentialsMode === "replace"
+        ? { mode: "replace", username: p.username ?? "", password: p.password ?? "" }
+        : { mode: credentialsMode };
+      const request: ProxySaveRequest = {
+        id: p.id,
+        name: p.name,
+        kind: p.kind,
+        host: p.host,
+        port: p.port,
+        country: p.country,
+        notes: p.notes,
+        credentials,
+      };
+      await invoke("proxy_save", { entry: request });
       toast.ok(initial.id ? "Proxy saved" : "Proxy added");
       onClose();
     } catch (e) { toast.err(String(e)); }
+  };
+  const clearCredentials = () => {
+    setP({ ...p, username: "", password: "", credentials_configured: false, credentials_unavailable: false });
+    setCredentialsMode("clear");
   };
   return (
     <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
@@ -4239,9 +4283,28 @@ function ProxyEditor({ initial, onClose }: { initial: ProxyEntry; onClose: () =>
             <NumField label="Port" value={p.port} onChange={(v) => setP({ ...p, port: v as any })} />
           </div>
           <div className="form-row">
-            <Field label="Username" value={p.username} onChange={(v: string) => setP({ ...p, username: v })} />
-            <Field label="Password" value={p.password} onChange={(v: string) => setP({ ...p, password: v })} type="password" />
+            <Field
+              label="Username"
+              value={p.username ?? ""}
+              onChange={(v: string) => {
+                setP({ ...p, username: v, credentials_unavailable: false });
+                setCredentialsMode("replace");
+              }}
+            />
+            <Field
+              label="Password"
+              value={p.password ?? ""}
+              onChange={(v: string) => {
+                setP({ ...p, password: v, credentials_unavailable: false });
+                setCredentialsMode("replace");
+              }}
+              type="password"
+            />
           </div>
+          {(p.credentials_configured || p.credentials_unavailable) && credentialsMode === "keep" && (
+            <button className="btn-ghost" type="button" onClick={clearCredentials}>Clear saved credentials</button>
+          )}
+          {p.credentials_unavailable && credentialsMode === "keep" && <p className="muted small">Credentials belong to another Windows user. Re-enter both values before testing or launching.</p>}
         </div>
         <footer className="dialog-foot">
           <button className="btn-ghost" onClick={onClose}>Cancel</button>
@@ -4507,7 +4570,7 @@ type RtInstallMode = "setup" | "repair";
 function FirstRunGate({ children }: { children: ReactNode }) {
   const [phase, setPhase] = useState<RtGatePhase>("checking");
   const [installMode, setInstallMode] = useState<RtInstallMode>("setup");
-  const [repairRequested, setRepairRequested] = useState(false);
+  const [repairAttempt, setRepairAttempt] = useState(0);
   const [showChecking, setShowChecking] = useState(false);
   const [prog, setProg] = useState<RtProgress | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -4533,18 +4596,15 @@ function FirstRunGate({ children }: { children: ReactNode }) {
       setErr(null);
       setProg(null);
 
-      // Subscribe immediately before install so the local startup check never
-      // waits on event registration, while still preserving the first event.
-      const stopProgress = await listen<RtProgress>("runtime:progress", (e) => {
-        if (!cancelled) setProg(e.payload);
-      });
-      if (cancelled) {
-        stopProgress();
-        return;
-      }
-      unProg = stopProgress;
-
+      let stopProgress: (() => void) | undefined;
       try {
+        // Subscribe immediately before install so the local startup check never
+        // waits on event registration, while still preserving the first event.
+        stopProgress = await listen<RtProgress>("runtime:progress", (e) => {
+          if (!cancelled) setProg(e.payload);
+        });
+        if (cancelled) return;
+
         const result = await invoke<RtStatus>("runtime_install", { force });
         if (cancelled) return;
         if (!result.installed || !result.fingerprints_installed || !result.widevine_installed) {
@@ -4553,7 +4613,14 @@ function FirstRunGate({ children }: { children: ReactNode }) {
         setProg(null);
         setPhase("ready");
       } catch (e: any) {
-        if (!cancelled) setErr(typeof e === "string" ? e : (e?.message ?? String(e)));
+        if (!cancelled) {
+          setProg(null);
+          setErr(typeof e === "string" ? e : (e?.message ?? String(e)));
+          setPhase("repair-required");
+        }
+      } finally {
+        stopProgress?.();
+        if (unProg === stopProgress) unProg = undefined;
       }
     };
 
@@ -4588,7 +4655,7 @@ function FirstRunGate({ children }: { children: ReactNode }) {
       // A previously initialized but damaged runtime waits for explicit repair.
       if (!status.initialized && !status.installed) {
         await installRuntime("setup", false);
-      } else if (repairRequested) {
+      } else if (repairAttempt > 0) {
         await installRuntime("repair", true);
       } else {
         setInstallMode("repair");
@@ -4600,7 +4667,7 @@ function FirstRunGate({ children }: { children: ReactNode }) {
       cancelled = true;
       unProg?.();
     };
-  }, [repairRequested]);
+  }, [repairAttempt]);
 
   if (phase === "ready") {
     return <>{children}</>;
@@ -4661,9 +4728,9 @@ function FirstRunGate({ children }: { children: ReactNode }) {
         {err && (
           <div className="runtime-gate-error">{err}</div>
         )}
-        {phase === "repair-required" && !err && (
-          <button className="btn-primary runtime-repair-btn" onClick={() => setRepairRequested(true)}>
-            <Icon.Refresh /> Repair browser runtime
+        {phase === "repair-required" && (
+          <button className="btn-primary runtime-repair-btn" onClick={() => setRepairAttempt((attempt) => attempt + 1)}>
+            <Icon.Refresh /> {err ? "Retry browser runtime repair" : "Repair browser runtime"}
           </button>
         )}
       </div>
@@ -4941,7 +5008,14 @@ function SettingsView() {
   const [saved, setSaved] = useState<Settings | null>(null);
   useEffect(() => { invoke<Settings>("settings_get").then((v) => { setS(v); setSaved(v); }); refreshApi(); }, []);
   const regenToken = async () => {
-    try { setApi(await invoke<ApiInfo>("api_regenerate_token")); toast.ok("Token regenerated"); }
+    try {
+      const next = await invoke<ApiInfo>("api_regenerate_token");
+      setApi(next);
+      const refreshed = await invoke<Settings>("settings_get");
+      setS(refreshed);
+      setSaved(refreshed);
+      toast.ok("Token regenerated");
+    }
     catch (e) { toast.err(String(e)); }
   };
 

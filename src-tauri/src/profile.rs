@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Launcher-side view of a profile (wraps raw FingerprintConfig JSON).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,7 +57,11 @@ pub struct StoredMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_preset_id: Option<String>,
     /// Inline proxy from temporary profile API; not in proxy store.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::proxy::protected_proxy_serde"
+    )]
     pub inline_proxy: Option<crate::proxy::ProxyEntry>,
     /// Hidden from listings; auto-deleted on close.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -140,6 +144,288 @@ fn path_for(id: &str) -> Result<PathBuf> {
     Ok(store::profiles_dir()?.join(format!("{id}.json")))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ProfileOperation {
+    Retag {
+        changes: Vec<ProfileRetag>,
+        #[serde(default = "default_apply_after")]
+        apply_after: bool,
+    },
+    Delete {
+        targets: Vec<ProfileDeleteTarget>,
+        #[serde(default = "default_delete_commit")]
+        commit: bool,
+    },
+}
+
+fn default_apply_after() -> bool {
+    true
+}
+
+fn default_delete_commit() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProfileRetag {
+    profile_id: String,
+    path: PathBuf,
+    before: StoredProfile,
+    after: StoredProfile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProfileDeleteTarget {
+    profile_id: String,
+    profile_path: PathBuf,
+    profile_backup_path: PathBuf,
+    user_data_path: PathBuf,
+    profile_quarantine: PathBuf,
+    profile_backup_quarantine: PathBuf,
+    user_data_quarantine: PathBuf,
+}
+
+fn persist_operation(operation: &ProfileOperation) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(operation)?;
+    store::atomic_write_sensitive(&store::profile_operation_journal_path()?, &bytes)
+}
+
+fn clear_operation() -> Result<()> {
+    let path = store::profile_operation_journal_path()?;
+    if path.exists() {
+        fs::remove_file(&path)
+            .with_context(|| format!("remove profile operation journal {}", path.display()))?;
+    }
+    let backup = store::backup_path(&path)?;
+    if backup.exists() {
+        fs::remove_file(&backup)
+            .with_context(|| format!("remove profile operation backup {}", backup.display()))?;
+    }
+    Ok(())
+}
+
+fn load_operation() -> Result<Option<ProfileOperation>> {
+    let path = store::profile_operation_journal_path()?;
+    if path.exists() {
+        return store::load_json_with_backup(&path)
+            .with_context(|| format!("load profile operation journal {}", path.display()))
+            .map(Some);
+    }
+    let backup = store::backup_path(&path)?;
+    if !backup.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&backup)
+        .with_context(|| format!("read profile operation backup {}", backup.display()))?;
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse profile operation backup {}", backup.display()))
+        .map(Some)
+}
+
+fn write_profile_snapshot(path: &Path, stored: &StoredProfile) -> Result<()> {
+    store::atomic_write_sensitive(path, &serde_json::to_vec_pretty(stored)?)
+}
+
+fn apply_retags(changes: &[ProfileRetag], use_after: bool) -> Result<()> {
+    for change in changes {
+        ensure_stopped(&change.profile_id)?;
+        write_profile_snapshot(
+            &change.path,
+            if use_after {
+                &change.after
+            } else {
+                &change.before
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn move_to_quarantine(live: &Path, quarantine: &Path) -> Result<()> {
+    if quarantine.exists() {
+        if live.exists() {
+            anyhow::bail!(
+                "profile deletion quarantine conflict: both {} and {} exist",
+                live.display(),
+                quarantine.display()
+            );
+        }
+        return Ok(());
+    }
+    if live.exists() {
+        fs::rename(live, quarantine).with_context(|| {
+            format!(
+                "isolate profile deletion target {} as {}",
+                live.display(),
+                quarantine.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn quarantine_delete_targets(targets: &[ProfileDeleteTarget]) -> Result<()> {
+    for target in targets {
+        ensure_stopped(&target.profile_id)?;
+        move_to_quarantine(&target.profile_path, &target.profile_quarantine)?;
+        move_to_quarantine(
+            &target.profile_backup_path,
+            &target.profile_backup_quarantine,
+        )?;
+        move_to_quarantine(&target.user_data_path, &target.user_data_quarantine)?;
+    }
+    Ok(())
+}
+
+fn restore_delete_targets(targets: &[ProfileDeleteTarget]) -> Result<()> {
+    for target in targets.iter().rev() {
+        if target.user_data_quarantine.exists() {
+            if target.user_data_path.exists() {
+                anyhow::bail!(
+                    "cannot restore profile user-data because both {} and {} exist",
+                    target.user_data_path.display(),
+                    target.user_data_quarantine.display()
+                );
+            }
+            fs::rename(&target.user_data_quarantine, &target.user_data_path)?;
+        }
+        if target.profile_backup_quarantine.exists() {
+            if target.profile_backup_path.exists() {
+                anyhow::bail!(
+                    "cannot restore profile metadata backup because both {} and {} exist",
+                    target.profile_backup_path.display(),
+                    target.profile_backup_quarantine.display()
+                );
+            }
+            fs::rename(
+                &target.profile_backup_quarantine,
+                &target.profile_backup_path,
+            )?;
+        }
+        if target.profile_quarantine.exists() {
+            if target.profile_path.exists() {
+                anyhow::bail!(
+                    "cannot restore profile metadata because both {} and {} exist",
+                    target.profile_path.display(),
+                    target.profile_quarantine.display()
+                );
+            }
+            fs::rename(&target.profile_quarantine, &target.profile_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn commit_quarantined_delete(targets: &[ProfileDeleteTarget]) -> Result<()> {
+    for target in targets {
+        if target.profile_quarantine.exists() {
+            fs::remove_file(&target.profile_quarantine).with_context(|| {
+                format!(
+                    "remove quarantined profile metadata {}",
+                    target.profile_quarantine.display()
+                )
+            })?;
+        }
+        if target.profile_backup_quarantine.exists() {
+            fs::remove_file(&target.profile_backup_quarantine).with_context(|| {
+                format!(
+                    "remove quarantined profile metadata backup {}",
+                    target.profile_backup_quarantine.display()
+                )
+            })?;
+        }
+        if target.user_data_quarantine.exists() {
+            fs::remove_dir_all(&target.user_data_quarantine).with_context(|| {
+                format!(
+                    "remove quarantined profile user-data {}",
+                    target.user_data_quarantine.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn recover_interrupted_operations_locked() -> Result<()> {
+    let Some(operation) = load_operation()? else {
+        return Ok(());
+    };
+    match &operation {
+        ProfileOperation::Retag {
+            changes,
+            apply_after,
+        } => apply_retags(changes, *apply_after)?,
+        ProfileOperation::Delete { targets, commit } => {
+            if *commit {
+                quarantine_delete_targets(targets)?;
+                commit_quarantined_delete(targets)?;
+                for target in targets {
+                    crate::taskbar_icon::remove_profile_launchers(&target.profile_id);
+                }
+            } else {
+                restore_delete_targets(targets)?;
+            }
+        }
+    }
+    clear_operation()
+}
+
+/// Resume a previously interrupted profile folder or deletion transaction. The
+/// launcher calls this before temporary cleanup; individual profile operations
+/// call the locked variant before starting a new transaction.
+pub fn recover_interrupted_operations() -> Result<()> {
+    let _resource_guard = crate::process::lock_profile_resources()?;
+    recover_interrupted_operations_locked()
+}
+
+fn quarantine_path(live: &Path, profile_id: &str, kind: &str) -> Result<PathBuf> {
+    let parent = live
+        .parent()
+        .context("profile deletion target has no parent directory")?;
+    Ok(parent.join(format!(
+        ".{profile_id}.delete-{kind}-{}",
+        uuid::Uuid::new_v4().simple()
+    )))
+}
+
+fn delete_targets_transactionally(targets: Vec<ProfileDeleteTarget>) -> Result<()> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    persist_operation(&ProfileOperation::Delete {
+        targets: targets.clone(),
+        commit: true,
+    })?;
+
+    if let Err(error) = quarantine_delete_targets(&targets) {
+        persist_operation(&ProfileOperation::Delete {
+            targets: targets.clone(),
+            commit: false,
+        })?;
+        match restore_delete_targets(&targets) {
+            Ok(()) => {
+                clear_operation()?;
+                return Err(error);
+            }
+            Err(rollback) => {
+                return Err(anyhow::anyhow!(
+                    "{error}; profile deletion rollback was incomplete: {rollback}"
+                ));
+            }
+        }
+    }
+    // The journal remains until startup can finish the deletion. All live
+    // paths have already been isolated, so no partially deleted profile is
+    // exposed to the normal profile list.
+    commit_quarantined_delete(&targets)?;
+    clear_operation()?;
+    for target in targets {
+        crate::taskbar_icon::remove_profile_launchers(&target.profile_id);
+    }
+    Ok(())
+}
+
 pub fn list_all() -> Result<Vec<ProfileMeta>> {
     let dir = store::profiles_dir()?;
     let mut out = Vec::new();
@@ -152,7 +438,10 @@ pub fn list_all() -> Result<Vec<ProfileMeta>> {
         let mut stored: StoredProfile = match store::load_json_with_backup(&path) {
             Ok(stored) => stored,
             Err(error) => {
-                eprintln!("[launcher] skipping unreadable profile {}: {error}", path.display());
+                eprintln!(
+                    "[launcher] skipping unreadable profile {}: {error}",
+                    path.display()
+                );
                 continue;
             }
         };
@@ -172,9 +461,15 @@ pub fn list_all() -> Result<Vec<ProfileMeta>> {
                 stored.meta.created_at = Some(ts);
                 // Listing profiles must remain read-only for an active browser.
                 // Persist the legacy backfill after it stops instead.
-                if !crate::is_profile_active(&stored.meta.id) {
+                if !crate::is_profile_active(&stored.meta.id)
+                    && !crate::process::lease_recovery_is_incomplete()
+                {
                     if let Ok(body) = serde_json::to_string_pretty(&stored) {
-                        let _ = store::atomic_write(&path, body.as_bytes());
+                        if stored.meta.inline_proxy.is_some() {
+                            let _ = store::atomic_write_sensitive(&path, body.as_bytes());
+                        } else {
+                            let _ = store::atomic_write(&path, body.as_bytes());
+                        }
                     }
                 }
             }
@@ -205,13 +500,11 @@ pub fn list_all() -> Result<Vec<ProfileMeta>> {
     }
     // Newest-first by created_at; name fallback for same-second ties. Manual
     // display order is applied by the UI-facing Tauri command afterwards.
-    out.sort_by(|a, b| {
-        match (&b.created_at, &a.created_at) {
-            (Some(bv), Some(av)) => bv.cmp(av),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.name.cmp(&b.name),
-        }
+    out.sort_by(|a, b| match (&b.created_at, &a.created_at) {
+        (Some(bv), Some(av)) => bv.cmp(av),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.name.cmp(&b.name),
     });
     Ok(out)
 }
@@ -225,12 +518,14 @@ pub fn purge_temporary() -> Result<usize> {
         if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let Ok(body) = fs::read_to_string(entry.path()) else { continue; };
+        let Ok(body) = fs::read_to_string(entry.path()) else {
+            continue;
+        };
         let Ok(stored): std::result::Result<StoredProfile, _> = serde_json::from_str(&body) else {
             continue;
         };
         if stored.meta.temporary && !stored.meta.id.is_empty() {
-            let _ = delete(&stored.meta.id);
+            delete(&stored.meta.id)?;
             n += 1;
         }
     }
@@ -239,8 +534,19 @@ pub fn purge_temporary() -> Result<usize> {
 
 pub fn load_raw(id: &str) -> Result<StoredProfile> {
     let path = path_for(id)?;
-    store::load_json_with_backup(&path)
-        .with_context(|| format!("load profile {}", path.display()))
+    let stored: StoredProfile = store::load_json_with_backup(&path)
+        .with_context(|| format!("load profile {}", path.display()))?;
+    let has_legacy_inline_credentials = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| value.pointer("/_meta/inline_proxy").cloned())
+        .and_then(|value| value.as_object().cloned())
+        .is_some_and(|inline| inline.contains_key("username") || inline.contains_key("password"));
+    if has_legacy_inline_credentials {
+        let body = serde_json::to_vec_pretty(&stored)?;
+        store::atomic_write_sensitive(&path, &body)?;
+    }
+    Ok(stored)
 }
 
 /// Count how many stored browser identities use each fingerprint-library
@@ -314,7 +620,10 @@ fn fill_noise_seeds(config: &mut serde_json::Map<String, serde_json::Value>, id:
             .map(|n| n == 0)
             .unwrap_or(true);
         if needs {
-            obj.insert("seed".into(), serde_json::Value::from(derive_noise_seed(id, slot)));
+            obj.insert(
+                "seed".into(),
+                serde_json::Value::from(derive_noise_seed(id, slot)),
+            );
         }
     }
 }
@@ -341,7 +650,10 @@ fn fill_newly_enabled_noise_seeds(
     id: &str,
 ) {
     let existing_noise = existing.get("noise").and_then(|value| value.as_object());
-    let Some(noise) = config.get_mut("noise").and_then(|value| value.as_object_mut()) else {
+    let Some(noise) = config
+        .get_mut("noise")
+        .and_then(|value| value.as_object_mut())
+    else {
         return;
     };
 
@@ -375,9 +687,7 @@ fn fill_newly_enabled_noise_seeds(
 /// Browser-effective comparison form. Names and launcher notes are not exposed
 /// to page JavaScript, and disabled noise blocks have no effect regardless of
 /// the seed or inactive tuning values stored in them.
-fn effective_fingerprint(
-    config: &serde_json::Map<String, serde_json::Value>,
-) -> serde_json::Value {
+fn effective_fingerprint(config: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
     let mut normalized = config.clone();
     normalized.remove("name");
     normalized.remove("notes");
@@ -633,11 +943,7 @@ pub fn save_raw(stored: &mut StoredProfile) -> Result<()> {
     // keeps existing profile JSON round-trippable.
     if !is_new {
         if let Ok(existing) = load_raw(&stored.meta.id) {
-            fill_newly_enabled_noise_seeds(
-                &mut stored.config,
-                &existing.config,
-                &stored.meta.id,
-            );
+            fill_newly_enabled_noise_seeds(&mut stored.config, &existing.config, &stored.meta.id);
             if stored.meta.proxy_id != existing.meta.proxy_id {
                 // An intentional rebind establishes a new trust boundary on
                 // the next launch; never carry the old proxy identity across.
@@ -674,27 +980,31 @@ pub fn save_raw(stored: &mut StoredProfile) -> Result<()> {
     }
     let path = path_for(&stored.meta.id)?;
     let body = serde_json::to_string_pretty(stored)?;
-    store::atomic_write(&path, body.as_bytes())?;
+    store::atomic_write_sensitive(&path, body.as_bytes())?;
     Ok(())
 }
 
 pub fn delete(id: &str) -> Result<()> {
     let _resource_guard = crate::process::lock_profile_resources()?;
     ensure_stopped(id)?;
-    let path = path_for(id)?;
-    if path.exists() {
-        fs::remove_file(path)?;
+    recover_interrupted_operations_locked()?;
+
+    let profile_path = path_for(id)?;
+    let profile_backup_path = store::backup_path(&profile_path)?;
+    let user_data_path = store::user_data_root()?.join(id);
+    if !profile_path.exists() && !profile_backup_path.exists() && !user_data_path.exists() {
+        return Ok(());
     }
-    // Also wipe per-profile user-data-dir.
-    let udd = store::user_data_root()?.join(id);
-    if udd.exists() {
-        let _ = fs::remove_dir_all(udd);
-    }
-    // Per-profile browser copies exist only to give Windows an independent
-    // taskbar identity and NAME badge.  Remove them with the profile; a copy
-    // still locked by a closing browser is retried by later launch cleanup.
-    crate::taskbar_icon::remove_profile_launchers(id);
-    Ok(())
+    let target = ProfileDeleteTarget {
+        profile_id: id.to_string(),
+        profile_quarantine: quarantine_path(&profile_path, id, "profile")?,
+        profile_backup_quarantine: quarantine_path(&profile_backup_path, id, "profile-backup")?,
+        user_data_quarantine: quarantine_path(&user_data_path, id, "user-data")?,
+        profile_path,
+        profile_backup_path,
+        user_data_path,
+    };
+    delete_targets_transactionally(vec![target])
 }
 
 /// Persist a fully restored profile under its already-assigned fresh id.
@@ -712,7 +1022,7 @@ pub fn save_restored(stored: &mut StoredProfile) -> Result<()> {
     if stored.meta.created_at.is_none() {
         stored.meta.created_at = Some(chrono_now_iso());
     }
-    store::atomic_write(&path, serde_json::to_string_pretty(stored)?.as_bytes())?;
+    store::atomic_write_sensitive(&path, serde_json::to_string_pretty(stored)?.as_bytes())?;
     Ok(())
 }
 
@@ -788,7 +1098,7 @@ pub fn set_folder(id: &str, folder: &str) -> Result<()> {
     p.meta.folder = folder.trim().to_string();
     let path = path_for(&p.meta.id)?;
     let body = serde_json::to_string_pretty(&p)?;
-    store::atomic_write(&path, body.as_bytes())?;
+    store::atomic_write_sensitive(&path, body.as_bytes())?;
     Ok(())
 }
 
@@ -813,39 +1123,127 @@ fn profiles_in_folder(name: &str) -> Result<Vec<(PathBuf, StoredProfile)>> {
 
 /// Retag profiles from folder `old` to `new`; returns count.
 pub fn rename_folder(old: &str, new: &str) -> Result<usize> {
+    let _resource_guard = crate::process::lock_profile_resources()?;
+    recover_interrupted_operations_locked()?;
     let profiles = profiles_in_folder(old)?;
-    // Preflight the whole folder so a running profile cannot cause a partial
-    // rename after earlier profiles were already written.
-    for (_, stored) in &profiles {
-        ensure_stopped(&stored.meta.id)?;
-    }
-    let count = profiles.len();
     let new = new.trim();
-    for (path, mut stored) in profiles {
-        ensure_stopped(&stored.meta.id)?;
-        stored.meta.folder = new.to_string();
-        store::atomic_write(&path, serde_json::to_string_pretty(&stored)?.as_bytes())?;
+    let changes = profiles
+        .into_iter()
+        .map(|(path, before)| {
+            ensure_stopped(&before.meta.id)?;
+            let mut after = before.clone();
+            after.meta.folder = new.to_string();
+            Ok(ProfileRetag {
+                profile_id: before.meta.id.clone(),
+                path,
+                before,
+                after,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if changes.is_empty() {
+        return Ok(0);
     }
-    Ok(count)
+
+    persist_operation(&ProfileOperation::Retag {
+        changes: changes.clone(),
+        apply_after: true,
+    })?;
+    if let Err(error) = apply_retags(&changes, true) {
+        persist_operation(&ProfileOperation::Retag {
+            changes: changes.clone(),
+            apply_after: false,
+        })?;
+        match apply_retags(&changes, false) {
+            Ok(()) => {
+                clear_operation()?;
+                return Err(error);
+            }
+            Err(rollback) => {
+                return Err(anyhow::anyhow!(
+                    "{error}; folder rename rollback was incomplete: {rollback}"
+                ));
+            }
+        }
+    }
+    clear_operation()?;
+    Ok(changes.len())
 }
 
 /// Delete folder; `delete_profiles` true removes, false unfiles. Returns count.
 pub fn delete_folder(name: &str, delete_profiles: bool) -> Result<usize> {
+    let _resource_guard = crate::process::lock_profile_resources()?;
+    recover_interrupted_operations_locked()?;
     let profiles = profiles_in_folder(name)?;
-    // As with rename, reject before changing anything when one member runs.
+    if profiles.is_empty() {
+        return Ok(0);
+    }
     for (_, stored) in &profiles {
         ensure_stopped(&stored.meta.id)?;
     }
-    let count = profiles.len();
-    for (path, mut stored) in profiles {
-        if delete_profiles {
-            delete(&stored.meta.id)?;
-        } else {
-            ensure_stopped(&stored.meta.id)?;
-            stored.meta.folder = String::new();
-            store::atomic_write(&path, serde_json::to_string_pretty(&stored)?.as_bytes())?;
+
+    if !delete_profiles {
+        let changes = profiles
+            .into_iter()
+            .map(|(path, before)| {
+                let mut after = before.clone();
+                after.meta.folder.clear();
+                ProfileRetag {
+                    profile_id: before.meta.id.clone(),
+                    path,
+                    before,
+                    after,
+                }
+            })
+            .collect::<Vec<_>>();
+        persist_operation(&ProfileOperation::Retag {
+            changes: changes.clone(),
+            apply_after: true,
+        })?;
+        if let Err(error) = apply_retags(&changes, true) {
+            persist_operation(&ProfileOperation::Retag {
+                changes: changes.clone(),
+                apply_after: false,
+            })?;
+            match apply_retags(&changes, false) {
+                Ok(()) => {
+                    clear_operation()?;
+                    return Err(error);
+                }
+                Err(rollback) => {
+                    return Err(anyhow::anyhow!(
+                        "{error}; folder unfile rollback was incomplete: {rollback}"
+                    ));
+                }
+            }
         }
+        clear_operation()?;
+        return Ok(changes.len());
     }
+
+    let targets = profiles
+        .into_iter()
+        .map(|(profile_path, stored)| {
+            let profile_id = stored.meta.id;
+            let profile_backup_path = store::backup_path(&profile_path)?;
+            let user_data_path = store::user_data_root()?.join(&profile_id);
+            Ok(ProfileDeleteTarget {
+                profile_quarantine: quarantine_path(&profile_path, &profile_id, "profile")?,
+                profile_backup_quarantine: quarantine_path(
+                    &profile_backup_path,
+                    &profile_id,
+                    "profile-backup",
+                )?,
+                user_data_quarantine: quarantine_path(&user_data_path, &profile_id, "user-data")?,
+                profile_id,
+                profile_path,
+                profile_backup_path,
+                user_data_path,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let count = targets.len();
+    delete_targets_transactionally(targets)?;
     Ok(count)
 }
 
@@ -870,9 +1268,10 @@ fn chrono_now_iso() -> String {
 mod tests {
     use super::{
         effective_fingerprint, fill_newly_enabled_noise_seeds, session_location_changed,
-        SessionNetworkIdentity,
+        ProfileDeleteTarget, ProfileOperation, ProfileRetag, SessionNetworkIdentity, StoredProfile,
     };
     use serde_json::json;
+    use std::path::PathBuf;
 
     fn identity(country_code: &str, timezone: &str) -> SessionNetworkIdentity {
         SessionNetworkIdentity {
@@ -881,6 +1280,66 @@ mod tests {
             country_code: country_code.into(),
             timezone: timezone.into(),
         }
+    }
+
+    #[test]
+    fn profile_operation_journal_records_recovery_intent() {
+        let retag = ProfileOperation::Retag {
+            changes: vec![ProfileRetag {
+                profile_id: "profile-1".into(),
+                path: PathBuf::from("profiles/profile-1.json"),
+                before: StoredProfile::default(),
+                after: StoredProfile::default(),
+            }],
+            apply_after: false,
+        };
+        let retag_json = serde_json::to_value(&retag).unwrap();
+        assert_eq!(retag_json["kind"], "retag");
+        assert_eq!(retag_json["apply_after"], false);
+
+        let delete = ProfileOperation::Delete {
+            targets: vec![ProfileDeleteTarget {
+                profile_id: "profile-1".into(),
+                profile_path: PathBuf::from("profiles/profile-1.json"),
+                profile_backup_path: PathBuf::from("profiles/profile-1.json.bak"),
+                user_data_path: PathBuf::from("user-data/profile-1"),
+                profile_quarantine: PathBuf::from("profiles/.profile-1.delete-profile"),
+                profile_backup_quarantine: PathBuf::from(
+                    "profiles/.profile-1.delete-profile-backup",
+                ),
+                user_data_quarantine: PathBuf::from("user-data/.profile-1.delete-user-data"),
+            }],
+            commit: false,
+        };
+        let delete_json = serde_json::to_value(&delete).unwrap();
+        assert_eq!(delete_json["kind"], "delete");
+        assert_eq!(delete_json["commit"], false);
+    }
+
+    #[test]
+    fn legacy_profile_operation_defaults_to_completion() {
+        let retag: ProfileOperation = serde_json::from_value(json!({
+            "kind": "retag",
+            "changes": []
+        }))
+        .unwrap();
+        assert!(matches!(
+            retag,
+            ProfileOperation::Retag {
+                apply_after: true,
+                ..
+            }
+        ));
+
+        let delete: ProfileOperation = serde_json::from_value(json!({
+            "kind": "delete",
+            "targets": []
+        }))
+        .unwrap();
+        assert!(matches!(
+            delete,
+            ProfileOperation::Delete { commit: true, .. }
+        ));
     }
 
     #[test]
@@ -935,7 +1394,10 @@ mod tests {
         .unwrap()
         .clone();
 
-        assert_eq!(effective_fingerprint(&first), effective_fingerprint(&second));
+        assert_eq!(
+            effective_fingerprint(&first),
+            effective_fingerprint(&second)
+        );
     }
 
     #[test]
@@ -978,7 +1440,10 @@ mod tests {
         .unwrap()
         .clone();
 
-        assert_ne!(effective_fingerprint(&first), effective_fingerprint(&second));
+        assert_ne!(
+            effective_fingerprint(&first),
+            effective_fingerprint(&second)
+        );
     }
 
     #[test]

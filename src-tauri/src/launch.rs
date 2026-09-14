@@ -22,7 +22,9 @@ pub fn resolve_binary() -> Result<PathBuf> {
             return Ok(pb);
         }
     }
-    anyhow::bail!("ShardX browser is missing from the portable runtime — restart the launcher to download it")
+    anyhow::bail!(
+        "ShardX browser is missing from the portable runtime — restart the launcher to download it"
+    )
 }
 
 pub async fn launch_profile(
@@ -89,7 +91,9 @@ pub async fn launch_profile(
     };
 
     // Stored proxy by id, else ephemeral inline (quick profiles, not in store).
-    let bound_proxy: Option<proxy::ProxyEntry> = if let Some(proxy_id) = stored.meta.proxy_id.as_deref() {
+    let bound_proxy: Option<proxy::ProxyEntry> = if let Some(proxy_id) =
+        stored.meta.proxy_id.as_deref()
+    {
         Some(
             proxy::get(proxy_id)
                 .with_context(|| format!("load bound proxy {proxy_id}"))?
@@ -132,11 +136,9 @@ pub async fn launch_profile(
     // Reusing it for auto fields and WebRTC avoids contradictory provider
     // answers within the same browser start.
     let session_geo = if let Some(bound_proxy) = bound_proxy.as_ref() {
-        let geo = proxy::geo_check(bound_proxy, None)
-            .await
-            .with_context(|| {
-                "bound proxy session identity check failed; browser launch cancelled"
-            })?;
+        let geo = proxy::geo_check(bound_proxy, None).await.with_context(|| {
+            "bound proxy session identity check failed; browser launch cancelled"
+        })?;
         profile::enforce_session_network_identity(&mut stored, &bound_proxy.id, &geo)?;
         Some(geo)
     } else {
@@ -174,10 +176,7 @@ pub async fn launch_profile(
     eprintln!("[launcher] QUIC disabled by launcher policy");
 
     // Disable WebGPU when profile omits `webgpu` (matches real Linux Chrome).
-    let webgpu_present = raw
-        .get("webgpu")
-        .map(|v| !v.is_null())
-        .unwrap_or(false);
+    let webgpu_present = raw.get("webgpu").map(|v| !v.is_null()).unwrap_or(false);
     if !webgpu_present {
         launch_args.push("--disable-features=WebGPU".into());
     }
@@ -197,15 +196,18 @@ pub async fn launch_profile(
         .get("webrtc")
         .and_then(|v| v.as_str())
         .unwrap_or("block");
-    let latest = bound_proxy
-        .as_ref()
-        .and_then(|p| proxy::latest_test(&p.id));
+    let latest = bound_proxy.as_ref().and_then(|p| proxy::latest_test(&p.id));
     // Use the same live identity that drove timezone/language/geolocation.
     let proxy_public_ip: Option<String> = session_geo
         .as_ref()
         .map(|geo| geo.ip.clone())
         .filter(|ip| !ip.is_empty())
-        .or_else(|| latest.as_ref().map(|s| s.ip.clone()).filter(|ip| !ip.is_empty()));
+        .or_else(|| {
+            latest
+                .as_ref()
+                .map(|s| s.ip.clone())
+                .filter(|ip| !ip.is_empty())
+        });
     match webrtc_mode {
         "block" => {
             launch_args.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp".into());
@@ -257,10 +259,15 @@ pub async fn launch_profile(
         launch_args.push("--headless=new".into());
     }
 
-    let (child, taskbar_binary) = match browser_command(&launch_bin, &launch_args).spawn() {
+    let (child, taskbar_binary, actual_launch_bin) = match browser_command(
+        &launch_bin,
+        &launch_args,
+    )
+    .spawn()
+    {
         Ok(child) => {
             let taskbar_binary = (launch_bin != bin).then(|| launch_bin.clone());
-            (child, taskbar_binary)
+            (child, taskbar_binary, launch_bin.clone())
         }
         Err(badge_error) if launch_bin != bin => {
             // Some endpoint-security products allow resource creation but block
@@ -272,21 +279,21 @@ pub async fn launch_profile(
             let child = browser_command(&bin, &launch_args)
                 .spawn()
                 .with_context(|| {
-                    format!(
-                        "spawn original ShardX after taskbar launcher failed: {badge_error}"
-                    )
+                    format!("spawn original ShardX after taskbar launcher failed: {badge_error}")
                 })?;
-            (child, None)
+            (child, None, bin.clone())
         }
         Err(error) => return Err(error).context("spawn ShardX"),
     };
-    let pid = Tracker::shared().track(profile_id.to_string(), child, stored.meta.temporary);
+    let pid = Tracker::shared().track(
+        profile_id.to_string(),
+        child,
+        &actual_launch_bin,
+        &udd,
+        stored.meta.temporary,
+    );
     if let Some(taskbar_binary) = taskbar_binary {
-        crate::taskbar_icon::watch_profile_taskbar(
-            pid,
-            profile_id.to_string(),
-            taskbar_binary,
-        );
+        crate::taskbar_icon::watch_profile_taskbar(pid, profile_id.to_string(), taskbar_binary);
     }
 
     if let Err(error) = profile::touch_launched(profile_id, None) {
@@ -298,7 +305,10 @@ pub async fn launch_profile(
     let cdp = if enable_cdp {
         match read_devtools_endpoint(&udd).await {
             Some(c) => {
-                eprintln!("[launcher] CDP ready for {profile_id}: {}", c.web_socket_debugger_url);
+                eprintln!(
+                    "[launcher] CDP ready for {profile_id}: {}",
+                    c.web_socket_debugger_url
+                );
                 Tracker::shared().set_cdp(profile_id, c.clone());
                 Some(c)
             }
@@ -335,8 +345,6 @@ fn display_matches_fingerprint_template(stored: &profile::StoredProfile) -> bool
 }
 
 fn browser_command(binary: &Path, args: &[OsString]) -> tokio::process::Command {
-    use std::os::windows::process::CommandExt;
-
     let mut command = tokio::process::Command::new(binary);
     command.args(args);
     command.stdout(Stdio::null()).stderr(Stdio::null());
@@ -357,10 +365,7 @@ async fn read_devtools_endpoint(udd: &Path) -> Option<process::CdpInfo> {
                     return Some(process::CdpInfo {
                         port,
                         http_url: format!("http://127.0.0.1:{port}"),
-                        web_socket_debugger_url: format!(
-                            "ws://127.0.0.1:{port}{}",
-                            path.trim()
-                        ),
+                        web_socket_debugger_url: format!("ws://127.0.0.1:{port}{}", path.trim()),
                     });
                 }
             }
@@ -385,7 +390,9 @@ async fn resolve_auto_fields(
         .and_then(|v| v.as_str())
         == Some("auto");
     let want_geo_auto = matches!(
-        cfg.get("geolocation").and_then(|g| g.get("mode")).and_then(|v| v.as_str()),
+        cfg.get("geolocation")
+            .and_then(|g| g.get("mode"))
+            .and_then(|v| v.as_str()),
         Some("auto")
     );
 
@@ -398,7 +405,9 @@ async fn resolve_auto_fields(
         want_tz_auto,
         want_lang_auto,
         want_geo_auto,
-        proxy_opt.map(|p| format!("{}:{}", p.host, p.port)).unwrap_or_else(|| "(direct)".into()),
+        proxy_opt
+            .map(|p| format!("{}:{}", p.host, p.port))
+            .unwrap_or_else(|| "(direct)".into()),
     );
 
     // Auto timezone is strict: every launch must obtain a fresh result through
@@ -528,8 +537,16 @@ async fn resolve_auto_fields(
                 proxy::country_to_timezone(&g.country_code).to_string()
             };
             let locale = proxy::country_to_locale(&g.country_code).to_string();
-            let lat = if g.latitude != 0.0 { Some(g.latitude) } else { None };
-            let lng = if g.longitude != 0.0 { Some(g.longitude) } else { None };
+            let lat = if g.latitude != 0.0 {
+                Some(g.latitude)
+            } else {
+                None
+            };
+            let lng = if g.longitude != 0.0 {
+                Some(g.longitude)
+            } else {
+                None
+            };
             (tz, locale, lat, lng)
         }
         None => {
@@ -543,16 +560,21 @@ async fn resolve_auto_fields(
         }
     };
 
-    eprintln!(
-        "[launcher] resolved tz={resolved_tz} locale={resolved_locale} (source={source})"
-    );
+    eprintln!("[launcher] resolved tz={resolved_tz} locale={resolved_locale} (source={source})");
 
     if want_tz_auto {
-        cfg.insert("timezone".into(), serde_json::Value::String(resolved_tz.clone()));
+        cfg.insert(
+            "timezone".into(),
+            serde_json::Value::String(resolved_tz.clone()),
+        );
     }
 
     if want_lang_auto {
-        let base = resolved_locale.split('-').next().unwrap_or(&resolved_locale).to_string();
+        let base = resolved_locale
+            .split('-')
+            .next()
+            .unwrap_or(&resolved_locale)
+            .to_string();
         let accept = if resolved_locale == "en-US" {
             "en-US,en;q=0.9".to_string()
         } else {
@@ -572,12 +594,18 @@ async fn resolve_auto_fields(
             ]
         };
         if let Some(nav) = cfg.get_mut("navigator").and_then(|v| v.as_object_mut()) {
-            nav.insert("language".into(), serde_json::Value::String(resolved_locale.clone()));
+            nav.insert(
+                "language".into(),
+                serde_json::Value::String(resolved_locale.clone()),
+            );
             nav.insert("accept_language".into(), serde_json::Value::String(accept));
             nav.insert("languages".into(), serde_json::Value::Array(languages));
         }
         // Always overwrite icu_locale so it matches resolved navigator.language.
-        cfg.insert("icu_locale".into(), serde_json::Value::String(resolved_locale));
+        cfg.insert(
+            "icu_locale".into(),
+            serde_json::Value::String(resolved_locale),
+        );
     }
 
     if want_geo_auto {
@@ -611,8 +639,8 @@ fn install_widevine(udd: &Path) -> Result<()> {
         anyhow::bail!("cache missing manifest.json — re-seed from a real Chrome");
     }
     let manifest_text = std::fs::read_to_string(&manifest_path)?;
-    let manifest: serde_json::Value = serde_json::from_str(&manifest_text)
-        .context("parse widevine manifest.json")?;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&manifest_text).context("parse widevine manifest.json")?;
     let version = manifest
         .get("version")
         .and_then(|v| v.as_str())
@@ -635,9 +663,8 @@ fn install_widevine(udd: &Path) -> Result<()> {
             }
         }
     }
-    copy_dir_recursive(&src, &versioned).with_context(|| {
-        format!("copy {} → {}", src.display(), versioned.display())
-    })?;
+    copy_dir_recursive(&src, &versioned)
+        .with_context(|| format!("copy {} → {}", src.display(), versioned.display()))?;
     // Chromium reads this single-line marker on startup.
     std::fs::write(
         widevine_root.join("latest-component-updated-version"),
@@ -659,7 +686,11 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         } else if ty.is_symlink() {
             // Resolve symlinks so dst tree stays portable across hosts.
             let target = std::fs::read_link(&from)?;
-            let resolved = if target.is_absolute() { target } else { from.parent().unwrap().join(target) };
+            let resolved = if target.is_absolute() {
+                target
+            } else {
+                from.parent().unwrap().join(target)
+            };
             if resolved.is_dir() {
                 copy_dir_recursive(&resolved, &to)?;
             } else {

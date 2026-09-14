@@ -13,6 +13,7 @@ mod pixel_font_data;
 mod process;
 mod profile;
 mod profile_backup;
+mod protected_data;
 mod proxy;
 mod runtime;
 mod settings;
@@ -82,13 +83,8 @@ fn profile_move_order(
         return Err("profile no longer exists".to_string());
     }
     let default_ids: Vec<String> = profiles.into_iter().map(|profile| profile.id).collect();
-    display_order::move_profile(
-        &default_ids,
-        &id,
-        anchor_id.as_deref(),
-        placement,
-    )
-    .map_err(|e| e.to_string())?;
+    display_order::move_profile(&default_ids, &id, anchor_id.as_deref(), placement)
+        .map_err(|e| e.to_string())?;
     notify_store_changed("profiles");
     Ok(())
 }
@@ -105,7 +101,16 @@ fn profile_get(id: String) -> Result<Value, String> {
             let _ = profile::save_raw(&mut stored);
         }
     }
-    serde_json::to_value(stored).map_err(|e| e.to_string())
+    let mut value = serde_json::to_value(stored).map_err(|e| e.to_string())?;
+    if let Some(inline) = value
+        .pointer_mut("/_meta/inline_proxy")
+        .and_then(|value| value.as_object_mut())
+    {
+        inline.remove("username");
+        inline.remove("password");
+        inline.remove("credentials_protected");
+    }
+    Ok(value)
 }
 
 #[tauri::command]
@@ -158,26 +163,20 @@ pub(crate) fn infer_gpu_preset_id(config: &serde_json::Map<String, Value>) -> Op
 
 // macOS Sonoma 14.x, Sequoia 15.x, Tahoe 26.x.
 const MACOS_PLATFORM_VERSIONS: &[&str] = &[
-    "14.6.1", "14.7", "14.7.1", "14.7.2",
-    "15.4", "15.4.1", "15.5", "15.6", "15.6.1", "15.7",
+    "14.6.1", "14.7", "14.7.1", "14.7.2", "15.4", "15.4.1", "15.5", "15.6", "15.6.1", "15.7",
     "26.0", "26.0.1", "26.1",
 ];
 
 // Win 10 21H1+ ("10.0.0"), Win 11 21H2..25H2 ("13"–"17"); weighted to 22H2/23H2/24H2.
 const WINDOWS_PLATFORM_VERSIONS: &[&str] = &[
-    "10.0.0",
-    "13.0.0",
-    "14.0.0", "14.0.0", "14.0.0",
-    "15.0.0", "15.0.0", "15.0.0", "15.0.0",
-    "16.0.0", "16.0.0", "16.0.0",
-    "17.0.0",
+    "10.0.0", "13.0.0", "14.0.0", "14.0.0", "14.0.0", "15.0.0", "15.0.0", "15.0.0", "15.0.0",
+    "16.0.0", "16.0.0", "16.0.0", "17.0.0",
 ];
 
 // LTS kernels + current mainline.
 const LINUX_PLATFORM_VERSIONS: &[&str] = &[
-    "5.15.0", "6.1.0", "6.5.0",
-    "6.6.0", "6.8.0", "6.10.0", "6.11.0", "6.12.0",
-    "6.14.0", "6.15.0", "6.16.0",
+    "5.15.0", "6.1.0", "6.5.0", "6.6.0", "6.8.0", "6.10.0", "6.11.0", "6.12.0", "6.14.0", "6.15.0",
+    "6.16.0",
 ];
 
 /// Write a random platform_version into navigator + client_hints; unknown platforms left alone.
@@ -188,10 +187,10 @@ pub(crate) fn randomize_platform_version(payload: &mut serde_json::Map<String, V
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let pool: &[&str] = match platform {
-        "macOS"   => MACOS_PLATFORM_VERSIONS,
+        "macOS" => MACOS_PLATFORM_VERSIONS,
         "Windows" => WINDOWS_PLATFORM_VERSIONS,
-        "Linux"   => LINUX_PLATFORM_VERSIONS,
-        _         => return,
+        "Linux" => LINUX_PLATFORM_VERSIONS,
+        _ => return,
     };
     let pick_idx = (uuid::Uuid::new_v4().as_bytes()[0] as usize) % pool.len();
     let version = pool[pick_idx].to_string();
@@ -199,7 +198,10 @@ pub(crate) fn randomize_platform_version(payload: &mut serde_json::Map<String, V
     if let Some(nav) = payload.get_mut("navigator").and_then(|v| v.as_object_mut()) {
         nav.insert("platform_version".into(), Value::String(version.clone()));
     }
-    if let Some(ch) = payload.get_mut("client_hints").and_then(|v| v.as_object_mut()) {
+    if let Some(ch) = payload
+        .get_mut("client_hints")
+        .and_then(|v| v.as_object_mut())
+    {
         ch.insert("platform_version".into(), Value::String(version));
     }
 }
@@ -213,14 +215,10 @@ fn mac_hw_configs(model: &str) -> Option<&'static [(u32, u32)]> {
         "mac-m2-air13" | "mac-m2-air15" | "mac-m2-mbp13" => &[(8, 8), (8, 16)],
         "mac-m2-pro-mbp14" | "mac-m2-pro-mbp16" => &[(10, 16), (12, 16), (12, 32)],
         "mac-m2-max-mbp14" | "mac-m2-max-mbp16" => &[(12, 32)],
-        "mac-m3-air13" | "mac-m3-air15" | "mac-m3-mbp14" | "mac-m3-imac24" => {
-            &[(8, 8), (8, 16)]
-        }
+        "mac-m3-air13" | "mac-m3-air15" | "mac-m3-mbp14" | "mac-m3-imac24" => &[(8, 8), (8, 16)],
         "mac-m3-pro-mbp14" | "mac-m3-pro-mbp16" => &[(11, 16), (12, 16), (12, 32)],
         "mac-m3-max-mbp14" | "mac-m3-max-mbp16" => &[(14, 32), (16, 32)],
-        "mac-m4-air13" | "mac-m4-air15" | "mac-m4-mbp14" | "mac-m4-imac24" => {
-            &[(10, 16), (10, 32)]
-        }
+        "mac-m4-air13" | "mac-m4-air15" | "mac-m4-mbp14" | "mac-m4-imac24" => &[(10, 16), (10, 32)],
         "mac-m4-pro-mbp14" | "mac-m4-pro-mbp16" => &[(12, 16), (14, 16), (14, 32)],
         "mac-m4-max-mbp14" | "mac-m4-max-mbp16" => &[(14, 32), (16, 32)],
         "mac-m5-mbp14" => &[(10, 16), (10, 32)],
@@ -246,9 +244,7 @@ fn host_logical_cores() -> u32 {
 
 /// Host physical RAM in GiB from the native Windows API.
 fn host_ram_gb() -> Option<u32> {
-    use windows_sys::Win32::System::SystemInformation::{
-        GlobalMemoryStatusEx, MEMORYSTATUSEX,
-    };
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 
     let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
     status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
@@ -326,10 +322,14 @@ fn hardware_configs(
             if memory_candidates.is_empty() {
                 memory_candidates.push(host_memory);
             }
-            out.extend(memory_candidates.into_iter().map(|device_memory| HardwareConfig {
-                hardware_concurrency,
-                device_memory,
-            }));
+            out.extend(
+                memory_candidates
+                    .into_iter()
+                    .map(|device_memory| HardwareConfig {
+                        hardware_concurrency,
+                        device_memory,
+                    }),
+            );
         }
         return out;
     }
@@ -356,7 +356,9 @@ fn hardware_configs_for_preset(preset_id: &str) -> Result<Vec<HardwareConfig>, S
         .ok_or_else(|| format!("unknown fingerprint id: {preset_id}"))?;
     let configs = hardware_configs_for_entry(&entry);
     if configs.is_empty() {
-        return Err(format!("no hardware configurations available for fingerprint: {preset_id}"));
+        return Err(format!(
+            "no hardware configurations available for fingerprint: {preset_id}"
+        ));
     }
     Ok(configs)
 }
@@ -433,7 +435,12 @@ pub(crate) fn clamp_screen_to_real_display(
     let real_h = (phys.height as f64 / scale).round() as i64;
     eprintln!(
         "[launcher] display: name={:?} physical={}x{} scale={} -> logical={}x{}",
-        monitor.name(), phys.width, phys.height, scale, real_w, real_h
+        monitor.name(),
+        phys.width,
+        phys.height,
+        scale,
+        real_w,
+        real_h
     );
     if real_w <= 0 || real_h <= 0 {
         return;
@@ -450,8 +457,14 @@ pub(crate) fn clamp_screen_to_real_display(
         return;
     }
     // Preserve FP menubar/dock insets for avail_*.
-    let fp_avail_w = scr.get("avail_width").and_then(|v| v.as_i64()).unwrap_or(fp_w);
-    let fp_avail_h = scr.get("avail_height").and_then(|v| v.as_i64()).unwrap_or(fp_h);
+    let fp_avail_w = scr
+        .get("avail_width")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(fp_w);
+    let fp_avail_h = scr
+        .get("avail_height")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(fp_h);
     let chrome_w = (fp_w - fp_avail_w).max(0);
     let chrome_h = (fp_h - fp_avail_h).max(0);
     let avail_w = (real_w - chrome_w).max(1);
@@ -759,8 +772,8 @@ pub(crate) fn recommended_fingerprint_for(platform: Option<&str>) -> Result<Stri
         .filter(|entry| usage.get(&entry.id).copied().unwrap_or(0) == minimum)
         .collect::<Vec<_>>();
     let random = uuid::Uuid::new_v4();
-    let pick = u64::from_le_bytes(random.as_bytes()[0..8].try_into().unwrap()) as usize
-        % least_used.len();
+    let pick =
+        u64::from_le_bytes(random.as_bytes()[0..8].try_into().unwrap()) as usize % least_used.len();
     Ok(least_used[pick].id.clone())
 }
 
@@ -797,7 +810,9 @@ pub fn merge_library_fingerprint(
     );
     if let Some(o) = entry.payload.as_object() {
         for (k, v) in o {
-            if k == "_meta" { continue; }
+            if k == "_meta" {
+                continue;
+            }
             merged.insert(k.clone(), v.clone());
         }
     }
@@ -882,7 +897,9 @@ fn enrich_picks_for_preset(preset_id: String) -> Result<PresetEnrichPicks, Strin
         .ok_or_else(|| format!("unknown fingerprint id: {preset_id}"))?;
     let hardware_configs = hardware_configs_for_entry(&entry);
     if hardware_configs.is_empty() {
-        return Err(format!("no hardware configurations available for fingerprint: {preset_id}"));
+        return Err(format!(
+            "no hardware configurations available for fingerprint: {preset_id}"
+        ));
     }
     let platform = entry
         .payload
@@ -902,8 +919,8 @@ fn enrich_picks_for_preset(preset_id: String) -> Result<PresetEnrichPicks, Strin
     );
     // Generate the editor's platform version and hardware exactly once.
     randomize_platform_version(&mut payload);
-    let selected = hardware_configs
-        [(uuid::Uuid::new_v4().as_bytes()[0] as usize) % hardware_configs.len()];
+    let selected =
+        hardware_configs[(uuid::Uuid::new_v4().as_bytes()[0] as usize) % hardware_configs.len()];
     if let Some(nav) = payload.get_mut("navigator").and_then(|v| v.as_object_mut()) {
         nav.insert(
             "hardware_concurrency".into(),
@@ -948,7 +965,10 @@ fn fingerprint_get(id: String) -> Result<Option<fingerprints::LibraryEntry>, Str
 }
 
 #[tauri::command]
-fn fingerprint_import(json_text: String, id_hint: Option<String>) -> Result<fingerprints::LibraryEntry, String> {
+fn fingerprint_import(
+    json_text: String,
+    id_hint: Option<String>,
+) -> Result<fingerprints::LibraryEntry, String> {
     fingerprints::import(&json_text, id_hint).map_err(|e| e.to_string())
 }
 
@@ -1028,10 +1048,7 @@ const AUTOMATIC_PROXY_TEST_ATTEMPTS: usize = 1;
 const PROXY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
 const RUNTIME_UPDATE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
-async fn test_proxies_in_background(
-    requests: Vec<proxy::PreparedProxyTest>,
-    max_attempts: usize,
-) {
+async fn test_proxies_in_background(requests: Vec<proxy::PreparedProxyTest>, max_attempts: usize) {
     if requests.is_empty() {
         return;
     }
@@ -1099,10 +1116,11 @@ fn start_runtime_update_check_loop() {
 }
 
 #[tauri::command]
-fn proxy_list() -> Result<Vec<proxy::ProxyEntry>, String> {
-    // Raw storage is append-only oldest-to-newest, matching the UI default.
+fn proxy_list() -> Result<Vec<proxy::ProxyMetadata>, String> {
+    // Credentials never cross the Tauri boundary; metadata keeps rows editable.
     let list = proxy::list().map_err(|e| e.to_string())?;
-    display_order::sort_proxies(list).map_err(|e| e.to_string())
+    let sorted = display_order::sort_proxies(list).map_err(|e| e.to_string())?;
+    Ok(sorted.into_iter().map(Into::into).collect())
 }
 
 #[tauri::command]
@@ -1119,25 +1137,20 @@ fn proxy_move_order(
     // Match proxy_list's append-at-bottom default.
     let proxies = proxy::list().map_err(|e| e.to_string())?;
     let default_ids: Vec<String> = proxies.into_iter().map(|proxy| proxy.id).collect();
-    display_order::move_proxy(
-        &default_ids,
-        &id,
-        anchor_id.as_deref(),
-        placement,
-    )
-    .map_err(|e| e.to_string())?;
+    display_order::move_proxy(&default_ids, &id, anchor_id.as_deref(), placement)
+        .map_err(|e| e.to_string())?;
     notify_store_changed("proxies");
     Ok(())
 }
 
 #[tauri::command]
-fn proxy_save(entry: proxy::ProxyEntry) -> Result<proxy::ProxyEntry, String> {
+fn proxy_save(entry: proxy::ProxySaveRequest) -> Result<proxy::ProxyMetadata, String> {
     let (saved, _created, _changed, test) =
         proxy::upsert_with_status(entry).map_err(|e| e.to_string())?;
     if let Some(test) = test {
         spawn_automatic_proxy_tests(vec![test]);
     }
-    Ok(saved)
+    Ok(proxy::metadata(&saved))
 }
 
 #[tauri::command]
@@ -1147,27 +1160,58 @@ fn proxy_delete(id: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn proxy_check(entry: proxy::ProxyEntry) -> Result<u128, String> {
+    let entry = proxy::resolve_for_use(entry).map_err(|e| e.to_string())?;
     proxy::probe(&entry).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn proxy_check_udp(entry: proxy::ProxyEntry) -> Result<u128, String> {
+    let entry = proxy::resolve_for_use(entry).map_err(|e| e.to_string())?;
     proxy::probe_udp(&entry).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn proxy_geo(entry: proxy::ProxyEntry, provider: Option<String>) -> Result<proxy::GeoInfo, String> {
-    proxy::geo_check(&entry, provider).await.map_err(|e| e.to_string())
+async fn proxy_geo(
+    entry: proxy::ProxyEntry,
+    provider: Option<String>,
+) -> Result<proxy::GeoInfo, String> {
+    let entry = proxy::resolve_for_use(entry).map_err(|e| e.to_string())?;
+    proxy::geo_check(&entry, provider)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn proxy_full_test(entry: proxy::ProxyEntry) -> Result<proxy::TestSnapshot, String> {
+    let entry = proxy::resolve_for_use(entry).map_err(|e| e.to_string())?;
     proxy::full_test(&entry).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn proxy_full_test_batch(entries: Vec<proxy::ProxyEntry>) -> Vec<proxy::BatchTestResult> {
-    proxy::full_test_batch(entries).await
+    let mut resolved = Vec::with_capacity(entries.len());
+    let mut failures = Vec::new();
+    for (index, entry) in entries.into_iter().enumerate() {
+        match proxy::resolve_for_use(entry) {
+            Ok(entry) => resolved.push((index, entry)),
+            Err(error) => failures.push(proxy::BatchTestResult {
+                index,
+                snapshot: None,
+                error: Some(error.to_string()),
+            }),
+        }
+    }
+    let original_indexes: Vec<usize> = resolved.iter().map(|(index, _)| *index).collect();
+    let mut tested =
+        proxy::full_test_batch(resolved.into_iter().map(|(_, entry)| entry).collect()).await;
+    for result in &mut tested {
+        if let Some(original_index) = original_indexes.get(result.index) {
+            result.index = *original_index;
+        }
+    }
+    failures.extend(tested);
+    failures.sort_by_key(|result| result.index);
+    failures
 }
 
 #[tauri::command]
@@ -1188,8 +1232,7 @@ fn proxy_bulk_import(text: String, kind: String) -> Result<usize, String> {
         _ => proxy::ProxyKind::Socks5,
     };
     let parsed = proxy::parse_bulk_strict(&text, default_kind).map_err(|e| e.to_string())?;
-    let (added, tests) =
-        proxy::bulk_save_with_entries(parsed).map_err(|e| e.to_string())?;
+    let (added, tests) = proxy::bulk_save_with_entries(parsed).map_err(|e| e.to_string())?;
     let count = added.len();
     spawn_automatic_proxy_tests(tests);
     Ok(count)
@@ -1209,8 +1252,7 @@ fn proxy_bulk_parse(text: String, kind: String) -> Result<proxy::BulkParsePrevie
 /// Persist pre-tested proxies (bulk dialog).
 #[tauri::command]
 fn proxy_bulk_save(entries: Vec<proxy::ProxyEntry>) -> Result<usize, String> {
-    let (added, tests) =
-        proxy::bulk_save_with_entries(entries).map_err(|e| e.to_string())?;
+    let (added, tests) = proxy::bulk_save_with_entries(entries).map_err(|e| e.to_string())?;
     let count = added.len();
     spawn_automatic_proxy_tests(tests);
     Ok(count)
@@ -1291,12 +1333,12 @@ fn settings_save(value: settings::Settings) -> Result<(), String> {
 /// API connection info: base URL + permanent Bearer JWT (no raw key exposed).
 #[tauri::command]
 fn api_info() -> Result<Value, String> {
-    let s = settings::ensure_secret().map_err(|e| e.to_string())?;
-    let token = api::long_lived_token(&s.api_secret)?;
+    let settings = settings::ensure_secret().map_err(|e| e.to_string())?;
+    let token = api::long_lived_token(&settings.api_secret)?;
     Ok(serde_json::json!({
-        "enabled": s.api_enabled,
-        "port": s.api_port,
-        "base_url": format!("http://127.0.0.1:{}", s.api_port),
+        "enabled": settings.public.api_enabled,
+        "port": settings.public.api_port,
+        "base_url": format!("http://127.0.0.1:{}", settings.public.api_port),
         "token": token,
     }))
 }
@@ -1304,19 +1346,13 @@ fn api_info() -> Result<Value, String> {
 /// Rotate API secret; live-swap on running server invalidates prior tokens.
 #[tauri::command]
 fn api_regenerate_token() -> Result<Value, String> {
-    let mut s = settings::load().map_err(|e| e.to_string())?;
-    s.api_secret = format!(
-        "{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    );
-    settings::save(&s).map_err(|e| e.to_string())?;
-    api::set_secret(&s.api_secret);
-    let token = api::long_lived_token(&s.api_secret)?;
+    let settings = settings::rotate_secret().map_err(|e| e.to_string())?;
+    api::set_secret(&settings.api_secret);
+    let token = api::long_lived_token(&settings.api_secret)?;
     Ok(serde_json::json!({
-        "enabled": s.api_enabled,
-        "port": s.api_port,
-        "base_url": format!("http://127.0.0.1:{}", s.api_port),
+        "enabled": settings.public.api_enabled,
+        "port": settings.public.api_port,
+        "base_url": format!("http://127.0.0.1:{}", settings.public.api_port),
         "token": token,
     }))
 }
@@ -1347,9 +1383,7 @@ fn block_exit_if_browsers_running(app: &tauri::AppHandle) -> bool {
         return false;
     }
 
-    eprintln!(
-        "[launcher] exit blocked: {running_count} browser process(es) still running"
-    );
+    eprintln!("[launcher] exit blocked: {running_count} browser process(es) still running");
     show_main_window(app);
     let _ = app.emit(
         "launcher:exit-blocked",
@@ -1501,10 +1535,8 @@ pub fn run() {
                         .show_menu_on_left_click(false)
                         .on_menu_event(|app, e| match e.id.as_ref() {
                             "tray_show" => show_main_window(app),
-                            "tray_quit" => {
-                                if !block_exit_if_browsers_running(app) {
-                                    app.exit(0);
-                                }
+                            "tray_quit" if !block_exit_if_browsers_running(app) => {
+                                app.exit(0);
                             }
                             _ => {}
                         })
@@ -1528,11 +1560,46 @@ pub fn run() {
                 let _ = w.set_decorations(false);
             }
 
-            // Clean up temporary profiles from crashed runs.
-            match profile::purge_temporary() {
-                Ok(n) if n > 0 => eprintln!("[launcher] purged {n} stale temporary profile(s)"),
-                Ok(_) => {}
-                Err(e) => eprintln!("[launcher] temporary purge failed: {e}"),
+            // Restore durable browser leases before any profile mutation or
+            // temporary-profile purge. A recovered browser immediately becomes
+            // running/active, which blocks duplicate starts and protects its
+            // user-data directory from edits or deletion.
+            let lease_recovery_completed = match process::Tracker::shared().recover() {
+                Ok(n) => {
+                    if n > 0 {
+                        eprintln!("[launcher] recovered {n} running browser lease(s)");
+                    }
+                    true
+                }
+                Err(e) => {
+                    eprintln!("[launcher] process lease recovery failed: {e:#}");
+                    false
+                }
+            };
+
+            // Clean up temporary profiles from crashed runs only after a
+            // complete lease recovery. If the lease file is unreadable or from
+            // a newer version, leaving stale temporary profiles behind is safer
+            // than deleting data from a browser that may still be running.
+            if lease_recovery_completed {
+                let profile_recovery_completed = match profile::recover_interrupted_operations() {
+                    Ok(()) => true,
+                    Err(e) => {
+                        eprintln!("[launcher] profile operation recovery failed: {e:#}");
+                        false
+                    }
+                };
+                if profile_recovery_completed {
+                    match profile::purge_temporary() {
+                        Ok(n) if n > 0 => eprintln!("[launcher] purged {n} stale temporary profile(s)"),
+                        Ok(_) => {}
+                        Err(e) => eprintln!("[launcher] temporary purge failed: {e}"),
+                    }
+                } else {
+                    eprintln!("[launcher] temporary profile purge skipped after profile operation recovery failure");
+                }
+            } else {
+                eprintln!("[launcher] temporary profile purge skipped after lease recovery failure");
             }
             match profile_backup::cleanup_stale_artifacts() {
                 Ok(n) if n > 0 => eprintln!("[launcher] removed {n} stale backup staging artifact(s)"),
@@ -1550,8 +1617,8 @@ pub fn run() {
 
             // API task on the shared tokio runtime.
             match settings::ensure_secret() {
-                Ok(s) if s.api_enabled => {
-                    let (secret, port) = (s.api_secret.clone(), s.api_port);
+                Ok(settings) if settings.public.api_enabled => {
+                    let (secret, port) = (settings.api_secret, settings.public.api_port);
                     tauri::async_runtime::spawn(async move {
                         api::serve(secret, port).await;
                     });

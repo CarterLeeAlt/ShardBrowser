@@ -23,7 +23,7 @@ import httpx
 from .storage import atomic_write, read_json_with_backup
 
 PUB_BASE = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev"
-CHROMIUM_VERSION = "149.0.7827.103"
+CHROMIUM_VERSION = "152.0.7977.65"
 # Version manifest (GitHub raw) — one tiny GET tells us every archive's current
 # etag, so we never poll R2/S3 (no per-archive HEAD). Updated archives are then
 # pulled from PUB_BASE only when their etag changed.
@@ -106,7 +106,7 @@ def apply_engine_version(
     grease_version: Optional[str] = None,
 ) -> None:
     """Normalise a profile config's spoofed Chrome version to `chromium_version`
-    (e.g. "149.0.7827.103") so it always matches the running engine — bumps
+    (e.g. "152.0.7977.65") so it always matches the running engine — bumps
     `navigator.user_agent` (Chrome/<major>.0.0.0) and the version fields in
     `client_hints`: brand_version / brand_full_version / chrome_build /
     chrome_patch (derived from the version) plus, when supplied, grease_brand /
