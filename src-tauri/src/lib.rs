@@ -1026,6 +1026,7 @@ async fn process_kill(profile_id: String) -> Result<bool, String> {
 
 const AUTOMATIC_PROXY_TEST_ATTEMPTS: usize = 1;
 const PROXY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
+const RUNTIME_UPDATE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 async fn test_proxies_in_background(
     requests: Vec<proxy::PreparedProxyTest>,
@@ -1082,6 +1083,17 @@ fn start_proxy_refresh_loop() {
                     eprintln!("[launcher] automatic proxy list refresh failed: {error}")
                 }
             }
+        }
+    });
+}
+
+fn start_runtime_update_check_loop() {
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(RUNTIME_UPDATE_CHECK_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            runtime::run_scheduled_update_check().await;
         }
     });
 }
@@ -1430,6 +1442,7 @@ pub fn run() {
             mcp_download,
             runtime::runtime_apply_updates,
             runtime::runtime_check_updates,
+            runtime::runtime_update_check_status,
             runtime::runtime_local_status,
             runtime::runtime_install,
         ])
@@ -1530,6 +1543,10 @@ pub fn run() {
             // Keep stored proxy information fresh while the launcher remains
             // running (including when its window is hidden to the tray).
             start_proxy_refresh_loop();
+
+            // Compare runtime metadata in the background now and every hour.
+            // This never downloads or installs a runtime component.
+            start_runtime_update_check_loop();
 
             // API task on the shared tokio runtime.
             match settings::ensure_secret() {

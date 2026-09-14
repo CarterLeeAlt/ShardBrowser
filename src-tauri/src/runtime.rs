@@ -44,11 +44,21 @@ const MAX_RUNTIME_ARCHIVE_ENTRIES: usize = 250_000;
 const RUNTIME_STAGE_DIR: &str = ".runtime-stage";
 const ENGINE_ROLLBACK_DIR: &str = ".ShardX-Windows.rollback";
 const WIDEVINE_ROLLBACK_DIR: &str = ".WidevineCdm.rollback";
-static RUNTIME_INSTALL_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+static RUNTIME_STATE_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+static RUNTIME_UPDATE_CHECK_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
     std::sync::OnceLock::new();
 
-fn runtime_install_lock() -> &'static tokio::sync::Mutex<()> {
-    RUNTIME_INSTALL_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+fn runtime_state_lock() -> &'static tokio::sync::Mutex<()> {
+    RUNTIME_STATE_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn runtime_update_check_lock() -> &'static tokio::sync::Mutex<()> {
+    RUNTIME_UPDATE_CHECK_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn default_check_available() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -89,6 +99,10 @@ pub fn binary_path() -> Result<PathBuf> {
 
 fn manifest_path() -> Result<PathBuf> {
     Ok(runtime_dir()?.join("manifest.json"))
+}
+
+fn update_check_snapshot_path() -> Result<PathBuf> {
+    Ok(crate::store::config_root()?.join("runtime-update-check.json"))
 }
 
 /// Top-level dir (under runtime_dir) the engine archive extracts into. Wiped
@@ -191,6 +205,44 @@ fn save_manifest(m: &Manifest) -> Result<()> {
     crate::store::atomic_write(&p, serde_json::to_string_pretty(m)?.as_bytes())?;
     Ok(())
 }
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct RuntimeUpdateCheckSnapshot {
+    pub last_attempt_at: Option<String>,
+    pub last_success_at: Option<String>,
+    pub result: Option<RuntimeUpdateStatus>,
+    pub error: Option<String>,
+}
+
+fn update_check_timestamp() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("@{seconds}")
+}
+
+fn load_update_check_snapshot() -> RuntimeUpdateCheckSnapshot {
+    let Ok(path) = update_check_snapshot_path() else {
+        return RuntimeUpdateCheckSnapshot::default();
+    };
+    if !path.exists() {
+        return RuntimeUpdateCheckSnapshot::default();
+    }
+    match crate::store::load_json_with_backup(&path) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            eprintln!("[runtime] update check snapshot recovery failed: {error}");
+            RuntimeUpdateCheckSnapshot::default()
+        }
+    }
+}
+
+fn save_update_check_snapshot(snapshot: &RuntimeUpdateCheckSnapshot) -> Result<()> {
+    let path = update_check_snapshot_path()?;
+    crate::store::atomic_write(&path, serde_json::to_string_pretty(snapshot)?.as_bytes())
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct RuntimeStatus {
     pub installed: bool,
@@ -201,7 +253,7 @@ pub struct RuntimeStatus {
     pub widevine_installed: bool,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RuntimeUpdateStatus {
     pub chromium_installed: bool,
     pub chromium_installed_version: Option<String>,
@@ -209,9 +261,13 @@ pub struct RuntimeUpdateStatus {
     pub chromium_update_available: bool,
     pub chromium_download_url: Option<String>,
     pub fingerprints_installed: bool,
+    #[serde(default = "default_check_available")]
+    pub fingerprints_check_available: bool,
     pub fingerprints_update_available: bool,
     pub fingerprints_download_url: Option<String>,
     pub widevine_installed: bool,
+    #[serde(default = "default_check_available")]
+    pub widevine_check_available: bool,
     pub widevine_update_available: bool,
     pub widevine_download_url: Option<String>,
 }
@@ -295,10 +351,10 @@ async fn fetch_remote_etag(key: &str) -> Option<String> {
         .map(|s| s.trim_matches('"').to_string())
 }
 
-/// Fetch the single remote manifest used for every manually requested update
-/// comparison. Tries each source in `MANIFEST_URLS` order and returns the
-/// first parseable manifest, so the check survives one source being
-/// unreachable. Startup integrity checks never call this function.
+/// Fetch the remote manifest used for runtime update comparisons. Tries each
+/// source in `MANIFEST_URLS` order and returns the first parseable manifest, so
+/// the check survives one source being unreachable. Startup integrity checks
+/// never call this function.
 async fn fetch_remote_manifest() -> Option<RemoteManifest> {
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(4))
@@ -502,65 +558,161 @@ fn migrate_all_to(
 pub fn runtime_local_status() -> Result<RuntimeStatus, String> {
     let base = runtime_dir().map_err(|error| error.to_string())?;
     fs::create_dir_all(&base).map_err(|error| error.to_string())?;
-    if let Ok(_guard) = runtime_install_lock().try_lock() {
+    if let Ok(_guard) = runtime_state_lock().try_lock() {
         recover_interrupted_runtime_swap(&base).map_err(|error| error.to_string())?;
     }
     let local = load_manifest();
     Ok(local_status(&local))
 }
 
-/// User-triggered update check. One manifest request compares Chromium,
-/// fingerprint templates and Widevine without downloading or installing files.
-#[tauri::command]
-pub async fn runtime_check_updates() -> Result<RuntimeUpdateStatus, String> {
+struct RemoteUpdateMetadata {
+    manifest: RemoteManifest,
+    fingerprints_latest: Option<String>,
+    widevine_latest: Option<String>,
+}
+
+/// Fetch remote version metadata without reading or modifying local runtime
+/// state, so an install is never blocked on network timeouts.
+async fn fetch_remote_update_metadata() -> Result<RemoteUpdateMetadata, String> {
     let remote = fetch_remote_manifest()
         .await
         .ok_or_else(|| "Unable to reach the runtime update manifest".to_string())?;
     let manifest = prefer_newest_manifest(remote);
     let spec = host_spec();
-    let local = load_manifest();
-    let status = local_status(&local);
-    let installed_version = effective_installed_version(&local);
-
-    let chromium_update_available = status.installed
-        && manifest
-            .chromium_version
-            .as_deref()
-            .is_some_and(|candidate| version_is_newer(candidate, installed_version.as_deref()));
-    // Compare against the bucket's live etag, not the manifest's recorded one:
-    // after an update the stored etag comes from the download response, so it
-    // can only ever match the bucket. The manifest etag is the offline fallback.
     let fingerprints_latest = fetch_remote_etag(FINGERPRINTS_ARCHIVE_KEY)
         .await
         .or_else(|| manifest.archives.get(FINGERPRINTS_ARCHIVE_KEY).cloned());
     let widevine_latest = fetch_remote_etag(&spec.widevine.key)
         .await
         .or_else(|| manifest.archives.get(&spec.widevine.key).cloned());
+
+    Ok(RemoteUpdateMetadata {
+        manifest,
+        fingerprints_latest,
+        widevine_latest,
+    })
+}
+
+/// Combine remote version metadata with a stable snapshot of the installed
+/// runtime. The caller holds `runtime_state_lock` while this reads local files.
+fn runtime_update_status_from_metadata(remote: RemoteUpdateMetadata) -> RuntimeUpdateStatus {
+    let spec = host_spec();
+    let local = load_manifest();
+    let status = local_status(&local);
+    let installed_version = effective_installed_version(&local);
+
+    let chromium_update_available = status.installed
+        && remote
+            .manifest
+            .chromium_version
+            .as_deref()
+            .is_some_and(|candidate| version_is_newer(candidate, installed_version.as_deref()));
+    let fingerprints_check_available = remote.fingerprints_latest.is_some();
+    let widevine_check_available = remote.widevine_latest.is_some();
     let fingerprints_update_available = status.fingerprints_installed
-        && fingerprints_latest
+        && remote
+            .fingerprints_latest
             .is_some_and(|latest| local.fingerprints_etag.as_deref() != Some(latest.as_str()));
     let widevine_update_available = status.widevine_installed
-        && widevine_latest
+        && remote
+            .widevine_latest
             .is_some_and(|latest| local.widevine_etag.as_deref() != Some(latest.as_str()));
 
-    Ok(RuntimeUpdateStatus {
+    RuntimeUpdateStatus {
         chromium_installed: status.installed,
         chromium_installed_version: installed_version,
-        chromium_latest_version: manifest.chromium_version,
+        chromium_latest_version: remote.manifest.chromium_version,
         chromium_update_available,
         chromium_download_url: Some(format!("{PUB_BASE}/{}", spec.browser.key)),
         fingerprints_installed: status.fingerprints_installed,
+        fingerprints_check_available,
         fingerprints_update_available,
         fingerprints_download_url: Some(format!("{PUB_BASE}/{FINGERPRINTS_ARCHIVE_KEY}")),
         widevine_installed: status.widevine_installed,
+        widevine_check_available,
         widevine_update_available,
         widevine_download_url: Some(format!("{PUB_BASE}/{}", spec.widevine.key)),
-    })
+    }
+}
+
+fn record_update_check_success(
+    mut snapshot: RuntimeUpdateCheckSnapshot,
+    timestamp: String,
+    result: RuntimeUpdateStatus,
+) -> RuntimeUpdateCheckSnapshot {
+    snapshot.last_attempt_at = Some(timestamp.clone());
+    snapshot.last_success_at = Some(timestamp);
+    snapshot.result = Some(result);
+    snapshot.error = None;
+    snapshot
+}
+
+fn record_update_check_failure(
+    mut snapshot: RuntimeUpdateCheckSnapshot,
+    timestamp: String,
+    error: String,
+) -> RuntimeUpdateCheckSnapshot {
+    snapshot.last_attempt_at = Some(timestamp);
+    snapshot.error = Some(error);
+    snapshot
+}
+
+fn emit_update_check_complete(snapshot: &RuntimeUpdateCheckSnapshot) {
+    if let Some(window) = crate::main_window() {
+        let _ = window.emit("runtime:update-check-complete", snapshot);
+    }
+}
+
+async fn check_updates_and_persist() -> Result<RuntimeUpdateCheckSnapshot, String> {
+    let _check_guard = runtime_update_check_lock().lock().await;
+    let timestamp = update_check_timestamp();
+    let remote = fetch_remote_update_metadata().await;
+    let _state_guard = runtime_state_lock().lock().await;
+    let snapshot = match remote {
+        Ok(remote) => record_update_check_success(
+            load_update_check_snapshot(),
+            timestamp,
+            runtime_update_status_from_metadata(remote),
+        ),
+        Err(error) => record_update_check_failure(load_update_check_snapshot(), timestamp, error),
+    };
+    save_update_check_snapshot(&snapshot).map_err(|error| error.to_string())?;
+    emit_update_check_complete(&snapshot);
+    Ok(snapshot)
+}
+
+/// Read the persisted result of the most recent automatic or manual check.
+#[tauri::command]
+pub fn runtime_update_check_status() -> RuntimeUpdateCheckSnapshot {
+    load_update_check_snapshot()
+}
+
+/// Check for runtime updates, persist the outcome, and notify an open settings
+/// page. This only compares remote metadata; it never downloads or installs.
+#[tauri::command]
+pub async fn runtime_check_updates() -> Result<RuntimeUpdateCheckSnapshot, String> {
+    check_updates_and_persist().await
+}
+
+/// Background entry point used by the hourly launcher task.
+pub async fn run_scheduled_update_check() {
+    match check_updates_and_persist().await {
+        Ok(snapshot) => {
+            if let Some(error) = snapshot.error {
+                eprintln!("[runtime] scheduled update check failed: {error}");
+            }
+        }
+        Err(error) => eprintln!("[runtime] scheduled update check could not persist its result: {error}"),
+    }
+}
+
+fn schedule_update_check() {
+    tauri::async_runtime::spawn(async { run_scheduled_update_check().await });
 }
 
 #[tauri::command]
 pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatus, String> {
-    let _install_guard = runtime_install_lock().lock().await;
+    let _state_guard = runtime_state_lock().lock().await;
     let spec = host_spec();
     let base = runtime_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
@@ -657,6 +809,7 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
     .map_err(|e| e.to_string())?;
 
     let _ = window.emit("runtime:done", ());
+    schedule_update_check();
     runtime_local_status()
 }
 
@@ -668,7 +821,7 @@ pub async fn runtime_apply_updates(
     window: Window,
     component: String,
 ) -> Result<RuntimeStatus, String> {
-    let _install_guard = runtime_install_lock().lock().await;
+    let _state_guard = runtime_state_lock().lock().await;
     let spec = host_spec();
     let base = runtime_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
@@ -755,6 +908,7 @@ pub async fn runtime_apply_updates(
     .map_err(|e| e.to_string())?;
 
     let _ = window.emit("runtime:done", ());
+    schedule_update_check();
     runtime_local_status()
 }
 
@@ -1115,6 +1269,96 @@ fn place_widevine(base: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_check_snapshot_defaults_when_fields_are_absent() {
+        let snapshot: RuntimeUpdateCheckSnapshot = serde_json::from_str("{}").unwrap();
+        assert!(snapshot.last_attempt_at.is_none());
+        assert!(snapshot.last_success_at.is_none());
+        assert!(snapshot.result.is_none());
+        assert!(snapshot.error.is_none());
+    }
+
+    #[test]
+    fn failed_check_preserves_last_successful_result() {
+        let result = RuntimeUpdateStatus {
+            chromium_installed: true,
+            chromium_installed_version: Some("152.0.0.0".into()),
+            chromium_latest_version: Some("152.0.0.0".into()),
+            chromium_update_available: false,
+            chromium_download_url: Some("https://example.test/chromium.zip".into()),
+            fingerprints_installed: true,
+            fingerprints_check_available: true,
+            fingerprints_update_available: false,
+            fingerprints_download_url: Some("https://example.test/fingerprints.zip".into()),
+            widevine_installed: true,
+            widevine_check_available: true,
+            widevine_update_available: false,
+            widevine_download_url: Some("https://example.test/widevine.zip".into()),
+        };
+        let snapshot = record_update_check_success(
+            RuntimeUpdateCheckSnapshot::default(),
+            "@100".into(),
+            result,
+        );
+        let failed = record_update_check_failure(snapshot, "@200".into(), "offline".into());
+
+        assert_eq!(failed.last_attempt_at.as_deref(), Some("@200"));
+        assert_eq!(failed.last_success_at.as_deref(), Some("@100"));
+        assert_eq!(failed.error.as_deref(), Some("offline"));
+        assert!(failed.result.is_some());
+    }
+
+    #[test]
+    fn successful_check_replaces_error_and_records_success_time() {
+        let snapshot = RuntimeUpdateCheckSnapshot {
+            last_attempt_at: Some("@100".into()),
+            last_success_at: Some("@90".into()),
+            result: None,
+            error: Some("offline".into()),
+        };
+        let result = RuntimeUpdateStatus {
+            chromium_installed: false,
+            chromium_installed_version: None,
+            chromium_latest_version: Some("152.0.0.0".into()),
+            chromium_update_available: false,
+            chromium_download_url: Some("https://example.test/chromium.zip".into()),
+            fingerprints_installed: false,
+            fingerprints_check_available: false,
+            fingerprints_update_available: false,
+            fingerprints_download_url: Some("https://example.test/fingerprints.zip".into()),
+            widevine_installed: false,
+            widevine_check_available: false,
+            widevine_update_available: false,
+            widevine_download_url: Some("https://example.test/widevine.zip".into()),
+        };
+        let successful = record_update_check_success(snapshot, "@200".into(), result);
+
+        assert_eq!(successful.last_attempt_at.as_deref(), Some("@200"));
+        assert_eq!(successful.last_success_at.as_deref(), Some("@200"));
+        assert!(successful.error.is_none());
+        assert!(successful.result.is_some());
+    }
+
+    #[test]
+    fn update_status_deserializes_precheck_availability_snapshots() {
+        let status: RuntimeUpdateStatus = serde_json::from_str(r#"{
+            "chromium_installed": true,
+            "chromium_installed_version": "152.0.0.0",
+            "chromium_latest_version": "152.0.0.0",
+            "chromium_update_available": false,
+            "chromium_download_url": null,
+            "fingerprints_installed": true,
+            "fingerprints_update_available": false,
+            "fingerprints_download_url": null,
+            "widevine_installed": true,
+            "widevine_update_available": false,
+            "widevine_download_url": null
+        }"#).unwrap();
+
+        assert!(status.fingerprints_check_available);
+        assert!(status.widevine_check_available);
+    }
 
     #[test]
     fn parses_full_manifest() {
