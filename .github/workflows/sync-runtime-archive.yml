@@ -1,0 +1,45 @@
+# Snapshot the Windows runtime archives onto the `runtime-archive` release.
+#
+# The self-contained release bundle (see release.yml and
+# scripts/build-selfcontained.mjs) is assembled from the archives published on
+# that release, so the bundle stays buildable even if the upstream R2 bucket
+# or manifest mirrors go away. Run this workflow whenever the bundled runtime
+# baseline should move to the bucket's current version; the next release then
+# ships that snapshot. The launcher's in-app update check keeps a
+# self-contained install current in the meantime.
+
+name: Sync runtime archive
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    name: sync runtime archive release
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Download current runtimes and record their etags
+        run: node scripts/sync-runtime-archive.mjs --dir .runtime-archive
+
+      - name: Publish to the runtime-archive release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view runtime-archive --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create runtime-archive --repo "$GITHUB_REPOSITORY" \
+              --prerelease \
+              --title "Runtime archive" \
+              --notes "Storage for the prebuilt runtime archives consumed by the self-contained release bundle. Managed by the 'Sync runtime archive' workflow; managed assets are replaced in place on every sync."
+          fi
+          gh release upload runtime-archive --repo "$GITHUB_REPOSITORY" --clobber \
+            .runtime-archive/ShardX-Windows.zip \
+            .runtime-archive/ShardX-Widevine-Win.zip \
+            .runtime-archive/ShardX-Fingerprints.zip \
+            .runtime-archive/runtime-archive.json
