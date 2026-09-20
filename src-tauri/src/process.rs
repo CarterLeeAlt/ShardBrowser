@@ -1314,6 +1314,7 @@ mod tests {
         };
         let file = LeaseFile {
             format_version: LEASE_FORMAT_VERSION,
+            consecutive_incomplete_recoveries: 0,
             leases: vec![lease],
         };
         let encoded = serde_json::to_string(&file).unwrap();
