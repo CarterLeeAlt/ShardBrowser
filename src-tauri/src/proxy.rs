@@ -1817,19 +1817,9 @@ pub async fn geo_check_via(
     )
 }
 
-async fn geo_check_provider(entry: Option<&ProxyEntry>, provider: String) -> Result<GeoInfo> {
-    let url = match provider.as_str() {
-        "ipwho.is" => "https://ipwho.is/",
-        "geojs.io" => "https://get.geojs.io/v1/ip/geo.json",
-        "country.is" => "https://api.country.is/?fields=city,subdivision,location,asn",
-        "bigdatacloud.com" => {
-            "https://api.bigdatacloud.net/data/reverse-geocode-client?localityLanguage=en"
-        }
-        "freeipapi.com" => "https://free.freeipapi.com/api/json",
-        "ipapi.is" => "https://api.ipapi.is/",
-        _ => unreachable!("provider is normalized above"),
-    };
-
+/// Build an HTTP client routed through `entry`, or direct (system proxy
+/// bypassed) when `entry` is None.
+fn http_client_via(entry: Option<&ProxyEntry>) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .user_agent(concat!("ShardX Launcher/", env!("CARGO_PKG_VERSION")))
         .timeout(PROXY_TEST_TIMEOUT);
@@ -1854,7 +1844,49 @@ async fn geo_check_provider(entry: Option<&ProxyEntry>, provider: String) -> Res
         // Direct check: bypass any system proxy.
         builder = builder.no_proxy();
     }
-    let client = builder.build()?;
+    Ok(builder.build()?)
+}
+
+/// Probe whether the proxy exit path is alive at all, using neutral targets
+/// deliberately unrelated to the geo providers. A geo lookup through the proxy
+/// can fail while the exit works fine (provider outage, rate limit, or a site
+/// blocked from the exit region); a success here isolates the failure to the
+/// geo lookup instead of the proxy chain.
+pub async fn exit_liveness(entry: &ProxyEntry) -> Result<()> {
+    const TARGETS: [&str; 2] = [
+        "https://www.cloudflare.com/cdn-cgi/trace",
+        "http://www.msftconnecttest.com/connecttest.txt",
+    ];
+    let client = http_client_via(Some(entry))?;
+    let mut errors = Vec::new();
+    for target in TARGETS {
+        match client.get(target).send().await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    return Ok(());
+                }
+                errors.push(format!("{target}: HTTP {}", response.status()));
+            }
+            Err(error) => errors.push(format!("{target}: {error}")),
+        }
+    }
+    anyhow::bail!("exit liveness probes failed: {}", errors.join("; "))
+}
+
+async fn geo_check_provider(entry: Option<&ProxyEntry>, provider: String) -> Result<GeoInfo> {
+    let url = match provider.as_str() {
+        "ipwho.is" => "https://ipwho.is/",
+        "geojs.io" => "https://get.geojs.io/v1/ip/geo.json",
+        "country.is" => "https://api.country.is/?fields=city,subdivision,location,asn",
+        "bigdatacloud.com" => {
+            "https://api.bigdatacloud.net/data/reverse-geocode-client?localityLanguage=en"
+        }
+        "freeipapi.com" => "https://free.freeipapi.com/api/json",
+        "ipapi.is" => "https://api.ipapi.is/",
+        _ => unreachable!("provider is normalized above"),
+    };
+
+    let client = http_client_via(entry)?;
 
     let body: serde_json::Value = client
         .get(url)

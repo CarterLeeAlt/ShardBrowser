@@ -113,7 +113,7 @@ const UDP_DOCS_URL = withUtm("https://docs.proxyshard.com/eng/our-products/about
 
 // ---- toasts (global queue, auto-expiry; push via toast.ok / toast.err) ----
 
-type ToastItem = { id: number; kind: "ok" | "err" | "info"; text: string; closing: boolean };
+type ToastItem = { id: number; kind: "ok" | "err" | "info" | "warn"; text: string; closing: boolean };
 const MAX_VISIBLE_TOASTS = 5;
 const TOAST_DURATION_MS = 3000;
 const TOAST_EXIT_MS = 140;
@@ -179,6 +179,7 @@ const toast = {
   ok: (t: string) => pushToast("ok", t),
   err: (t: string) => pushToast("err", t),
   info: (t: string) => pushToast("info", t),
+  warn: (t: string) => pushToast("warn", t),
 };
 
 function ToastGlyph({ kind }: { kind: ToastItem["kind"] }) {
@@ -188,6 +189,12 @@ function ToastGlyph({ kind }: { kind: ToastItem["kind"] }) {
         <path d="M2.8 7.2 5.6 10 11.2 4.4" />
       ) : kind === "err" ? (
         <path d="m4 4 6 6m0-6-6 6" />
+      ) : kind === "warn" ? (
+        <>
+          <path d="M7 1.9 12.7 12H1.3Z" />
+          <path d="M7 5.7v2.9" />
+          <circle cx="7" cy="10.4" r="0.8" />
+        </>
       ) : (
         <>
           <circle cx="7" cy="4.1" r="0.8" />
@@ -1648,7 +1655,8 @@ function BrowsersView() {
     }
     setStartBusy((s) => new Set([...s, p.id]));
     try {
-      await invoke<number>("launch", { profileId: p.id });
+      const res = await invoke<{ pid: number; warnings: string[] }>("launch", { profileId: p.id });
+      for (const warning of res.warnings ?? []) toast.warn(warning);
       // Don't optimistically flip `running` here; the 2s poll above picks
       // up the new child immediately and anchors the uptime clock.
     } catch (e) {
@@ -1842,7 +1850,8 @@ function BrowsersView() {
     try {
       for (const id of ids) {
         try {
-          await invoke<number>("launch", { profileId: id });
+          const res = await invoke<{ pid: number; warnings: string[] }>("launch", { profileId: id });
+          for (const warning of res.warnings ?? []) toast.warn(warning);
         } catch (e) {
           toast.err(`Failed to launch ${id.slice(0, 8)}: ${e}`);
         }
