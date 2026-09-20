@@ -15,6 +15,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::Child;
 
 const LEASE_FORMAT_VERSION: u32 = 1;
+/// Consecutive failed recovery attempts after which unresolved leases are
+/// archived out of the active set, so a persistently failing process check
+/// (endpoint-security product, protected-process PID reuse) cannot keep the
+/// launcher locked forever.
+const LEASE_SELF_HEAL_THRESHOLD: u32 = 3;
 const RECOVERY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 static LEASE_RECOVERY_INCOMPLETE: AtomicBool = AtomicBool::new(false);
 
@@ -29,7 +34,7 @@ fn set_lease_recovery_incomplete(value: bool) {
 pub fn ensure_lease_recovery_complete() -> Result<()> {
     if lease_recovery_is_incomplete() {
         anyhow::bail!(
-            "browser process lease recovery is incomplete; restart the launcher after resolving the reported process check failure"
+            "browser process lease recovery is incomplete; restart the launcher — if the process check keeps failing, unresolved leases are archived automatically after {LEASE_SELF_HEAL_THRESHOLD} consecutive attempts"
         );
     }
     Ok(())
@@ -43,6 +48,9 @@ pub struct Tracker {
     unverified: Mutex<Vec<ProcessLease>>,
     /// Serializes read/modify/write lease-file operations with tracker changes.
     lease_file: Mutex<()>,
+    /// Consecutive incomplete recoveries, mirrored into the lease file so the
+    /// count survives restarts (see LEASE_SELF_HEAL_THRESHOLD).
+    lease_incomplete_count: Mutex<u32>,
 }
 
 /// Keeps a profile reserved while launch preflight is in progress. Dropping
@@ -95,6 +103,11 @@ struct ProcessLease {
 struct LeaseFile {
     #[serde(default)]
     format_version: u32,
+    /// Consecutive recovery attempts that ended with unverifiable leases.
+    /// Tracked across restarts so the fail-closed lock can self-heal after
+    /// `LEASE_SELF_HEAL_THRESHOLD` failed attempts.
+    #[serde(default)]
+    consecutive_incomplete_recoveries: u32,
     #[serde(default)]
     leases: Vec<ProcessLease>,
 }
@@ -115,6 +128,7 @@ impl Tracker {
             launching: Mutex::new(HashSet::new()),
             unverified: Mutex::new(Vec::new()),
             lease_file: Mutex::new(()),
+            lease_incomplete_count: Mutex::new(0),
         }
     }
 
@@ -147,6 +161,13 @@ impl Tracker {
         let mut unresolved = Vec::new();
         let mut seen_profiles = HashSet::new();
         let mut inspection_failed = false;
+        {
+            let mut count = self
+                .lease_incomplete_count
+                .lock()
+                .map_err(|_| anyhow::anyhow!("process lease counter lock poisoned"))?;
+            *count = persisted.consecutive_incomplete_recoveries;
+        }
         let mut candidates = persisted.leases;
         candidates.sort_by(|left, right| {
             right
@@ -244,10 +265,60 @@ impl Tracker {
         }
 
         if inspection_failed {
-            set_lease_recovery_incomplete(true);
-            anyhow::bail!("one or more persisted process leases could not be verified");
+            let failures = self.bump_incomplete_recoveries();
+            if failures < LEASE_SELF_HEAL_THRESHOLD {
+                set_lease_recovery_incomplete(true);
+                anyhow::bail!("one or more persisted process leases could not be verified");
+            }
+            // Self-heal: the process check has now failed on this many
+            // consecutive starts, so the fail-closed lock would otherwise be
+            // permanent. Archive the unverifiable leases out of the active
+            // set (audit trail survives in a sibling file); a genuinely live
+            // browser remains guarded by the engine's own user-data
+            // singleton lock.
+            eprintln!(
+                "[launcher] {failures} consecutive incomplete lease recoveries; archiving unresolved leases"
+            );
+            let unresolved: Vec<ProcessLease> = {
+                let mut unverified = self
+                    .unverified
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("process unverified lease lock poisoned"))?;
+                std::mem::take(&mut *unverified)
+            };
+            let archived_at_unix_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let payload = serde_json::to_vec_pretty(&serde_json::json!({
+                "format_version": LEASE_FORMAT_VERSION,
+                "archived_at_unix_ms": archived_at_unix_ms,
+                "leases": unresolved,
+            }))?;
+            let archive_path = crate::store::process_leases_path()?
+                .with_file_name("process-leases.unresolved.json");
+            crate::store::atomic_write(&archive_path, &payload)?;
+            self.reset_incomplete_recoveries();
+            {
+                let _lease_guard = self
+                    .lease_file
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("process lease lock poisoned"))?;
+                let entries = self
+                    .inner
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("process tracker lock poisoned"))?;
+                if let Err(error) = self.persist_leases_locked(&entries) {
+                    eprintln!(
+                        "[launcher] persist process leases after self-heal failed: {error:#}"
+                    );
+                }
+            }
+            set_lease_recovery_incomplete(false);
+            return Ok(recovered.len());
         }
 
+        self.reset_incomplete_recoveries();
         set_lease_recovery_incomplete(false);
         Ok(recovered.len())
     }
@@ -559,6 +630,10 @@ impl Tracker {
     }
 
     fn persist_leases_locked(&self, entries: &HashMap<String, ChildEntry>) -> Result<()> {
+        let consecutive_incomplete_recoveries = *self
+            .lease_incomplete_count
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut leases: Vec<ProcessLease> =
             entries.values().map(|entry| entry.lease.clone()).collect();
         let unverified = self
@@ -569,9 +644,27 @@ impl Tracker {
         leases.sort_by(|left, right| left.profile_id.cmp(&right.profile_id));
         let serialized = serde_json::to_vec_pretty(&LeaseFile {
             format_version: LEASE_FORMAT_VERSION,
+            consecutive_incomplete_recoveries,
             leases,
         })?;
         crate::store::atomic_write(&crate::store::process_leases_path()?, &serialized)
+    }
+
+    fn bump_incomplete_recoveries(&self) -> u32 {
+        let mut count = self
+            .lease_incomplete_count
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *count += 1;
+        *count
+    }
+
+    fn reset_incomplete_recoveries(&self) {
+        let mut count = self
+            .lease_incomplete_count
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *count = 0;
     }
 
     /// Remove exactly the run that exited. Comparing run IDs ensures a late
