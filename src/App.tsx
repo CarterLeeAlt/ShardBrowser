@@ -1682,6 +1682,11 @@ function BrowsersView() {
     if ((await confirmModal({ title: "Delete profile", message: "Delete this profile? Its user-data dir is wiped too.", danger: true })) !== true) return;
     try {
       await invoke("profile_delete", { id });
+      setSelected((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
       reload();
     } catch (e) { toast.err(String(e)); }
   };
@@ -1823,12 +1828,18 @@ function BrowsersView() {
     });
     if (choice == null || choice === "cancel") return;
     const alsoDelete = choice === "delete";
+    const deletedIds = alsoDelete
+      ? profiles.filter((p) => p.folder === f).map((p) => p.id)
+      : [];
     try {
       const n = await invoke<number>("folder_delete", { folder: f, deleteProfiles: alsoDelete });
       // The folder lives in two places: profile tags (cleared by folder_delete)
       // and the localStorage registry of empty folders.  Drop it from the
       // registry too, otherwise the tab lingers after every profile is gone.
       forgetFolder(f);
+      if (deletedIds.length > 0) {
+        setSelected((prev) => new Set([...prev].filter((id) => !deletedIds.includes(id))));
+      }
       if (folder === f) setFolder("all");
       reload();
       toast.ok(
@@ -1874,10 +1885,20 @@ function BrowsersView() {
   };
 
   const bulkStop = async () => {
-    for (const id of selected) {
-      try { await invoke<boolean>("process_kill", { profileId: id }); } catch {}
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    const stopped = new Set<string>();
+    for (const id of ids) {
+      try {
+        await invoke<boolean>("process_kill", { profileId: id });
+        stopped.add(id);
+      } catch (e) {
+        toast.err(`Failed to stop ${id.slice(0, 8)}: ${e}`);
+      }
     }
-    setSelected(new Set());
+    // Keep profiles that failed to stop selected so the batch context
+    // survives; the 2s poll keeps showing their real running state.
+    setSelected((prev) => new Set([...prev].filter((id) => !stopped.has(id))));
   };
 
   const bulkDelete = async () => {
@@ -2047,12 +2068,15 @@ function BrowsersView() {
     const anchor = profiles.find((profile) => profile.id === anchorId);
     if (!moving || !anchor) return;
     const placement = dropPlacementFor(event, paged.map((profile) => profile.id));
-    const previous = profiles;
     setProfiles(moveByAnchor(profiles, activeId, anchorId, placement));
     try {
       await invoke("profile_move_order", { id: activeId, anchorId, placement });
     } catch (error) {
-      setProfiles(previous);
+      // Reload instead of restoring the stale snapshot: a store-changed
+      // reload may have landed while the move was in flight (e.g. an MCP
+      // import), and overwriting it would drop those rows until the next
+      // poll.
+      await reload();
       toast.err(`Could not save profile order: ${String(error)}`);
     }
   };
