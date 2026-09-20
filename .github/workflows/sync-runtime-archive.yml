@@ -43,3 +43,24 @@ jobs:
             .runtime-archive/ShardX-Widevine-Win.zip \
             .runtime-archive/ShardX-Fingerprints.zip \
             .runtime-archive/runtime-archive.json
+
+      # `gh release upload` is not atomic: a network failure mid-upload leaves
+      # the release with a mix of old and new assets, which the next
+      # self-contained build would happily bundle. Verify every asset against
+      # the local snapshot afterwards and fail loudly on any mismatch instead
+      # of publishing a torn snapshot.
+      - name: Verify uploaded assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          for f in ShardX-Windows.zip ShardX-Widevine-Win.zip ShardX-Fingerprints.zip runtime-archive.json; do
+            local_sum=$(sha256sum ".runtime-archive/$f" | cut -d' ' -f1)
+            remote_sum=$(gh release download runtime-archive --repo "$GITHUB_REPOSITORY" --pattern "$f" --output - 2>/dev/null | sha256sum | cut -d' ' -f1)
+            if [ "$local_sum" != "$remote_sum" ]; then
+              echo "Asset $f does not match the local snapshot (local $local_sum, remote $remote_sum)." >&2
+              echo "The runtime-archive release is torn — re-run this workflow before cutting a release." >&2
+              exit 1
+            fi
+            echo "verified: $f ($local_sum)"
+          done

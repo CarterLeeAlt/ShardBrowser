@@ -66,12 +66,20 @@ async function downloadArchive(key, dest) {
   if (!resp.body) {
     throw new Error(`GET ${key}: empty response body`);
   }
+  // Read the etag off the GET response itself: it is guaranteed to describe
+  // exactly the bytes just streamed. A separate HEAD can race a bucket update
+  // and pair a new etag with old bytes (or vice versa).
+  const etag = resp.headers.get("etag");
   await pipeline(Readable.fromWeb(resp.body), createWriteStream(dest));
   const { size } = await stat(dest);
   if (size === 0) {
     throw new Error(`GET ${key}: downloaded file is empty`);
   }
-  return size;
+  const expected = Number(resp.headers.get("content-length"));
+  if (Number.isFinite(expected) && expected > 0 && expected !== size) {
+    throw new Error(`GET ${key}: downloaded ${size} bytes but content-length was ${expected}`);
+  }
+  return { etag: etag ? normalizeEtag(etag) : null, size };
 }
 
 const manifest = await withRetries("fetch runtime manifest", 3, fetchRuntimeManifest);
@@ -80,20 +88,25 @@ await mkdir(values.dir, { recursive: true });
 const etags = {};
 const sizes = {};
 for (const key of ARCHIVE_KEYS) {
-  // The bucket's HEAD answer is authoritative (it can move without the
-  // manifest changing); the manifest's etag map is the fallback, matching
+  // Download first, then fall back for the etag: the GET response's own etag
+  // describes exactly the downloaded bytes. Only when the CDN strips the etag
+  // do we fall back to a bucket HEAD (racing a bucket update is possible
+  // again) and finally to the manifest's etag map, matching
   // fetch_remote_update_metadata in runtime.rs.
-  const etag = await withRetries(`etag for ${key}`, 3, () => currentBucketEtag(key)).catch(
-    () => null,
-  );
-  etags[key] = etag ?? manifest.archives?.[key];
-  if (!etags[key]) {
-    console.error(`Could not resolve an etag for ${key} from the bucket or the manifest.`);
-    process.exit(1);
-  }
-  sizes[key] = await withRetries(`download ${key}`, 3, () =>
+  const downloaded = await withRetries(`download ${key}`, 3, () =>
     downloadArchive(key, join(values.dir, key)),
   );
+  let etag = downloaded.etag;
+  if (!etag) {
+    etag = await withRetries(`etag for ${key}`, 3, () => currentBucketEtag(key)).catch(() => null);
+  }
+  etag = etag ?? manifest.archives?.[key];
+  if (!etag) {
+    console.error(`Could not resolve an etag for ${key} from the download, the bucket or the manifest.`);
+    process.exit(1);
+  }
+  etags[key] = etag;
+  sizes[key] = downloaded.size;
   console.error(`[sync] ${key}: ${sizes[key]} bytes (etag ${etags[key]})`);
 }
 

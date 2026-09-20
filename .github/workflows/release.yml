@@ -52,6 +52,12 @@ jobs:
           WORKFLOW_REF: ${{ github.ref }}
         run: |
           $ErrorActionPreference = "Stop"
+          # pwsh does not stop on non-zero native exits by default; check
+          # $LASTEXITCODE explicitly or a failed helper silently yields empty
+          # tag/version values that bypass every later guard.
+          function Assert-NativeExit([string] $Step) {
+            if ($LASTEXITCODE -ne 0) { throw "$Step failed with exit $LASTEXITCODE." }
+          }
 
           if ($env:WORKFLOW_REF -ne "refs/heads/main") {
             throw "Releases may run only from refs/heads/main; received $env:WORKFLOW_REF."
@@ -63,18 +69,27 @@ jobs:
           }
 
           $base = (node -p "require('./package.json').version").Trim()
+          Assert-NativeExit "read package.json version"
           if ($explicit) {
             $out = node scripts/next-release-version.mjs --explicit $explicit
           } else {
             $out = node scripts/next-release-version.mjs --base $base
           }
+          Assert-NativeExit "next-release-version"
           $tag = (($out | Where-Object { $_ -like "tag=*" }) -replace "^tag=", "").Trim()
           $version = (($out | Where-Object { $_ -like "version=*" }) -replace "^version=", "").Trim()
+          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "Resolved release tag '$tag' is not a valid vMAJOR.MINOR.PATCH tag."
+          }
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "Resolved release version '$version' is not valid."
+          }
 
           # A release tag must name exactly the version checked into all source
           # manifests. This also prevents auto-skipping a previously published
           # tag while building a binary whose sources still declare an older one.
           node scripts/check-version-consistency.mjs --tag $tag
+          Assert-NativeExit "check-version-consistency"
 
           # Publishing a pre-existing tag would mutate its Release assets. Both
           # automatic and manual runs therefore fail before the build begins.
@@ -89,6 +104,7 @@ jobs:
           $next = (node scripts/next-release-version.mjs --base $version --next |
             Where-Object { $_ -like "version=*" }) -replace "^version=", ""
           $next = "$next".Trim()
+          Assert-NativeExit "next-release-version --next"
 
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -122,7 +138,15 @@ jobs:
         run: ./scripts/bootstrap-ci-toolchains.ps1 -Node -Rust
 
       - name: Check source version
-        run: node scripts/check-version-consistency.mjs --tag ${{ needs.prepare.outputs.tag }}
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "Upstream release tag '$env:RELEASE_TAG' is not a valid vMAJOR.MINOR.PATCH tag."
+          }
+          node scripts/check-version-consistency.mjs --tag $env:RELEASE_TAG
+          if ($LASTEXITCODE -ne 0) { throw "check-version-consistency failed with exit $LASTEXITCODE." }
 
       - name: Install frontend dependencies
         run: npm ci
@@ -211,6 +235,15 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Assert release tag
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "Upstream release tag '$env:RELEASE_TAG' is not a valid vMAJOR.MINOR.PATCH tag."
+          }
+
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
         with:
@@ -239,13 +272,16 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           $old = (node -p "require('./package.json').version").Trim()
+          if ($LASTEXITCODE -ne 0) { throw "read package.json version failed with exit $LASTEXITCODE." }
           if ([version]$env:NEW_VERSION -le [version]$old) {
             "Version files already at $old; publishing $env:NEW_VERSION does not move the version forward (pinned tag?). Nothing to bump."
             exit 0
           }
 
           node scripts/bump-release-version.mjs --from $old --to $env:NEW_VERSION
+          if ($LASTEXITCODE -ne 0) { throw "bump-release-version failed with exit $LASTEXITCODE." }
           node scripts/check-version-consistency.mjs
+          if ($LASTEXITCODE -ne 0) { throw "check-version-consistency failed with exit $LASTEXITCODE." }
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
