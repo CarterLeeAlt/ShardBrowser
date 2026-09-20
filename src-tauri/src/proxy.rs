@@ -1844,9 +1844,12 @@ pub async fn exit_liveness(entry: &ProxyEntry) -> Result<()> {
         "http://www.msftconnecttest.com/connecttest.txt",
     ];
     let client = http_client_via(Some(entry))?;
+    // Race both targets concurrently: launch preflight latency is bounded by
+    // one probe timeout, not two.
+    let (first, second) = tokio::join!(client.get(TARGETS[0]).send(), client.get(TARGETS[1]).send());
     let mut errors = Vec::new();
-    for target in TARGETS {
-        match client.get(target).send().await {
+    for (target, response) in [(TARGETS[0], first), (TARGETS[1], second)] {
+        match response {
             Ok(response) => {
                 if response.status().is_success() {
                     return Ok(());
