@@ -1759,21 +1759,10 @@ fn geo_provider_order(preferred: &str) -> Vec<&'static str> {
         .collect()
 }
 
-fn geo_error_allows_fallback(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<reqwest::Error>()
-            .is_some_and(|request_error| {
-                request_error.is_timeout()
-                    || request_error.is_decode()
-                    || request_error.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS)
-            })
-    })
-}
-
 /// Probe geo through `entry` if Some, else direct. The configured provider is
-/// preferred; timeout, HTTP 429, and JSON decode failures advance to the next
-/// provider in Settings order.
+/// preferred; any provider failure (timeout, HTTP 429, decode error, HTTP 5xx,
+/// connection refused, DNS failure, ...) advances to the next provider in
+/// Settings order, so a single provider outage cannot fail the whole lookup.
 pub async fn geo_check_via(
     entry: Option<&ProxyEntry>,
     provider_override: Option<String>,
@@ -1799,14 +1788,11 @@ pub async fn geo_check_via(
                 }
                 return Ok(info);
             }
-            Err(error) if geo_error_allows_fallback(&error) => {
+            Err(error) => {
                 eprintln!(
-                    "[launcher] geo provider {provider} timed out, returned HTTP 429, or sent invalid JSON; trying next: {error}"
+                    "[launcher] geo provider {provider} failed; trying next: {error}"
                 );
                 fallback_errors.push(format!("{provider}: {error}"));
-            }
-            Err(error) => {
-                return Err(error.context(format!("geo provider {provider} failed")));
             }
         }
     }
