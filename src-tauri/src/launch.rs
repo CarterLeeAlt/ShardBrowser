@@ -233,7 +233,11 @@ pub async fn launch_profile(
         .get("webrtc")
         .and_then(|v| v.as_str())
         .unwrap_or("block");
-    let latest = bound_proxy.as_ref().and_then(|p| proxy::latest_test(&p.id));
+    // A failed probe is persisted too, so the webrtc public-ip fallback must
+    // skip empty entries instead of blindly trusting the last record.
+    let latest = bound_proxy
+        .as_ref()
+        .and_then(|p| proxy::latest_successful_test(&p.id));
     // Use the same live identity that drove timezone/language/geolocation.
     let proxy_public_ip: Option<String> = session_geo
         .as_ref()
@@ -474,7 +478,7 @@ async fn resolve_auto_fields(
                 // it). Without any snapshot there is nothing trustworthy to
                 // fill the timezone from, so the launch still cancels.
                 let snapshot = proxy_opt
-                    .and_then(|p| proxy::latest_test(&p.id))
+                    .and_then(|p| proxy::latest_successful_test(&p.id))
                     .filter(|snap| !snap.ip.trim().is_empty() && !snap.timezone.trim().is_empty());
                 let Some(snap) = snapshot else {
                     anyhow::bail!(
