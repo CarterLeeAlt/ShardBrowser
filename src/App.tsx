@@ -1706,8 +1706,11 @@ function BrowsersView() {
     }
     try {
       const summary = await invoke<ProfileBackupSummary>("profile_backup_export", { profileIds: ids });
-      toast.ok(
-        `Exported ${summary.profileCount} complete profile backup${summary.profileCount === 1 ? "" : "s"} (${summary.fileCount} browser-data files). Keep backup files private.`,
+      // The backup intentionally carries the Chromium os-crypt key so it can
+      // be restored for another Windows user — which means anyone holding the
+      // file can decrypt every session cookie inside it. Say so loudly.
+      toast.warn(
+        `Exported ${summary.profileCount} complete backup${summary.profileCount === 1 ? "" : "s"} (${summary.fileCount} files). The backup contains the browser's cookie-decryption key: anyone with this file can sign in as these accounts. Store it offline, never upload it.`,
       );
       // Backups are written only inside the launcher's fixed portable exports
       // directory; no arbitrary destination path crosses the trust boundary.
