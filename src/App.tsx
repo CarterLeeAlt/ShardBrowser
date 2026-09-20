@@ -1417,6 +1417,10 @@ function BrowsersView() {
   const [folder, setFolder] = useState("all");
   const [expanded, setExpanded] = useState<string | null>(null);
   const [draft, setDraft] = useState<ProfileForm | null>(null);
+  // Values captured when the inline editor opened. If the notes/proxy dialog
+  // saves while the editor is open, an untouched field keeps the dialog's
+  // change instead of the editor's stale snapshot overwriting it.
+  const [draftBaseline, setDraftBaseline] = useState<{ notes: string; proxy_id: string } | null>(null);
   // Value = epoch ms at which the engine was first observed running. Used
   // both as a truthy flag (any number = running) and as the anchor for the
   // ticking uptime display in the Status column.
@@ -1915,15 +1919,18 @@ function BrowsersView() {
       return;
     }
     setRenaming(null);
-    if (expanded === id) { setExpanded(null); setDraft(null); return; }
+    setQuickEdit(null);
+    if (expanded === id) { setExpanded(null); setDraft(null); setDraftBaseline(null); return; }
     const stored = await invoke<any>("profile_get", { id });
     setDraft(fromStored(stored));
+    setDraftBaseline({ notes: String(stored.notes ?? ""), proxy_id: String(stored._meta?.proxy_id ?? "") });
     setExpanded(id);
   };
 
   const newProfile = async () => {
     setRenaming(null);
     setDraft(defaultForm());
+    setDraftBaseline(null);
     setExpanded("__new__");
   };
 
@@ -1943,10 +1950,23 @@ function BrowsersView() {
       const existing = draft.id
         ? await invoke<any>("profile_get", { id: draft.id })
         : null;
-      const saved = await invoke<ProfileMeta>("profile_save", {
-        payload: toStored(draft, fp, existing),
-      });
-      await invoke("profile_bind_proxy", { profileId: saved.id, proxyId: draft.proxy_id });
+      // Three-way merge against the editor-open baseline: when the notes or
+      // proxy dialog saved while this editor was open, an untouched field
+      // keeps the dialog's change instead of being clobbered by the editor's
+      // stale snapshot.
+      const notes = draftBaseline && draft.notes === draftBaseline.notes
+        ? String(existing?.notes ?? draft.notes)
+        : draft.notes;
+      const proxyChanged = !draftBaseline || draft.proxy_id !== draftBaseline.proxy_id;
+      const mergedProxyId = proxyChanged
+        ? draft.proxy_id
+        : String(existing?._meta?.proxy_id ?? draft.proxy_id);
+      const payload = toStored({ ...draft, notes }, fp, existing);
+      payload._meta.proxy_id = mergedProxyId;
+      const saved = await invoke<ProfileMeta>("profile_save", { payload });
+      if (proxyChanged) {
+        await invoke("profile_bind_proxy", { profileId: saved.id, proxyId: draft.proxy_id });
+      }
       // A profile created while a folder tab is active should land in that
       // folder (otherwise it pops into "All" and the user has to drag it
       // back themselves).  `__new__` test scopes this to creations only —
@@ -1957,6 +1977,7 @@ function BrowsersView() {
       }
       setExpanded(null);
       setDraft(null);
+      setDraftBaseline(null);
       reload();
       toast.ok(draft.id ? "Profile saved" : `Created "${saved.name}"`);
     } catch (e) { toast.err(String(e)); }
