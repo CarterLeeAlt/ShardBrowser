@@ -2174,7 +2174,7 @@ function BrowsersView() {
               }}
             />
           </div>
-          <div>Name</div><div>Status</div><div className="head-proxy">Proxy</div><div>Notes</div><div className="head-time">Time</div><div className="head-lastrun">Last run</div><div className="head-actions">ACTIONS</div>
+          <div>Name</div><div>Status</div><div className="head-proxy">Proxy</div><div>Notes</div><div className="head-lastrun">Last run</div><div className="head-actions">ACTIONS</div>
         </div>
         {expanded === "__new__" && draft && (
           <div className="row-wrap row-expanded row-new">
@@ -2304,15 +2304,6 @@ function BrowsersView() {
                   onClick={isActive ? undefined : () => setQuickEdit({ kind: "notes", profile: p })}
                 >
                   {p.notes || <span className="muted">—</span>}
-                </div>
-                <div className="cell-time">
-                  <span className={`small ${isRunning ? "" : "muted"}`}>
-                    {(() => {
-                      const live = isRunning ? Date.now() - running[p.id] : 0;
-                      const total = p.total_runtime_ms + live;
-                      return total > 0 ? fmtUptime(total) : "—";
-                    })()}
-                  </span>
                 </div>
                 <div className="cell-lastrun"><span className="muted small">{p.last_launched_at ? fmtTs(p.last_launched_at) : "never"}</span></div>
                 <div className="row-actions">
@@ -3932,17 +3923,6 @@ function fmtTs(stamp: string): string {
   if (!Number.isFinite(n)) return stamp;
   const d = new Date(n * 1000);
   return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-}
-
-/// Format ms uptime as "1h 23m" / "12m 30s" / "45s".
-function fmtUptime(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m ${sec.toString().padStart(2, "0")}s`;
-  return `${sec}s`;
 }
 
 type BulkRowState = {
