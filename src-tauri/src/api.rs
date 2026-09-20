@@ -5,7 +5,7 @@ use std::sync::{OnceLock, RwLock};
 
 use axum::{
     extract::{Path, Query, Request},
-    http::{header::AUTHORIZATION, StatusCode},
+    http::{header::AUTHORIZATION, header::HOST, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
@@ -96,6 +96,22 @@ fn err(code: StatusCode, msg: impl Into<String>) -> ApiError {
 type ApiResult = Result<Json<Value>, ApiError>;
 
 // ---- auth middleware ----
+
+/// Reject requests whose Host header does not name the loopback bind. This
+/// closes the DNS-rebinding vector: a web page whose origin re-resolves to
+/// 127.0.0.1 would otherwise become same-origin and could read API responses.
+async fn enforce_loopback_host(
+    allowed: [String; 3],
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let host = req.headers().get(HOST).and_then(|h| h.to_str().ok());
+    if host.is_some_and(|value| allowed.iter().any(|candidate| candidate == value)) {
+        Ok(next.run(req).await)
+    } else {
+        Err(StatusCode::BAD_REQUEST)
+    }
+}
 
 async fn auth(req: Request, next: Next) -> Result<Response, StatusCode> {
     let secret = read_secret();
@@ -708,7 +724,18 @@ pub async fn serve(secret: String, port: u16) {
         .route("/proxies/:id", delete(delete_proxy))
         .route_layer(middleware::from_fn(auth));
 
-    let app = Router::new().route("/health", get(health)).merge(protected);
+    let loopback_hosts = [
+        format!("127.0.0.1:{port}"),
+        format!("localhost:{port}"),
+        format!("[::1]:{port}"),
+    ];
+    let app = Router::new()
+        .route("/health", get(health))
+        .merge(protected)
+        .layer(middleware::from_fn(move |req: Request, next: Next| {
+            let allowed = loopback_hosts.clone();
+            async move { enforce_loopback_host(allowed, req, next).await }
+        }));
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     match tokio::net::TcpListener::bind(addr).await {
