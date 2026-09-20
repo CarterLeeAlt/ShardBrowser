@@ -2251,6 +2251,22 @@ pub fn latest_test(proxy_id: &str) -> Option<TestSnapshot> {
         .and_then(|hs| hs.by_proxy.get(proxy_id).and_then(|v| v.last().cloned()))
 }
 
+/// Most recent test that produced usable identity data (a public IP and an
+/// IANA timezone). Failed probes are persisted too, so `latest_test` can
+/// return an empty snapshot; callers that need real geo data must skip those.
+pub fn latest_successful_test(proxy_id: &str) -> Option<TestSnapshot> {
+    let hs = load_history().ok()?;
+    latest_successful_in(hs.by_proxy.get(proxy_id)?)
+}
+
+fn latest_successful_in(entries: &[TestSnapshot]) -> Option<TestSnapshot> {
+    entries
+        .iter()
+        .rev()
+        .find(|snap| !snap.ip.trim().is_empty() && !snap.timezone.trim().is_empty())
+        .cloned()
+}
+
 fn unix_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let s = SystemTime::now()
@@ -2696,5 +2712,59 @@ pub fn country_to_timezone(cc: &str) -> &'static str {
         "SA" => "Asia/Riyadh",
         "AE" => "Asia/Dubai",
         _ => "UTC",
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::{latest_successful_in, TestSnapshot};
+
+    fn snap(ip: &str, timezone: &str) -> TestSnapshot {
+        TestSnapshot {
+            first_seen: String::new(),
+            last_seen: String::new(),
+            ip: ip.into(),
+            country_code: "US".into(),
+            country: "United States".into(),
+            region: String::new(),
+            city: String::new(),
+            isp: String::new(),
+            timezone: timezone.into(),
+            latitude: 0.0,
+            longitude: 0.0,
+            tcp_ms: None,
+            udp_ms: None,
+            udp_error: None,
+            provider: "test".into(),
+        }
+    }
+
+    #[test]
+    fn latest_successful_skips_failed_probes() {
+        let entries = vec![
+            snap("203.0.113.7", "America/Los_Angeles"),
+            snap("", ""), // failed probe: no IP, no timezone
+        ];
+        let found = latest_successful_in(&entries).unwrap();
+        assert_eq!(found.ip, "203.0.113.7");
+    }
+
+    #[test]
+    fn latest_successful_prefers_newest_successful_entry() {
+        let entries = vec![
+            snap("203.0.113.7", "America/Los_Angeles"),
+            snap("", ""),
+            snap("203.0.113.9", "Pacific/Honolulu"),
+        ];
+        let found = latest_successful_in(&entries).unwrap();
+        assert_eq!(found.ip, "203.0.113.9");
+        assert_eq!(found.timezone, "Pacific/Honolulu");
+    }
+
+    #[test]
+    fn latest_successful_returns_none_without_usable_entries() {
+        let entries = vec![snap("", ""), snap("", "")];
+        assert!(latest_successful_in(&entries).is_none());
+        assert!(latest_successful_in(&[]).is_none());
     }
 }
