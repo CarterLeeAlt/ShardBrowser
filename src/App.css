@@ -1007,9 +1007,11 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .cell-notes {
   color: var(--tx-2);
   min-width: 0;
-  /* Up to two lines with a trailing ellipsis. The cell height follows the
-     content and the t-cols grid centers each item, so one- and two-line
-     notes are both vertically centered in the row. */
+  /* Honor explicit newlines typed in the notes dialog while still auto-
+     wrapping long lines. Up to two lines with a trailing ellipsis; the cell
+     height follows the content and the t-cols grid centers each item, so
+     one- and two-line notes are both vertically centered in the row. */
+  white-space: pre-wrap;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
