@@ -120,12 +120,15 @@ pub async fn launch_profile(
                     true
                 }
                 Err(e) => {
-                    let cached = proxy::latest_test(&p.id).and_then(|s| s.udp_ms).is_some();
+                    // Fail closed. The proxy test history survives endpoint
+                    // edits, so a stale successful snapshot must not let the
+                    // webrtc=auto branch skip its IP-handling policy while
+                    // the relay is actually dead.
                     eprintln!(
-                        "[launcher] UDP probe failed for proxy {} ({e}); using cached={cached}",
+                        "[launcher] UDP probe failed for proxy {} ({e}); treating UDP relay as unavailable",
                         p.host
                     );
-                    cached
+                    false
                 }
             }
         } else {
