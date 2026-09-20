@@ -10,9 +10,12 @@ use std::process::Stdio;
 const BROWSER_CHROME_LABEL: &str = "X";
 
 /// Launch result: OS pid plus CDP endpoint when remote-debugging is on.
+/// Warnings carry non-fatal launch observations (proxy exit changes, geo
+/// degradation) that the UI surfaces without blocking the browser.
 pub struct LaunchOutcome {
     pub pid: u32,
     pub cdp: Option<process::CdpInfo>,
+    pub warnings: Vec<String>,
 }
 
 /// Resolve the ShardX executable from the portable runtime cache.
@@ -135,12 +138,37 @@ pub async fn launch_profile(
     // Resolve one authoritative live network identity for the complete launch.
     // Reusing it for auto fields and WebRTC avoids contradictory provider
     // answers within the same browser start.
+    let mut warnings = Vec::<String>::new();
     let session_geo = if let Some(bound_proxy) = bound_proxy.as_ref() {
-        let geo = proxy::geo_check(bound_proxy, None).await.with_context(|| {
-            "bound proxy session identity check failed; browser launch cancelled"
-        })?;
-        profile::enforce_session_network_identity(&mut stored, &bound_proxy.id, &geo)?;
-        Some(geo)
+        match proxy::geo_check(bound_proxy, None).await {
+            Ok(geo) => {
+                if let Some(warning) =
+                    profile::enforce_session_network_identity(&mut stored, &bound_proxy.id, &geo)?
+                {
+                    warnings.push(warning);
+                }
+                Some(geo)
+            }
+            Err(geo_error) => {
+                // Classify the failure before deciding: a geo-provider outage
+                // (rate limit, blocked site, provider down) must not block the
+                // launch, but a dead exit path must.
+                if proxy::exit_liveness(bound_proxy).await.is_ok() {
+                    let warning = format!(
+                        "geo lookup failed through the proxy exit, but the exit path is alive; launch allowed and the session identity was not re-checked this start (geo lookup error: {geo_error:#})"
+                    );
+                    eprintln!("[launcher] profile {profile_id}: {warning}");
+                    warnings.push(warning);
+                    None
+                } else {
+                    anyhow::bail!(
+                        "proxy exit unreachable via {}:{} (liveness probe failed); check the proxy/upstream — browser launch cancelled. geo lookup error: {geo_error:#}",
+                        bound_proxy.host,
+                        bound_proxy.port
+                    );
+                }
+            }
+        }
     } else {
         None
     };
@@ -148,7 +176,13 @@ pub async fn launch_profile(
     // Strip launcher-only fields and resolve "auto" sentinels before serialising.
     let mut raw = stored.config.clone();
     raw.remove("_meta");
-    resolve_auto_fields(&mut raw, bound_proxy.as_ref(), session_geo.as_ref()).await?;
+    resolve_auto_fields(
+        &mut raw,
+        bound_proxy.as_ref(),
+        session_geo.as_ref(),
+        &mut warnings,
+    )
+    .await?;
     // ShardX Browser renders `name` as the blue label in its chrome. Override
     // only this launch-time clone: the launcher-visible NAME remains stored,
     // while profile id, user-data directory, noise seeds, and every actual
@@ -321,7 +355,11 @@ pub async fn launch_profile(
         None
     };
 
-    Ok(LaunchOutcome { pid, cdp })
+    Ok(LaunchOutcome {
+        pid,
+        cdp,
+        warnings,
+    })
 }
 
 /// True only when both stored display blocks exactly match the bound library
@@ -375,13 +413,16 @@ async fn read_devtools_endpoint(udd: &Path) -> Option<process::CdpInfo> {
     None
 }
 
-/// Resolve "auto" sentinels in profile JSON. Automatic timezone always uses a
-/// fresh Geo-IP lookup on the current launch path and never falls back to cached,
-/// tagged, or host timezone data.
+/// Resolve "auto" sentinels in profile JSON. Automatic timezone prefers a
+/// fresh Geo-IP lookup on the current launch path; when every live attempt
+/// fails (preflight + retry) it degrades to the proxy's last successful test
+/// snapshot with a warning instead of blocking the launch, and never falls
+/// back to country tags or host timezone data.
 async fn resolve_auto_fields(
     cfg: &mut serde_json::Map<String, serde_json::Value>,
     proxy_opt: Option<&proxy::ProxyEntry>,
     preflight_geo: Option<&proxy::GeoInfo>,
+    warnings: &mut Vec<String>,
 ) -> Result<()> {
     let want_tz_auto = cfg.get("timezone").and_then(|v| v.as_str()) == Some("auto");
     let want_lang_auto = cfg
@@ -410,22 +451,56 @@ async fn resolve_auto_fields(
             .unwrap_or_else(|| "(direct)".into()),
     );
 
-    // Auto timezone is strict: every launch must obtain a fresh result through
-    // the bound proxy (or directly when no proxy is bound). No previous test,
-    // country tag, static country mapping, or launcher-host timezone is allowed.
+    // Auto timezone is strict about sourcing: every launch must obtain a
+    // fresh result through the bound proxy (or directly when no proxy is
+    // bound), degrading only to the proxy's own last tested snapshot when
+    // every live provider attempt failed. No country tag or launcher-host
+    // timezone is ever allowed.
     let (geo, source): (Option<proxy::GeoInfo>, String) = if want_tz_auto {
         let route = proxy_opt
             .map(|p| format!("proxy {}:{}", p.host, p.port))
             .unwrap_or_else(|| "the direct network connection".to_string());
         let live = match preflight_geo {
-            Some(geo) => geo.clone(),
-            None => proxy::geo_check_via(proxy_opt, None)
-                .await
-                .with_context(|| {
-                    format!(
-                        "automatic timezone detection failed through {route}; browser launch cancelled"
-                    )
-                })?,
+            Some(geo) => Ok(geo.clone()),
+            None => proxy::geo_check_via(proxy_opt, None).await,
+        };
+        let live = match live {
+            Ok(live) => live,
+            Err(live_error) => {
+                // Both the launch preflight and this retry failed to obtain a
+                // live geo. Degrade to the proxy's last successful test
+                // snapshot so a provider outage surfaces as a stale-timezone
+                // warning instead of blocking the launch; a dead exit path
+                // never gets this far (the preflight liveness probe cancels
+                // it). Without any snapshot there is nothing trustworthy to
+                // fill the timezone from, so the launch still cancels.
+                let snapshot = proxy_opt
+                    .and_then(|p| proxy::latest_test(&p.id))
+                    .filter(|snap| !snap.ip.trim().is_empty() && !snap.timezone.trim().is_empty());
+                let Some(snap) = snapshot else {
+                    anyhow::bail!(
+                        "automatic timezone detection failed through {route} and the proxy has no cached test snapshot; browser launch cancelled ({live_error:#})"
+                    );
+                };
+                let warning = format!(
+                    "live timezone detection failed through {route}; using the proxy's last tested timezone {} (live lookup error: {live_error:#})",
+                    snap.timezone
+                );
+                eprintln!("[launcher] {warning}");
+                warnings.push(warning);
+                proxy::GeoInfo {
+                    ip: snap.ip,
+                    country: snap.country,
+                    country_code: snap.country_code,
+                    region: snap.region,
+                    city: snap.city,
+                    isp: snap.isp,
+                    timezone: snap.timezone,
+                    latitude: snap.latitude,
+                    longitude: snap.longitude,
+                    provider: "cached-snapshot".into(),
+                }
+            }
         };
 
         if live.ip.trim().is_empty() {
@@ -448,7 +523,7 @@ async fn resolve_auto_fields(
         (Some(live), source)
     } else {
         // Preserve the existing fallback behaviour for language/geolocation-only
-        // Auto fields. The strict no-cache rule above applies to Auto timezone.
+        // Auto fields. The live-first rule above applies to Auto timezone.
         let mut source = String::new();
         let geo = match proxy_opt {
             Some(_) if preflight_geo.is_some() => {

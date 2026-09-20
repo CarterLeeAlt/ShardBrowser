@@ -869,15 +869,72 @@ fn session_location_changed(
             && locked.timezone != current.timezone)
 }
 
+/// How the live exit compares to the identity locked on a previous launch.
+enum SessionIdentityShift {
+    /// Same exit IP — nothing to report.
+    SameExitIp,
+    /// New exit IP within the locked country and timezone.
+    Rotated,
+    /// New exit IP whose country or timezone differs from the locked one.
+    Relocated,
+}
+
+fn session_identity_shift(
+    locked: &SessionNetworkIdentity,
+    current: &SessionNetworkIdentity,
+) -> SessionIdentityShift {
+    if locked.exit_ip_sha256 == current.exit_ip_sha256 {
+        SessionIdentityShift::SameExitIp
+    } else if session_location_changed(locked, current) {
+        SessionIdentityShift::Relocated
+    } else {
+        SessionIdentityShift::Rotated
+    }
+}
+
+/// User-facing notice for an exit change. Exit changes never block a launch;
+/// they are surfaced so the user knows their sessions may have jumped
+/// location. Every shift re-anchors the stored identity, so a notice fires
+/// once per actual exit change.
+fn session_identity_warning(
+    shift: SessionIdentityShift,
+    locked: &SessionNetworkIdentity,
+    current: &SessionNetworkIdentity,
+) -> Option<String> {
+    let timezone_label = |timezone: &str| {
+        if timezone.is_empty() {
+            "unknown-timezone".to_string()
+        } else {
+            timezone.to_string()
+        }
+    };
+    match shift {
+        SessionIdentityShift::SameExitIp => None,
+        SessionIdentityShift::Rotated => Some(format!(
+            "Proxy exit IP rotated within {}/{}; session identity re-anchored to the new exit IP",
+            current.country_code,
+            timezone_label(&current.timezone)
+        )),
+        SessionIdentityShift::Relocated => Some(format!(
+            "Proxy exit location changed from {}/{} to {}/{}; launch allowed and session identity re-anchored",
+            locked.country_code,
+            timezone_label(&locked.timezone),
+            current.country_code,
+            timezone_label(&current.timezone),
+        )),
+    }
+}
+
 /// Bind a browser profile's persisted sessions to the geographic identity
-/// observed on its first protected launch. A same-region IP rotation is logged
-/// and accepted, but a country/timezone jump on the same proxy binding is
-/// blocked before Chromium can expose the account session to the new location.
+/// observed on its first protected launch. Every later launch re-checks the
+/// exit through the bound proxy and re-anchors the stored identity in place;
+/// an exit change (same-region rotation or a country/timezone jump) returns a
+/// warning to the caller instead of blocking the launch.
 pub fn enforce_session_network_identity(
     stored: &mut StoredProfile,
     proxy_id: &str,
     geo: &crate::proxy::GeoInfo,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let public_ip = geo.ip.trim();
     let country_code = geo.country_code.trim().to_ascii_uppercase();
     if public_ip.is_empty() || country_code.is_empty() {
@@ -902,35 +959,24 @@ pub fn enforce_session_network_identity(
             stored.meta.session_network_identity = Some(current);
             save_raw(stored)?;
         }
-        Some(locked) if locked.exit_ip_sha256 == current.exit_ip_sha256 => {}
-        Some(locked) if session_location_changed(&locked, &current) => {
-            anyhow::bail!(
-                "bound proxy session identity changed from {}/{} to {}/{}; browser launch blocked to protect Google/ChatGPT sessions. Bind a stable proxy (or intentionally rebind this profile) before launching",
-                locked.country_code,
-                if locked.timezone.is_empty() { "unknown-timezone" } else { &locked.timezone },
-                current.country_code,
-                if current.timezone.is_empty() { "unknown-timezone" } else { &current.timezone },
-            );
-        }
         Some(locked) => {
-            let mut updated = current;
-            if updated.timezone.is_empty() {
+            let shift = session_identity_shift(&locked, &current);
+            let mut updated = current.clone();
+            if matches!(shift, SessionIdentityShift::Rotated) && updated.timezone.is_empty() {
                 // A provider can occasionally omit timezone while still
                 // returning the same country. Keep the last known timezone so
                 // a transient partial response does not weaken future checks.
-                updated.timezone = locked.timezone;
+                updated.timezone = locked.timezone.clone();
             }
-            eprintln!(
-                "[launcher] profile {} proxy exit IP rotated within {}/{}; accepting the new IP identity",
-                stored.meta.id,
-                updated.country_code,
-                if updated.timezone.is_empty() { "unknown-timezone" } else { &updated.timezone },
-            );
             stored.meta.session_network_identity = Some(updated);
             save_raw(stored)?;
+            if let Some(warning) = session_identity_warning(shift, &locked, &current) {
+                eprintln!("[launcher] profile {}: {warning}", stored.meta.id);
+                return Ok(Some(warning));
+            }
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 pub fn save_raw(stored: &mut StoredProfile) -> Result<()> {
@@ -1267,8 +1313,9 @@ fn chrono_now_iso() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_fingerprint, fill_newly_enabled_noise_seeds, session_location_changed,
-        ProfileDeleteTarget, ProfileOperation, ProfileRetag, SessionNetworkIdentity, StoredProfile,
+        effective_fingerprint, fill_newly_enabled_noise_seeds, session_identity_shift,
+        session_identity_warning, session_location_changed, ProfileDeleteTarget, ProfileOperation,
+        ProfileRetag, SessionIdentityShift, SessionNetworkIdentity, StoredProfile,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -1280,6 +1327,59 @@ mod tests {
             country_code: country_code.into(),
             timezone: timezone.into(),
         }
+    }
+
+    fn identity_with_digest(
+        digest: &str,
+        country_code: &str,
+        timezone: &str,
+    ) -> SessionNetworkIdentity {
+        SessionNetworkIdentity {
+            exit_ip_sha256: digest.into(),
+            ..identity(country_code, timezone)
+        }
+    }
+
+    #[test]
+    fn session_identity_shift_classifies_exit_changes() {
+        let locked = identity_with_digest("digest-1", "US", "Pacific/Honolulu");
+
+        // Same exit IP stays quiet regardless of any provider drift.
+        let same_ip = identity_with_digest("digest-1", "US", "America/Los_Angeles");
+        assert!(matches!(
+            session_identity_shift(&locked, &same_ip),
+            SessionIdentityShift::SameExitIp
+        ));
+        assert!(
+            session_identity_warning(SessionIdentityShift::SameExitIp, &locked, &same_ip).is_none()
+        );
+
+        // New exit IP within the same country and timezone rotates.
+        let rotated = identity_with_digest("digest-2", "US", "Pacific/Honolulu");
+        assert!(matches!(
+            session_identity_shift(&locked, &rotated),
+            SessionIdentityShift::Rotated
+        ));
+        let warning =
+            session_identity_warning(SessionIdentityShift::Rotated, &locked, &rotated).unwrap();
+        assert!(warning.contains("rotated within US/Pacific/Honolulu"));
+
+        // New exit IP with a timezone jump relocates and warns with both ends.
+        let relocated = identity_with_digest("digest-2", "US", "America/Los_Angeles");
+        assert!(matches!(
+            session_identity_shift(&locked, &relocated),
+            SessionIdentityShift::Relocated
+        ));
+        let warning =
+            session_identity_warning(SessionIdentityShift::Relocated, &locked, &relocated).unwrap();
+        assert!(warning.contains("from US/Pacific/Honolulu"));
+        assert!(warning.contains("to US/America/Los_Angeles"));
+
+        // A provider that omits the timezone reports as unknown-timezone.
+        let tzless = identity_with_digest("digest-2", "DE", "");
+        let warning =
+            session_identity_warning(SessionIdentityShift::Relocated, &locked, &tzless).unwrap();
+        assert!(warning.contains("to DE/unknown-timezone"));
     }
 
     #[test]
