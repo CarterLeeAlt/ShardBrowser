@@ -1789,9 +1789,7 @@ pub async fn geo_check_via(
                 return Ok(info);
             }
             Err(error) => {
-                eprintln!(
-                    "[launcher] geo provider {provider} failed; trying next: {error}"
-                );
+                eprintln!("[launcher] geo provider {provider} failed; trying next: {error}");
                 fallback_errors.push(format!("{provider}: {error}"));
             }
         }
@@ -1846,7 +1844,8 @@ pub async fn exit_liveness(entry: &ProxyEntry) -> Result<()> {
     let client = http_client_via(Some(entry))?;
     // Race both targets concurrently: launch preflight latency is bounded by
     // one probe timeout, not two.
-    let (first, second) = tokio::join!(client.get(TARGETS[0]).send(), client.get(TARGETS[1]).send());
+    let (first, second) =
+        tokio::join!(client.get(TARGETS[0]).send(), client.get(TARGETS[1]).send());
     let mut errors = Vec::new();
     for (target, response) in [(TARGETS[0], first), (TARGETS[1], second)] {
         match response {
