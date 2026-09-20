@@ -355,11 +355,7 @@ pub async fn launch_profile(
         None
     };
 
-    Ok(LaunchOutcome {
-        pid,
-        cdp,
-        warnings,
-    })
+    Ok(LaunchOutcome { pid, cdp, warnings })
 }
 
 /// True only when both stored display blocks exactly match the bound library
