@@ -142,6 +142,7 @@ pub async fn launch_profile(
     // Reusing it for auto fields and WebRTC avoids contradictory provider
     // answers within the same browser start.
     let mut warnings = Vec::<String>::new();
+    let mut preflight_geo_exhausted = false;
     let session_geo = if let Some(bound_proxy) = bound_proxy.as_ref() {
         match proxy::geo_check(bound_proxy, None).await {
             Ok(geo) => {
@@ -162,6 +163,7 @@ pub async fn launch_profile(
                     );
                     eprintln!("[launcher] profile {profile_id}: {warning}");
                     warnings.push(warning);
+                    preflight_geo_exhausted = true;
                     None
                 } else {
                     anyhow::bail!(
@@ -183,6 +185,7 @@ pub async fn launch_profile(
         &mut raw,
         bound_proxy.as_ref(),
         session_geo.as_ref(),
+        preflight_geo_exhausted,
         &mut warnings,
     )
     .await?;
@@ -425,6 +428,7 @@ async fn resolve_auto_fields(
     cfg: &mut serde_json::Map<String, serde_json::Value>,
     proxy_opt: Option<&proxy::ProxyEntry>,
     preflight_geo: Option<&proxy::GeoInfo>,
+    preflight_geo_exhausted: bool,
     warnings: &mut Vec<String>,
 ) -> Result<()> {
     let want_tz_auto = cfg.get("timezone").and_then(|v| v.as_str()) == Some("auto");
@@ -465,6 +469,13 @@ async fn resolve_auto_fields(
             .unwrap_or_else(|| "the direct network connection".to_string());
         let live = match preflight_geo {
             Some(geo) => Ok(geo.clone()),
+            // After a failed preflight the whole provider chain has already
+            // been exhausted once through this route; retrying all six
+            // providers only doubles the worst-case wait before the snapshot
+            // fallback below kicks in.
+            None if preflight_geo_exhausted => Err(anyhow::anyhow!(
+                "geo providers already exhausted during launch preflight"
+            )),
             None => proxy::geo_check_via(proxy_opt, None).await,
         };
         let live = match live {
