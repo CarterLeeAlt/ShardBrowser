@@ -801,9 +801,8 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
     28px                    /* checkbox */
     minmax(140px, 1fr)      /* name */
     minmax(100px, 1fr)      /* status */
-    minmax(200px, 1fr)      /* proxy */
-    minmax(120px, 1fr)      /* notes */
-    minmax(90px, 1fr)       /* time */
+    minmax(227px, 1fr)      /* proxy */
+    minmax(183px, 1fr)      /* notes */
     minmax(130px, 1fr)      /* last run */
     160px;                  /* row actions */
   gap: 8px;
