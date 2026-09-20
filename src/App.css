@@ -2406,6 +2406,7 @@ button.status-pill.status-link:active { transform: translateY(1px); }
 .toast-ok { --toast-tone: var(--ok); }
 .toast-err { --toast-tone: var(--err); }
 .toast-info { --toast-tone: var(--accent); }
+.toast-warn { --toast-tone: var(--warn); }
 .toast-closing {
   pointer-events: none;
   animation: toastOut .14s ease-in forwards;

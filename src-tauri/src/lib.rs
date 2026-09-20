@@ -1260,12 +1260,23 @@ fn proxy_bulk_save(entries: Vec<proxy::ProxyEntry>) -> Result<usize, String> {
 
 // ---- Launcher ----
 
+/// UI launch result: child pid plus non-fatal warnings (proxy exit changes,
+/// geo degradation) that the UI surfaces as yellow toasts.
+#[derive(serde::Serialize)]
+struct LaunchResult {
+    pid: u32,
+    warnings: Vec<String>,
+}
+
 #[tauri::command]
-async fn launch(profile_id: String) -> Result<u32, String> {
+async fn launch(profile_id: String) -> Result<LaunchResult, String> {
     // UI launches: no CDP, headed.
     launch::launch_profile(&profile_id, false, false)
         .await
-        .map(|o| o.pid)
+        .map(|o| LaunchResult {
+            pid: o.pid,
+            warnings: o.warnings,
+        })
         .map_err(|e| e.to_string())
 }
 

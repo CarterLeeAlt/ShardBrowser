@@ -490,6 +490,7 @@ async fn start_profile(Path(id): Path<String>, body: Option<Json<StartReq>>) -> 
         "pid": outcome.pid,
         "headless": headless,
         "cdp": outcome.cdp,
+        "warnings": outcome.warnings,
     })))
 }
 
