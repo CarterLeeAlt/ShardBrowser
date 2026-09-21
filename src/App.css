@@ -1053,28 +1053,30 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 
 /* Name and proxy are visually one two-line information group. The proxy
    column is itself the grid item: keeping its two lines directly inside the
-   t-cols track makes the header and row content share the exact same x-axis. */
+   t-cols track makes the header and row content share the exact same x-axis.
+   The 22px + 2px + 16px slots put the primary row center at 11px and the
+   secondary at 32px — a 21px pitch the notes lines replicate exactly. */
 .browser-data-row .cell-name,
 .browser-data-row .cell-proxy {
   display: grid;
-  grid-template-rows: 22px 14px;
+  grid-template-rows: 22px 16px;
   align-items: center;
   row-gap: 2px;
-  height: 38px;
+  height: 40px;
 }
-/* Notes must land on the same two slots (22px primary row, 2px gap, 14px
-   secondary row) instead of floating centered. An 18px line pitch with 2px
-   top padding puts the first line's center exactly on the primary row center
-   (11px), so one- and two-line notes align with every other column. */
+/* Notes share the name/proxy slot geometry: a 20px line pitch with 1px top
+   padding lands line centers at 11px and 31px (within 1px of the secondary
+   slot), so both notes lines line up with every other column. */
 .browser-data-row .cell-notes {
-  height: 38px;
-  padding-top: 2px;
-  line-height: 18px;
+  height: 40px;
+  padding-top: 1px;
+  line-height: 20px;
+  font-size: 12px;
 }
 .browser-data-row .cell-status {
   display: flex;
   align-items: center;
-  height: 38px;
+  height: 40px;
 }
 .browser-data-row .cell-proxy.cell-proxy-direct {
   grid-template-rows: 1fr;
