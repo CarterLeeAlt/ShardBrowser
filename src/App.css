@@ -1062,6 +1062,15 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   row-gap: 2px;
   height: 38px;
 }
+/* Notes must land on the same two slots (22px primary row, 2px gap, 14px
+   secondary row) instead of floating centered. An 18px line pitch with 2px
+   top padding puts the first line's center exactly on the primary row center
+   (11px), so one- and two-line notes align with every other column. */
+.browser-data-row .cell-notes {
+  height: 38px;
+  padding-top: 2px;
+  line-height: 18px;
+}
 .browser-data-row .cell-status {
   display: flex;
   align-items: center;
