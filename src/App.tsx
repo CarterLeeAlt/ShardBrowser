@@ -2347,11 +2347,11 @@ function BrowsersView() {
                   ) : <span className="muted small">— direct —</span>}
                 </div>
                 <div
-                  className={`cell-notes cell-click ${isActive ? "cell-locked" : ""}`}
+                  className={`cell-notes cell-click ${isActive ? "cell-locked" : ""} ${(p.notes || "").includes("\n") ? "notes-multi" : ""}`}
                   title={isActive ? "Stop the browser or wait for it to finish starting before editing notes" : p.notes || "Click to edit notes"}
                   onClick={isActive ? undefined : () => setQuickEdit({ kind: "notes", profile: p })}
                 >
-                  {p.notes || <span className="muted">—</span>}
+                  {p.notes ? <span className="notes-text">{p.notes}</span> : <span className="muted">—</span>}
                 </div>
                 <div className="cell-lastrun"><span className="muted small">{p.last_launched_at ? fmtTs(p.last_launched_at) : "never"}</span></div>
                 <div className="row-actions">

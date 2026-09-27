@@ -1008,9 +1008,11 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   color: var(--tx-2);
   min-width: 0;
   /* Honor explicit newlines typed in the notes dialog while still auto-
-     wrapping long lines. Up to two lines with a trailing ellipsis; the cell
-     height follows the content and the t-cols grid centers each item, so
-     one- and two-line notes are both vertically centered in the row. */
+     wrapping long lines. The inner span carries the two-line clamp with a
+     trailing ellipsis so it survives the flex centering below; the
+     browser-data-row override fixes the cell at 40px. */
+}
+.cell-notes .notes-text {
   white-space: pre-wrap;
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -1064,14 +1066,24 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   row-gap: 2px;
   height: 40px;
 }
-/* Notes share the name/proxy slot geometry: a 20px line pitch with 1px top
-   padding lands line centers at 11px and 31px (within 1px of the secondary
-   slot), so both notes lines line up with every other column. */
+/* Notes center vertically in the 40px row via flex, so a one-line note (or
+   the dash placeholder) sits on the row's true center. -webkit-box-pack is
+   not an alternative here: -webkit-line-clamp disables it in Chromium. */
 .browser-data-row .cell-notes {
   height: 40px;
-  padding-top: 1px;
+  display: flex;
+  align-items: center;
   line-height: 20px;
   font-size: 12px;
+}
+/* Notes with an explicit newline keep the two-slot rhythm shared with the
+   name/proxy columns: the centered 40px two-line block would land its line
+   centers at 10px and 30px, and the 2px top margin shifts it to 1..41 for
+   centers at 11px and 31px (within 1px of the secondary slot at 32px). A
+   newline-free note that soft-wraps stays centered at 10/30, still on the
+   same 20px pitch. */
+.browser-data-row .cell-notes.notes-multi .notes-text {
+  margin-top: 2px;
 }
 .browser-data-row .cell-status {
   display: flex;
