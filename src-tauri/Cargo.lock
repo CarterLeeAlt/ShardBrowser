@@ -3781,7 +3781,7 @@ dependencies = [
 
 [[package]]
 name = "shardx-launcher"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "aes-gcm",
  "anyhow",
