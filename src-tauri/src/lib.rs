@@ -713,12 +713,6 @@ fn profile_set_folder(id: String, folder: String) -> Result<(), String> {
     profile::set_folder(&id, &folder).map_err(|e| e.to_string())
 }
 
-/// Rename folder (retag profiles); returns count.
-#[tauri::command]
-fn folder_rename(old: String, new: String) -> Result<usize, String> {
-    profile::rename_folder(&old, &new).map_err(|e| e.to_string())
-}
-
 /// Delete folder; `delete_profiles` true → remove, false → unfile.
 #[tauri::command]
 fn folder_delete(folder: String, delete_profiles: bool) -> Result<usize, String> {
@@ -726,7 +720,6 @@ fn folder_delete(folder: String, delete_profiles: bool) -> Result<usize, String>
 }
 
 /// Host OS in fingerprint-library vocabulary.
-#[tauri::command]
 fn host_platform() -> String {
     "Windows".to_string()
 }
@@ -960,11 +953,6 @@ fn fingerprint_list() -> Result<Vec<fingerprints::LibraryEntry>, String> {
 }
 
 #[tauri::command]
-fn fingerprint_get(id: String) -> Result<Option<fingerprints::LibraryEntry>, String> {
-    fingerprints::get(&id).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 fn fingerprint_import(
     json_text: String,
     id_hint: Option<String>,
@@ -1159,59 +1147,9 @@ fn proxy_delete(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn proxy_check(entry: proxy::ProxyEntry) -> Result<u128, String> {
-    let entry = proxy::resolve_for_use(entry).map_err(|e| e.to_string())?;
-    proxy::probe(&entry).await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn proxy_check_udp(entry: proxy::ProxyEntry) -> Result<u128, String> {
-    let entry = proxy::resolve_for_use(entry).map_err(|e| e.to_string())?;
-    proxy::probe_udp(&entry).await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn proxy_geo(
-    entry: proxy::ProxyEntry,
-    provider: Option<String>,
-) -> Result<proxy::GeoInfo, String> {
-    let entry = proxy::resolve_for_use(entry).map_err(|e| e.to_string())?;
-    proxy::geo_check(&entry, provider)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 async fn proxy_full_test(entry: proxy::ProxyEntry) -> Result<proxy::TestSnapshot, String> {
     let entry = proxy::resolve_for_use(entry).map_err(|e| e.to_string())?;
     proxy::full_test(&entry).await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn proxy_full_test_batch(entries: Vec<proxy::ProxyEntry>) -> Vec<proxy::BatchTestResult> {
-    let mut resolved = Vec::with_capacity(entries.len());
-    let mut failures = Vec::new();
-    for (index, entry) in entries.into_iter().enumerate() {
-        match proxy::resolve_for_use(entry) {
-            Ok(entry) => resolved.push((index, entry)),
-            Err(error) => failures.push(proxy::BatchTestResult {
-                index,
-                snapshot: None,
-                error: Some(error.to_string()),
-            }),
-        }
-    }
-    let original_indexes: Vec<usize> = resolved.iter().map(|(index, _)| *index).collect();
-    let mut tested =
-        proxy::full_test_batch(resolved.into_iter().map(|(_, entry)| entry).collect()).await;
-    for result in &mut tested {
-        if let Some(original_index) = original_indexes.get(result.index) {
-            result.index = *original_index;
-        }
-    }
-    failures.extend(tested);
-    failures.sort_by_key(|result| result.index);
-    failures
 }
 
 #[tauri::command]
@@ -1293,13 +1231,6 @@ pub fn is_profile_active(profile_id: &str) -> bool {
 }
 
 #[tauri::command]
-fn cookies_export(profile_id: String) -> Result<Vec<cookies::Cookie>, String> {
-    let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
-    profile::ensure_stopped(&profile_id).map_err(|e| e.to_string())?;
-    cookies::export(&profile_id).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 async fn profile_backup_export(
     profile_ids: Vec<String>,
 ) -> Result<profile_backup::ProfileBackupSummary, String> {
@@ -1315,16 +1246,6 @@ async fn profile_backup_import(
     tokio::task::spawn_blocking(move || profile_backup::import(paths))
         .await
         .map_err(|error| format!("backup worker failed: {error}"))?
-}
-
-#[tauri::command]
-fn cookies_import(profile_id: String, cookies: Vec<cookies::Cookie>) -> Result<usize, String> {
-    let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
-    // Running browser would clobber the import on exit.
-    if is_profile_active(&profile_id) {
-        return Err("stop the profile before importing cookies".into());
-    }
-    cookies::import(&profile_id, &cookies).map_err(|e| e.to_string())
 }
 
 // ---- Settings ----
@@ -1445,14 +1366,11 @@ pub fn run() {
             clipboard_write,
             clipboard_read,
             profile_set_folder,
-            folder_rename,
             folder_delete,
-            host_platform,
             fingerprint_recommend,
             profile_create_from_template,
             enrich_picks_for_preset,
             fingerprint_list,
-            fingerprint_get,
             fingerprint_import,
             fingerprint_delete,
             open_fingerprint_dir,
@@ -1465,11 +1383,7 @@ pub fn run() {
             proxy_move_order,
             proxy_save,
             proxy_delete,
-            proxy_check,
-            proxy_check_udp,
-            proxy_geo,
             proxy_full_test,
-            proxy_full_test_batch,
             proxy_history,
             proxy_last_test,
             proxy_bulk_import,
@@ -1480,10 +1394,8 @@ pub fn run() {
             settings_save,
             api_info,
             api_regenerate_token,
-            cookies_export,
             profile_backup_export,
             profile_backup_import,
-            cookies_import,
             mcp_download,
             runtime::runtime_apply_updates,
             runtime::runtime_check_updates,
