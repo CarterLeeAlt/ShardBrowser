@@ -1,5 +1,5 @@
-// Constants and helpers for the runtime distribution channel, shared by
-// scripts/sync-runtime-archive.mjs and scripts/build-selfcontained.mjs.
+// Constants and helpers for the runtime distribution channel, used by
+// scripts/sync-runtime-archive.mjs.
 //
 // The runtime archives and their manifest are upstream's: the manifest lives
 // in ProxyShard/ShardBrowser (served through three mirrors) and the archives

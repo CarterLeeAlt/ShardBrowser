@@ -79,7 +79,6 @@
 :root[data-theme="light"] .sidebar {
   background: linear-gradient(180deg, #ffffff, #f4f5f9);
 }
-:root[data-theme="light"] .ie-bg,
 :root[data-theme="light"] .inline-editor {
   background: linear-gradient(180deg, #ffffff 0%, #f6f7fb 100%);
 }
@@ -341,7 +340,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 }
 .version-pill:hover:not(:disabled)  { background: var(--bg-2); }
 .version-pill:disabled              { cursor: default; opacity: 0.85; }
-.version-pill .shard-mini           { color: var(--accent); flex: 0 0 auto; }
 .version-pill-text                  { display: flex; flex-direction: column; min-width: 0; }
 .version-pill-current               { font-size: 12px; font-weight: var(--font-weight-emphasis); }
 .version-pill-sub                   { font-size: 10.5px; color: var(--tx-4); }
@@ -678,28 +676,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   padding: 0;
   display: inline-grid; place-items: center;
 }
-.pill {
-  display: inline-flex; align-items: center; justify-content: center;
-  min-width: 30px;
-  font-size: 12px;
-  padding: 5px 8px;
-  border-radius: 6px;
-  border: 1px solid transparent;
-  cursor: pointer;
-}
-.pill-start {
-  background: var(--accent-dim);
-  color: var(--accent-hi);
-  border-color: #8b5cf640;
-}
-.pill-start:hover { background: #8b5cf633; }
-.pill-stop {
-  background: #fb71851a;
-  color: var(--err);
-  border-color: #fb718540;
-}
-.pill-stop:hover { background: #fb718533; }
-
 /* Fixed icon-only Start/Stop control; matches the adjacent 28px action buttons. */
 .btn-launch {
   width: 28px; height: 28px; min-width: 28px; flex: 0 0 28px;
@@ -1930,23 +1906,7 @@ button.status-pill.status-link:active { transform: translateY(1px); }
   color: var(--tx-4);
 }
 
-.tpl-card-static { cursor: default; }
-.tpl-card-static:hover { background: var(--bg-1); border-color: var(--bd-1); }
-.tpl-actions {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--bd-1);
-  display: flex; align-items: center; gap: 6px;
-}
-.tpl-actions .btn-sm { padding: 3px 8px; font-size: 11.5px; }
 .btn-sm.danger { color: var(--err); border-color: #fb71855e; }
-.tpl-tag {
-  margin-left: auto;
-  font-size: 10px; letter-spacing: .6px; text-transform: uppercase;
-  color: var(--tx-4);
-  background: var(--bg-2);
-  padding: 2px 6px; border-radius: 4px;
-}
 
 /* ===== Fingerprint Library — grouped by OS ===== */
 
@@ -2043,17 +2003,6 @@ button.status-pill.status-link:active { transform: translateY(1px); }
   background: var(--bg-2);
   padding: 2px 6px; border-radius: 4px;
 }
-
-.readout {
-  display: flex; justify-content: space-between; align-items: center;
-  background: var(--bg-1);
-  border: 1px solid var(--bd-1);
-  border-radius: var(--radius);
-  padding: 6px 10px;
-  font-size: 12px;
-}
-.readout-k { color: var(--tx-3); font-size: 11px; }
-.readout-v { color: var(--tx-1); font-size: 12px; }
 
 .ie-foot {
   display: flex; justify-content: flex-end; gap: 10px;
@@ -2276,75 +2225,6 @@ button.status-pill.status-link:active { transform: translateY(1px); }
   overflow-y: auto; min-height: 0;
 }
 .dialog-body label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--tx-3); }
-
-/* ===== fingerprint template cards ===== */
-
-.tpl-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 12px;
-}
-.tpl-card {
-  --accent: #8b5cf6;
-  position: relative;
-  text-align: left;
-  background: var(--bg-1);
-  border: 1px solid var(--bd-1);
-  border-radius: var(--radius-lg);
-  padding: 14px 16px 12px 16px;
-  cursor: pointer;
-  display: flex; flex-direction: column; gap: 6px;
-  overflow: hidden;
-  transition: border-color .12s, background .12s, transform .04s;
-}
-.tpl-card:hover {
-  border-color: var(--accent);
-  background: var(--bg-2);
-}
-.tpl-card:active { transform: translateY(1px); }
-.tpl-accent {
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  height: 3px;
-  background: var(--accent);
-  opacity: 0.85;
-}
-.tpl-card::after {
-  content: "";
-  position: absolute;
-  top: -10px; right: -10px;
-  width: 36px; height: 36px;
-  background: linear-gradient(135deg, transparent 50%, var(--accent) 50%);
-  opacity: 0.18;
-}
-.tpl-head {
-  display: flex; align-items: center; justify-content: space-between;
-  font-size: 10.5px; letter-spacing: .8px;
-  text-transform: uppercase;
-  font-weight: var(--font-weight-emphasis);
-  color: var(--tx-3);
-  margin-top: 4px;
-}
-.tpl-platform { color: var(--accent-hi); }
-.tpl-chrome { color: var(--tx-4); }
-.tpl-label {
-  font-size: 14px; font-weight: var(--font-weight-emphasis);
-  color: var(--tx-1);
-  margin-top: 2px;
-}
-.tpl-gpu {
-  font-size: 11.5px;
-  color: var(--tx-3);
-  font-family: var(--font-app);
-}
-.tpl-cta {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--bd-1);
-  font-size: 11.5px;
-  color: var(--accent-hi);
-  font-weight: var(--font-weight-emphasis);
-}
 
 /* ===== context menu ===== */
 

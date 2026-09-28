@@ -2635,12 +2635,6 @@ where
         .collect()
 }
 
-/// Test every proxy with the manual-priority five-worker pool. Each proxy owns
-/// its full timeout; queued entries are never failed because the batch is busy.
-pub async fn full_test_batch(entries: Vec<ProxyEntry>) -> Vec<BatchTestResult> {
-    full_test_batch_in_lane(prepare_proxy_tests(entries), TestLane::Manual, 1, |_| {}).await
-}
-
 /// Run automatic tests and report each result immediately after its persisted
 /// test finishes, without waiting for slower proxies in the same batch.
 pub async fn full_test_batch_background_with_progress<F>(
