@@ -1,23 +1,21 @@
-# Windows taskbar fonts
+# Windows 任务栏字体
 
-`CascadiaMono-Regular.ttf` is the static TrueType build used by Windows
-taskbar badge frames above 32px and as a compatibility fallback for legacy
-non-ASCII names. Rust embeds it with `include_bytes!` and registers it for the
-current process with `AddFontMemResourceEx`; it is never installed into Windows
-and never writes to the system font directory.
+`CascadiaMono-Regular.ttf` 是静态 TrueType 构建版本，用于 32px 以上的
+Windows 任务栏角标帧，并作为旧式非 ASCII 名称的兼容回退。Rust 用
+`include_bytes!` 内嵌该字体，并通过 `AddFontMemResourceEx` 为当前进程
+注册；它从不会被安装进 Windows，也从不写入系统字体目录。
 
-The repository file is `ttf/static/CascadiaMono-Regular.ttf` from Microsoft's
-official Cascadia Code v2407.24 release. Its SHA-256 is:
+仓库中的该文件取自 Microsoft 官方 Cascadia Code v2407.24 发行版的
+`ttf/static/CascadiaMono-Regular.ttf`。其 SHA-256 为：
 
 `06520d032ec274fa5040b22c6f4a1d829081b24ba40b2da56dae89bf10c7b481`
 
-This native GDI font is intentionally separate from the WebView Inter WOFF2
-subsets:
+这一原生 GDI 字体有意与 WebView 的 Inter WOFF2 子集分开维护：
 
-- `src-tauri/fonts/CascadiaMono-Regular.ttf` - native Windows taskbar labels
-- `src-tauri/fonts/pixel-mono/*.bdf` - Public Domain X.Org misc-fixed bitmap
-  strikes for native 16/20/24/30/32px taskbar labels
-- `src/assets/fonts/Inter-Variable-*.woff2` - bundled frontend typography
+- `src-tauri/fonts/CascadiaMono-Regular.ttf` - 原生 Windows 任务栏标签
+- `src-tauri/fonts/pixel-mono/*.bdf` - Public Domain 的 X.Org misc-fixed
+  点阵字号，用于原生 16/20/24/30/32px 任务栏标签
+- `src/assets/fonts/Inter-Variable-*.woff2` - 打包进前端的排版字体
 
-Cascadia Code is licensed under the SIL Open Font License 1.1. The repository
-copy of the license is at `public/licenses/Cascadia-Code-OFL.txt`.
+Cascadia Code 采用 SIL Open Font License 1.1 授权。仓库中的许可证副本
+位于 `public/licenses/Cascadia-Code-OFL.txt`。

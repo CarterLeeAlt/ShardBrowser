@@ -10,7 +10,7 @@
 
 ## 发布与版本
 
-- 一次 Release 只有在所有 job 都成功时才算发布成功，必须包含：版本解析、质量门禁、portable EXE 构建、artifact 上传、GitHub Release 创建/上传，以及最后的版本回写提交。
+- 一次 Release 只有在所有 job 都成功时才算发布成功，必须包含：版本解析、质量门禁、portable EXE 构建、runtime archive 快照下载（硬依赖 `sync-runtime-archive.yml` 工作流预先播种的 `runtime-archive` Release，缺任一必需资产即失败）、自包含包 `ShardX-Launcher-selfcontained-win-x64.zip` 构建、artifact 上传、GitHub Release 创建/上传（portable EXE 与自包含 zip 两份资产，`fail_on_unmatched_files: true`），以及最后的版本回写提交。
 - GitHub Release 或 EXE 已创建但后续版本回写失败时，整次 Release 仍是失败状态。禁止因此直接推进到下一个版本。
 - 失败发布的恢复顺序：先精确确认错误版本对应的 Release、tag、公开资产和 Actions artifact；删除错误 Release、tag 与公开资产；将源码版本恢复到原发布版本；使用修复后的流程重新构建并重新发布相同版本。不要跳过失败版本。
 - GitHub Actions artifact 的删除和 run 取消需要令牌拥有 Actions 写权限。遇到 `403 Resource not accessible by personal access token` 时，如实报告权限不足；不得声称已取消或已删除，也不得尝试绕过权限。
