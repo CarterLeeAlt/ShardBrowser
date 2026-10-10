@@ -227,8 +227,16 @@ pub async fn launch_profile(
         launch_args.push("--hide-crash-restore-bubble".into());
     }
 
-    if let Some(p) = bound_proxy.as_ref() {
-        launch_args.push(format!("--proxy-server={}", p.to_proxy_server_arg()).into());
+    match bound_proxy.as_ref() {
+        Some(p) => {
+            launch_args.push(format!("--proxy-server={}", p.to_proxy_server_arg()).into());
+        }
+        None => {
+            // Chromium falls back to the OS proxy (e.g. Clash system proxy) when
+            // no proxy switch is given; a direct profile must bypass it explicitly.
+            launch_args.push("--no-proxy-server".into());
+            eprintln!("[launcher] no proxy bound -> --no-proxy-server (OS proxy bypassed)");
+        }
     }
 
     // WebRTC IP policy: block / tcp_only / auto (auto = relay if UDP, else tcp_only).
