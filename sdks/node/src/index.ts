@@ -19,7 +19,7 @@ export interface ShardXOptions {
   cacheDir?: string;
   progress?: ProgressCb;
   /** Per-profile user-data-dir root (cookies, IndexedDB, cache).
-   *  Defaults to `./shardx-profiles/` next to the running script. */
+   *  Defaults to `<cacheDir>/profiles/`; override per-launch via `userDataDir`. */
   profilesDir?: string;
 }
 

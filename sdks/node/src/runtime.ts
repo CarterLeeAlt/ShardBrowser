@@ -98,8 +98,8 @@ export class Runtime {
   private readonly progress?: ProgressCb;
   private readonly _profilesRoot?: string;
   /** Set after a successful in-process install() so subsequent launches
-   *  skip the R2 HEAD round-trip (~1 s over a clean connection).  Cleared
-   *  by `install({force: true})`. */
+   *  skip the manifest fetch round-trip (~1 s over a clean connection).
+   *  Cleared by `install({force: true})`. */
   private _checkedInProcess = false;
   /** Engine chromium version from the manifest (fallback to the build-time
    *  constant). Used by launch to normalise profile UA + client_hints. */

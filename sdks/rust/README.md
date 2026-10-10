@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
 
 如果不需要 CDP 客户端，可禁用该 feature
 （`shardx = { version = "0.1", default-features = false }`），改用
-`launch`（无 CDP）或 `launch_cdp`（把 `session.cdp_url` 暴露给你自己的
+`launch`（无 CDP）或 `launch_cdp`（把 `engine.cdp_url` 暴露给你自己的
 客户端）：
 
 ```rust
