@@ -1,29 +1,28 @@
 # @proxyshard/shardx (Node)
 
-Self-contained Node/TypeScript SDK for the **ShardX anti-detect
-browser** by the [ProxyShard](https://proxyshard.com?utm_source=shardx&utm_medium=referral&utm_campaign=shardx-launcher) team.
+[ProxyShard](https://proxyshard.com?utm_source=shardx&utm_medium=referral&utm_campaign=shardx-launcher)
+团队出品的 **ShardX 反检测浏览器** 自包含 Node/TypeScript SDK。
 
-Does **not** depend on the desktop launcher. On first use it downloads
-the patched Chromium 152 engine, Widevine CDM, and the 170-profile
-fingerprint library from our CDN into a local cache, then launches
-isolated browser sessions on demand.
+**不**依赖桌面启动器。首次使用时，它会从我们的 CDN 将打过补丁的
+Chromium 152 引擎、Widevine CDM 以及包含 170 个环境的指纹库下载到本地
+缓存，然后按需启动隔离的浏览器会话。
 
-Driven by [patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)
-(stealth-patched Playwright) — `sdk.session()` returns a ready-to-use
-`Browser` instance, no manual `connectOverCDP` plumbing.
+由 [patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)
+（打过反检测补丁的 Playwright）驱动——`sdk.session()` 返回一个开箱即用
+的 `Browser` 实例，无需手动拼装 `connectOverCDP`。
 
-## Install
+## 安装
 
 ```bash
 npm install @proxyshard/shardx
 ```
 
-Supported hosts: **macOS arm64**, **Windows x64**, **Linux x64**. Node ≥ 18.
+支持的主机平台：**macOS arm64**、**Windows x64**、**Linux x64**。Node ≥ 18。
 
-### Linux system dependencies
+### Linux 系统依赖
 
-The bundled Chromium engine needs `unzip` + the standard set of shared
-libraries any Chromium fork links against. On a fresh Debian / Ubuntu:
+内置的 Chromium 引擎需要 `unzip` 以及任何 Chromium 分支都会链接的标准
+共享库集合。在全新的 Debian / Ubuntu 上：
 
 ```bash
 sudo apt install -y \
@@ -33,14 +32,14 @@ sudo apt install -y \
   libgbm1 libpango-1.0-0 libcairo2 libasound2 libxshmfence1
 ```
 
-When launching as **root** or inside **Docker**, pass `--no-sandbox` and
-`--disable-dev-shm-usage` via `extraArgs`:
+以 **root** 身份或在 **Docker** 中启动时，通过 `extraArgs` 传入
+`--no-sandbox` 和 `--disable-dev-shm-usage`：
 
 ```ts
 await sdk.session(profile, { extraArgs: ["--no-sandbox", "--disable-dev-shm-usage"] });
 ```
 
-## Quick start
+## 快速开始
 
 ```ts
 import { ShardX } from "@proxyshard/shardx";
@@ -75,7 +74,7 @@ try {
 }
 ```
 
-### Random profile
+### 随机环境
 
 ```ts
 // createProfile() with no id freezes a random library template (filter the
@@ -91,7 +90,7 @@ try {
 }
 ```
 
-### Discover bundled profiles
+### 浏览内置环境
 
 ```ts
 console.log(sdk.listProfiles().slice(0, 5));
@@ -103,7 +102,7 @@ const profile = sdk.randomProfile({ platform: "macOS" });
 console.log(profile.id, profile.config.webgl.renderer);
 ```
 
-### Validate a proxy before binding
+### 绑定前校验代理
 
 ```ts
 console.log(await sdk.checkProxy("socks5://user:pass@host:port"));
@@ -115,14 +114,14 @@ console.log(await sdk.checkProxy("socks5://user:pass@host:port"));
 // }
 ```
 
-## Persistent profiles
+## 持久化环境
 
-`listProfiles()` / `randomProfile()` hand back **library templates** — launch
-one and it re-reads the same template every time. For a profile you can
-**return to** (same fingerprint *and* cookies/cache) or **delete**, create a
-*saved profile*: it freezes a template (or a random one) with randomized
-hardware/platform_version under a fresh unique id in its own folder
-`<cache>/profiles/<id>/`, exactly like the desktop launcher's "create profile".
+`listProfiles()` / `randomProfile()` 返回的是**指纹库模板**——启动其中
+一个，每次读取的都是同一个模板。若想要一个可以**回头继续使用**（指纹
+*和* cookie/缓存都相同）或可**删除**的环境，请创建*保存的环境*：它会
+把一个模板（或随机模板）连同随机化的 hardware/platform_version 一起
+冻结到一个全新的唯一 id 下，存入其专属文件夹
+`<cache>/profiles/<id>/`，与桌面启动器的 "create profile" 完全一致。
 
 ```ts
 const sdk = new ShardX();
@@ -146,15 +145,15 @@ const reopened = sdk.openProfile("<id>");
 sdk.deleteProfile("<id>");
 ```
 
-Saved profiles never touch the bundled S3 library: templates stay read-only in
-`<cache>/fingerprints/*.json`, saved profiles live in `<cache>/profiles/<id>/`
-(holding `profile.json` + the browser's user-data-dir).
+保存的环境从不改动内置的 S3 指纹库：模板以只读形式存放在
+`<cache>/fingerprints/*.json`，保存的环境存放在 `<cache>/profiles/<id>/`
+（内含 `profile.json` + 浏览器的 user-data-dir）。
 
-## Anti-fingerprint noise
+## 反指纹噪声
 
-Per-vector noise (canvas / WebGL / audio / DOMRect / sensors / fonts) is **off
-by default**. `setNoise(...)` is **declarative** — exactly the vectors you list
-are enabled (with soft defaults), every other one is turned off:
+按向量注入的噪声（canvas / WebGL / audio / DOMRect / sensors / fonts）
+默认**关闭**。`setNoise(...)` 是**声明式的**——恰好只启用你列出的向量
+（带软默认值），其余向量一律关闭：
 
 ```ts
 profile.setNoise("canvas", "audio", "webgl");   // only these three on
@@ -163,66 +162,62 @@ profile.setNoise();                               // all off
 sdk.saveProfile(profile);                          // persist the choice
 ```
 
-Seeds are derived **per-profile** at launch — stable across runs, unique per
-profile — so two profiles with the same vectors enabled still produce different
-canvas/audio/WebGL fingerprints. Soft defaults: WebGL `intensity 0.0005`,
-DOMRect `maxOffset 1`.
+种子在启动时**按环境**派生——跨次运行保持稳定、不同环境互不相同——
+因此两个启用了相同向量的环境仍会产生不同的 canvas/audio/WebGL 指纹。
+软默认值：WebGL `intensity 0.0005`，DOMRect `maxOffset 1`。
 
-## Pre-launch checks
+## 启动前检查
 
-Every call to `sdk.session()` / `sdk.launch()` runs the same pre-spawn
-pipeline the desktop launcher uses:
+每次调用 `sdk.session()` / `sdk.launch()` 都会执行桌面启动器所用的同一
+条启动前流水线：
 
-1. **`resolveAutoFields`** — if the profile has `"auto"` sentinels for
-   `timezone`, `navigator.language`, or `geolocation.mode`, the SDK
-   makes a live geo lookup through the bound proxy (`ip-api.com` by
-   default). Concrete values get written back: timezone (from the API,
-   never a static table), `accept_language` chain, `languages`,
-   `icu_locale` (always overwritten so `Intl.*` matches
-   `navigator.language`), and lat/lng. Proxy-via failure → direct geo
-   → host `Intl.DateTimeFormat().resolvedOptions().timeZone` as
-   last-resort fallback. The resolved geo is surfaced on
-   `session.geo`.
-2. **`applyScreenStrategy`** — see below.
-3. **`probeUdp`** — SOCKS5 UDP_ASSOCIATE round-trip. If it fails, QUIC
-   is force-disabled and WebRTC switches to `tcp_only` automatically.
+1. **`resolveAutoFields`** —— 若环境的 `timezone`、`navigator.language`
+   或 `geolocation.mode` 带有 `"auto"` 哨兵值，SDK 会通过绑定的代理发起
+   实时 geo 查询（默认 `ip-api.com`）。具体值会被写回：timezone（取自
+   API 返回值；当 geo 提供方未返回 timezone 时，回落到内置的国家码 →
+   IANA 时区静态表）、`accept_language` 链、`languages`、`icu_locale`
+   （总会被覆盖，以使 `Intl.*` 与 `navigator.language` 一致）以及经纬
+   度（lat/lng）。走代理查询失败 → 直连 geo 查询 → 以主机的
+   `Intl.DateTimeFormat().resolvedOptions().timeZone` 作为最后兜底。
+   解析出的 geo 会暴露在 `session.geo` 上。
+2. **`applyScreenStrategy`** —— 见下文。
+3. **`probeUdp`** —— SOCKS5 UDP_ASSOCIATE 往返探测。若失败，QUIC 会被
+   强制禁用，WebRTC 自动切换为 `tcp_only`。
 
-### Screen strategy
+### 屏幕策略
 
-`screenMode` option to `session()` / `launch()`:
+`session()` / `launch()` 的 `screenMode` 选项：
 
-* **`"profile"`** — keep whatever the fingerprint claims.
-* **`"cap_to_host"`** — *macOS default.* If the host monitor is smaller
-  than the FP screen, scale `screen.*` + `window.*` down proportionally;
-  otherwise no-op.
-* **`"use_host"`** — *Windows / Linux default.* Overwrite `screen.*`
-  with the real monitor (minus a 40 px Windows taskbar) and recompute
-  `window.outer*` / `window.inner*`.
+* **`"profile"`** —— 保持指纹声明的原样。
+* **`"cap_to_host"`** —— *macOS 默认。*若主机显示器小于指纹（FP）声明
+  的屏幕，则按比例下调 `screen.*` + `window.*`；否则不做任何操作。
+* **`"use_host"`** —— *Windows / Linux 默认。*用真实显示器尺寸（扣除
+  40 px 的 Windows 任务栏）覆盖 `screen.*`，并重新计算 `window.outer*` /
+  `window.inner*`。
 
-Default mode is picked from `navigator.platform`. Override per launch:
+默认模式根据 `navigator.platform` 选定。可在每次启动时覆盖：
 
 ```ts
 await sdk.session(profile, { screenMode: "profile" });
 ```
 
-### Host-aware hardware randomisation
+### 感知主机的硬件随机化
 
-`randomize: true` re-picks `hardware_concurrency`, `device_memory`, and
-`platform_version` before the launch — using the same logic as the
-desktop launcher:
+`randomize: true` 会在启动前重新挑选 `hardware_concurrency`、
+`device_memory` 和 `platform_version`——采用与桌面启动器相同的逻辑：
 
-* **macOS** profiles use the curated `MAC_HW_CONFIGS` table by id.
-* **Windows / Linux** profiles bracket the host's logical CPU count
-  within `[host − 4, host + 2]` from the real x86 set
-  `[4, 6, 8, 12, 16, 20, 24, 28, 32]`; `device_memory` is floored by
-  core count (≥ 12 → 16, else 8) and capped by `hostRamBucketGb()`
-  (8 / 16 / 32 GiB bucketed from `sysctl hw.memsize` / `/proc/meminfo`
-  / `Get-CimInstance Win32_ComputerSystem`).
+* **macOS** 环境按 id 使用精选的 `MAC_HW_CONFIGS` 表。
+* **Windows / Linux** 环境从真实 x86 集合
+  `[4, 6, 8, 12, 16, 20, 24, 28, 32]` 中选取落在主机逻辑 CPU 数
+  `[host − 4, host + 2]` 范围内的值；`device_memory` 以核心数托底
+  （≥ 12 → 16，否则 8），上限由 `hostRamBucketGb()` 决定（从
+  `sysctl hw.memsize` / `/proc/meminfo` /
+  `Get-CimInstance Win32_ComputerSystem` 归入 8 / 16 / 32 GiB 档）。
 
-So a profile launched on an 8-core / 16 GB laptop will never claim
-32 cores / 128 GB of RAM.
+因此，在 8 核 / 16 GB 笔记本上启动的环境绝不会声称拥有 32 核 / 128 GB
+内存。
 
-### Override fingerprint fields
+### 覆盖指纹字段
 
 ```ts
 const profile = sdk.library
@@ -236,7 +231,7 @@ const profile = sdk.library
 const { browser, close } = await sdk.session(profile, { proxy: "socks5://..." });
 ```
 
-### Use your own fingerprint JSON
+### 使用你自己的指纹 JSON
 
 ```ts
 import { Profile } from "@proxyshard/shardx";
@@ -245,7 +240,7 @@ const profile = Profile.fromFile("/path/to/my-custom.json");
 const { browser, close } = await sdk.session(profile);
 ```
 
-### WebRTC policy
+### WebRTC 策略
 
 ```ts
 await sdk.session(profile, {
@@ -255,10 +250,10 @@ await sdk.session(profile, {
 });
 ```
 
-### Progress callback during the first-run download
+### 首次下载期间的进度回调
 
-The first `session`/`launch`/`listProfiles` triggers the download.  Hook
-it with a progress callback on the constructor:
+第一次 `session`/`launch`/`listProfiles` 调用会触发下载。可在构造函数
+上挂一个进度回调来跟踪它：
 
 ```ts
 const sdk = new ShardX({
@@ -271,11 +266,11 @@ const profile = await sdk.createProfile("win-rtx4060");
 const { browser, close } = await sdk.session(profile);
 ```
 
-## Advanced: raw launch without patchright
+## 进阶：不使用 patchright 的裸启动
 
-If you'd rather drive the browser with a different CDP client (raw
-`chrome-remote-interface`, puppeteer-core's `connect`, your own
-WebSocket), skip `session()` and use `launch()` directly:
+如果你想改用其他 CDP 客户端（原生 `chrome-remote-interface`、
+puppeteer-core 的 `connect`、你自己的 WebSocket）驱动浏览器，可跳过
+`session()`，直接使用 `launch()`：
 
 ```ts
 const profile = await sdk.createProfile("win-rtx4060");
@@ -285,12 +280,11 @@ console.log(sess.cdpUrl);              // ws://127.0.0.1:54113/devtools/browser/
 await sess.stop();
 ```
 
-`launch()` runs the same pre-launch pipeline (auto-resolve, screen
-strategy, UDP probe, hw randomisation) and returns a `BrowserSession`
-with `cdpUrl`, `geo`, `proxyUdpMs`, `quicEnabled`, `webrtcMode`,
-`userDataDir`, and `stop()`.
+`launch()` 执行同样的启动前流水线（auto 解析、屏幕策略、UDP 探测、
+硬件随机化），并返回一个 `BrowserSession`，带有 `cdpUrl`、`geo`、
+`proxyUdpMs`、`quicEnabled`、`webrtcMode`、`userDataDir` 和 `stop()`。
 
-## Cache layout
+## 缓存布局
 
 ```
 ~/Library/Application Support/shardx-sdk/    (mac)
@@ -304,25 +298,25 @@ with `cdpUrl`, `geo`, `proxyUdpMs`, `quicEnabled`, `webrtcMode`,
     └── …                     ← user-data-dir: cookies, IndexedDB, cache
 ```
 
-Override:
+覆盖方式：
 
 ```ts
 const sdk = new ShardX({ cacheDir: "/data/shardx" });
 ```
 
-## Update the runtime
+## 更新运行时
 
-The SDK auto-checks remote etags on the first `session`/`launch`/`listProfiles`
-call of each process and re-downloads anything that changed.  To force a
-re-download mid-process:
+SDK 在每个进程的第一次 `session`/`launch`/`listProfiles` 调用时，会通过
+一次 GET 获取 GitHub raw 上的 runtime.json 版本清单（其中包含各档案的
+etag、chromium 版本和 GREASE 信息）；引擎的重新下载按 chromium 版本比对
+触发（磁盘上的引擎版本与清单不一致时重下）。要在进程中途强制重新下载：
 
 ```ts
 await sdk.runtime.install({ force: true });
 ```
 
-## License
+## 许可证
 
-MIT (this SDK). The Chromium-fork engine binary it downloads at
-runtime is a closed-source product — see the
-[main repo](https://github.com/ProxyShard/ShardBrowser) for engine
-licensing.
+MIT（本 SDK）。它在运行时下载的 Chromium 分支引擎二进制文件是闭源
+产品——引擎许可请参见
+[主仓库](https://github.com/ProxyShard/ShardBrowser)。
