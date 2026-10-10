@@ -160,10 +160,9 @@ class Runtime:
     ):
         self.root = Path(cache_dir) if cache_dir else RUNTIME_DIR
         self.root.mkdir(parents=True, exist_ok=True)
-        # Per-profile user-data-dir tree.  Defaults to `./shardx-profiles/`
-        # next to the running script so the user can find cookies / cache
-        # easily; override with `profiles_dir=...`.  Engine assets stay
-        # in `cache_dir`.
+        # Per-profile user-data-dir tree.  Defaults to `<cache>/profiles/`
+        # under the cache dir; override with `profiles_dir=...`.  Engine
+        # assets stay in the cache dir.
         self._profiles_root = Path(profiles_dir).resolve() if profiles_dir else None
         self._progress = progress
         self._spec = host_spec()
@@ -176,8 +175,8 @@ class Runtime:
         self._grease_version: Optional[str] = None
         self._install_lock = threading.Lock()
         # Set to True after a successful in-process install() so subsequent
-        # launches in the same process skip the R2 HEAD round-trip (~1 s
-        # over a clean connection).  Cleared by `install(force=True)`.
+        # launches in the same process skip the manifest fetch round-trip
+        # (~1 s over a clean connection).  Cleared by `install(force=True)`.
         self._checked_in_process = False
 
     @property

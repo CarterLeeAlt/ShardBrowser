@@ -68,9 +68,9 @@ class ShardX:
             cache_dir: where the engine, Widevine, and bundled fingerprint
                 library live (defaults to the per-OS app-data dir).
             profiles_dir: per-profile user-data-dir root (cookies, IndexedDB,
-                cache). Defaults to `./shardx-profiles/` relative to the
-                running script — easy for users to find. Per-launch override
-                also available via `launch(..., user_data_dir=...)`.
+                cache). Defaults to `<cache_dir>/profiles/` (per-OS app-data
+                cache dir). Per-launch override also available via
+                `launch(..., user_data_dir=...)`.
         """
         self.runtime = Runtime(cache_dir=cache_dir, profiles_dir=profiles_dir)
         self.library = FingerprintLibrary(self.runtime)
