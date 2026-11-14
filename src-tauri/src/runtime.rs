@@ -35,9 +35,9 @@ fn manifest_urls() -> [String; 3] {
 }
 const BUNDLED_MANIFEST_JSON: &str = include_str!("../../runtime.json");
 /// Chromium version of the Windows runtime bundle this launcher defaults to,
-/// matching the pinned upstream manifest revision (7). Used only as the
+/// matching the bundled upstream manifest. Used only as the
 /// fallback when no manifest — remote or bundled — carries a version.
-const CHROMIUM_VERSION: &str = "152.0.7977.65";
+const CHROMIUM_VERSION: &str = "157.0.8103.50";
 const MAX_RUNTIME_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_RUNTIME_EXTRACTED_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const MAX_RUNTIME_ARCHIVE_ENTRIES: usize = 250_000;
@@ -133,6 +133,8 @@ struct Manifest {
     /// `chromium_version`; startup never performs that comparison.
     #[serde(default)]
     installed_chromium_version: Option<String>,
+    #[serde(default)]
+    installed_metadata: Option<RemoteManifest>,
 }
 
 /// Chromium version of the engine actually on disk, read from the Windows
@@ -174,6 +176,7 @@ struct ChromiumState {
     applied_chromium_version: Option<String>,
     applied_signature: Option<String>,
     installed_chromium_version: Option<String>,
+    installed_metadata: Option<RemoteManifest>,
 }
 
 fn chromium_state(local: &Manifest) -> ChromiumState {
@@ -182,6 +185,7 @@ fn chromium_state(local: &Manifest) -> ChromiumState {
         applied_chromium_version: local.applied_chromium_version.clone(),
         applied_signature: local.applied_signature.clone(),
         installed_chromium_version: local.installed_chromium_version.clone(),
+        installed_metadata: local.installed_metadata.clone(),
     }
 }
 
@@ -190,12 +194,14 @@ fn updated_chromium_state(
     migrated_signature: String,
     installed_version: Option<String>,
     browser_etag: String,
+    installed_metadata: Option<RemoteManifest>,
 ) -> ChromiumState {
     ChromiumState {
         browser_etag: Some(browser_etag),
         applied_chromium_version: Some(migrated_version),
         applied_signature: Some(migrated_signature),
         installed_chromium_version: installed_version,
+        installed_metadata,
     }
 }
 
@@ -211,6 +217,7 @@ fn manifest_with_chromium_state(
         applied_chromium_version: chromium.applied_chromium_version,
         applied_signature: chromium.applied_signature,
         installed_chromium_version: chromium.installed_chromium_version,
+        installed_metadata: chromium.installed_metadata,
     }
 }
 
@@ -365,7 +372,7 @@ fn local_status(local: &Manifest) -> RuntimeStatus {
     }
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct RemoteManifest {
     archives: std::collections::HashMap<String, String>,
@@ -375,6 +382,8 @@ struct RemoteManifest {
     /// manifest as data — migration writes it into every profile/fingerprint.
     grease_brand: Option<String>,
     grease_version: Option<String>,
+    android_chromium_version: Option<String>,
+    tls: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 fn bundled_manifest() -> RemoteManifest {
@@ -477,6 +486,8 @@ fn parse_remote_manifest(text: &str) -> Option<RemoteManifest> {
         chromium_version: Some(chromium_version),
         grease_brand: str_field("grease_brand"),
         grease_version: str_field("grease_version"),
+        android_chromium_version: str_field("android_chromium_version"),
+        tls: v.get("tls").and_then(|v| v.as_object()).cloned(),
     })
 }
 
@@ -503,6 +514,73 @@ async fn fetch_manifest() -> RemoteManifest {
             eprintln!("[runtime] remote manifest unavailable; using bundled metadata");
             bundled_manifest()
         }
+    }
+}
+
+/// New identities use metadata for the installed binary, never a newer remote
+/// offer. Bundled metadata can fill the same-version snapshot on offline installs.
+pub(crate) fn prepare_new_identity(config: &mut serde_json::Map<String, serde_json::Value>) {
+    let local = load_manifest();
+    prepare_identity_for_engine(config, &local);
+}
+
+fn prepare_identity_for_engine(
+    config: &mut serde_json::Map<String, serde_json::Value>,
+    local: &Manifest,
+) {
+    let bundled = bundled_manifest();
+    let Some(version) = effective_installed_version(local) else {
+        return;
+    };
+    let metadata = local
+        .installed_metadata
+        .as_ref()
+        .filter(|m| m.chromium_version.as_deref() == Some(version.as_str()))
+        .or_else(|| {
+            (bundled.chromium_version.as_deref() == Some(version.as_str())).then_some(&bundled)
+        });
+    let mobile = config
+        .get("navigator")
+        .and_then(|n| n.get("platform"))
+        .and_then(|v| v.as_str())
+        == Some("Android");
+    let chrome = metadata
+        .and_then(|m| {
+            mobile
+                .then_some(m.android_chromium_version.as_deref())
+                .flatten()
+        })
+        .unwrap_or(&version);
+    migrate_descriptor_to(
+        config,
+        chrome,
+        metadata.and_then(|m| m.grease_brand.as_deref()),
+        metadata.and_then(|m| m.grease_version.as_deref()),
+    );
+    if let (Some(tls), Some(target)) = (
+        metadata.and_then(|m| m.tls.as_ref()),
+        config.get_mut("tls").and_then(|v| v.as_object_mut()),
+    ) {
+        for (key, value) in tls {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    if mobile {
+        if let Some(hints) = config
+            .get_mut("client_hints")
+            .and_then(|v| v.as_object_mut())
+        {
+            if hints
+                .get("brand")
+                .and_then(|v| v.as_str())
+                .is_none_or(str::is_empty)
+            {
+                hints.insert("brand".into(), "Google Chrome".into());
+            }
+        }
+    }
+    if let Some(major) = chrome.split('.').next().and_then(|v| v.parse().ok()) {
+        crate::fingerprint_identity::add_apple_features(config, major);
     }
 }
 
@@ -934,6 +1012,7 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
             sig,
             installed_engine_version().or(Some(target_ver)),
             browser_etag,
+            Some(manifest.clone()),
         )
     } else {
         chromium_state(&local)
@@ -1040,6 +1119,7 @@ pub async fn runtime_apply_updates(
             sig,
             installed_engine_version().or(Some(target_ver)),
             browser_etag,
+            Some(manifest.clone()),
         )
     } else {
         chromium_state(&local)
@@ -1514,6 +1594,38 @@ mod tests {
             profile.config["navigator"]["user_agent"],
             "Mozilla/5.0 Chrome/152.0.0.0 Safari/537.36"
         );
+
+        let mut new_identity = profile.config.clone();
+        new_identity.insert(
+            "tls".into(),
+            serde_json::json!({ "cipher_suites": [1], "shuffle_extensions": false }),
+        );
+        let old_identity = new_identity.clone();
+        prepare_identity_for_engine(
+            &mut new_identity,
+            &Manifest {
+                installed_chromium_version: Some("157.0.8103.50".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(new_identity["client_hints"]["brand_version"], "157");
+        assert_eq!(new_identity["client_hints"]["grease_version"], "99");
+        assert_eq!(
+            new_identity["tls"]["cipher_suites"],
+            bundled_manifest().tls.unwrap()["cipher_suites"]
+        );
+        assert_eq!(new_identity["tls"]["shuffle_extensions"], false);
+        assert_eq!(old_identity["tls"]["cipher_suites"], serde_json::json!([1]));
+        let mut older_engine = old_identity.clone();
+        prepare_identity_for_engine(
+            &mut older_engine,
+            &Manifest {
+                installed_chromium_version: Some("152.0.7977.65".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(older_engine["tls"], old_identity["tls"]);
+        assert_eq!(older_engine["client_hints"]["brand_version"], "152");
     }
 
     #[test]
@@ -1525,6 +1637,7 @@ mod tests {
             applied_chromium_version: Some("151.0.1.2".into()),
             applied_signature: Some("151.0.1.2|OldBrand|99".into()),
             installed_chromium_version: Some("151.0.1.2".into()),
+            installed_metadata: None,
         };
 
         let manifest = manifest_with_chromium_state(
@@ -1559,6 +1672,7 @@ mod tests {
             applied_chromium_version: Some("151.0.1.2".into()),
             applied_signature: Some("151.0.1.2|OldBrand|99".into()),
             installed_chromium_version: Some("151.0.1.2".into()),
+            installed_metadata: None,
         };
         let manifest = manifest_with_chromium_state(
             updated_chromium_state(
@@ -1566,6 +1680,7 @@ mod tests {
                 "152.0.2.3|NewBrand|24".into(),
                 Some("152.0.2.3".into()),
                 "new-browser".into(),
+                None,
             ),
             local.widevine_etag.clone(),
             local.fingerprints_etag.clone(),

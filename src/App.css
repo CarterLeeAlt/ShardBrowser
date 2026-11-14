@@ -2338,3 +2338,14 @@ button.status-pill.status-link:active { transform: translateY(1px); }
   from { transform: translateX(0);    opacity: 1; }
   to   { transform: translateX(10px); opacity: 0; }
 }
+.assign-dialog { width: min(760px, calc(100vw - 48px)); }
+.browser-bulk-bar { flex-wrap: wrap; margin-bottom: 14px; }
+.assign-proxy-list { max-height: 180px; overflow: auto; display: grid; gap: 8px; padding: 12px 0; }
+.assign-dialog label.row-inline { flex-direction: row; align-items: center; justify-content: flex-start; margin: 0; gap: 10px; }
+.assign-proxy-list label { min-height: 30px; }
+.assign-proxy-list label > span:nth-child(2) { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--tx-1); }
+.assign-dialog input[type="checkbox"] { flex: 0 0 auto; }
+.assign-preview { max-height: 260px; overflow: auto; }
+.assign-preview table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.assign-preview th, .assign-preview td { text-align: left; padding: 10px; border-bottom: 1px solid var(--bd-1); overflow-wrap: anywhere; }
+.assign-dialog .error { color: var(--err); overflow-wrap: anywhere; }

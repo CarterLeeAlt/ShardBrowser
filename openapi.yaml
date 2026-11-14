@@ -36,8 +36,11 @@ info:
     2. Optionally edit the returned `fingerprint` object (e.g. flip
        `noise.fonts.enabled`, set `webrtc`, tweak `navigator`).
     3. `POST /profiles` (or `POST /folders/{folder}/profiles`) with that
-       object as `fingerprint` → the launcher stores it **verbatim**
-       (create never re-randomizes).
+       object as `fingerprint` → hardware picks are preserved. New identities
+       normalize platform-version consistency and synchronize Chrome, GREASE,
+       TLS and applicable Apple WebGPU features with the installed engine.
+       Ordinary edits and complete backup restores retain their fingerprint;
+       explicit engine updates still synchronize Chrome and GREASE descriptors.
     4. `POST /profiles/{id}/start` → returns the CDP endpoint; connect with
        `browserWSEndpoint = cdp.web_socket_debugger_url`.
     5. `POST /profiles/{id}/stop` when done.
@@ -62,7 +65,7 @@ info:
     ## Fingerprint object
     The `fingerprint` returned by `GET /fingerprint/new*` and accepted by
     the create endpoints is the launcher's native FingerprintConfig. It is
-    round-tripped verbatim, so the schema below documents the common
+    preserved except for the new-identity consistency rules above, so the schema documents the common
     sub-objects but is intentionally open (`additionalProperties: true`).
 
     ## MCP server
@@ -196,11 +199,11 @@ paths:
       tags: [Profiles]
       summary: Create a profile
       description: |
-        Persists a profile from a client-supplied `fingerprint` **exactly as
-        given** (no re-randomization — uniquification already happened in
-        `/fingerprint/new`). Use `folder` to file it; bind a proxy by stored
-        `proxy_id` or attach one inline via `proxy` (a string that is NOT
-        saved to the proxy store).
+        Persists a client-supplied `fingerprint`, preserving hardware picks
+        while normalizing new-identity platform and installed-engine fields.
+        Fingerprint collisions can regenerate enabled noise seeds.
+        Use `folder` to file it; bind a proxy by stored `proxy_id` or use a
+        `proxy` string, which is added to the proxy store and tested.
       requestBody:
         required: true
         content:
@@ -225,7 +228,7 @@ paths:
       summary: Create a temporary profile
       description: |
         Creates a profile from a random (or specified) library fingerprint,
-        uniquified like `/fingerprint/new` and stored verbatim, flagged
+        uniquified and normalized like `/fingerprint/new`, flagged
         `temporary`: hidden from listings and **auto-deleted when its
         browser closes** (or purged on next app start after a crash). Pair
         with `POST /profiles/{id}/start`.

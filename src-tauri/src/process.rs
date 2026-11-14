@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Mutex, MutexGuard,
+    Arc, Mutex, MutexGuard,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::Child;
@@ -42,7 +42,7 @@ pub fn ensure_lease_recovery_complete() -> Result<()> {
 
 pub struct Tracker {
     inner: Mutex<HashMap<String, ChildEntry>>,
-    launching: Mutex<HashSet<String>>,
+    launching: Mutex<HashMap<String, Arc<LaunchControl>>>,
     /// Leases that could not be inspected during startup. They must survive
     /// later lifecycle writes so the next launcher start remains fail-closed.
     unverified: Mutex<Vec<ProcessLease>>,
@@ -59,12 +59,55 @@ pub struct Tracker {
 pub struct LaunchReservation<'a> {
     tracker: &'a Tracker,
     profile_id: String,
+    control: Arc<LaunchControl>,
+}
+
+struct LaunchControl {
+    cancelled: tokio::sync::watch::Sender<bool>,
+    committed: Mutex<bool>,
+}
+
+pub const LAUNCH_CANCELLED: &str = "Launch cancelled";
+
+impl LaunchReservation<'_> {
+    /// Dropping the losing future also drops its pending network requests.
+    pub async fn wait<T>(&self, future: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+        let mut cancelled = self.control.cancelled.subscribe();
+        if *cancelled.borrow() {
+            anyhow::bail!(LAUNCH_CANCELLED);
+        }
+        tokio::select! {
+            biased;
+            _ = cancelled.changed() => anyhow::bail!(LAUNCH_CANCELLED),
+            result = future => result,
+        }
+    }
+
+    /// Cancellation and process creation have one linearization point. Once
+    /// committed, cancellation reports false and the caller may close the run.
+    pub fn commit(&self) -> Result<()> {
+        let mut committed = self
+            .control
+            .committed
+            .lock()
+            .map_err(|_| anyhow::anyhow!("launch state lock poisoned"))?;
+        if *self.control.cancelled.borrow() {
+            anyhow::bail!(LAUNCH_CANCELLED);
+        }
+        *committed = true;
+        Ok(())
+    }
 }
 
 impl Drop for LaunchReservation<'_> {
     fn drop(&mut self) {
         if let Ok(mut launching) = self.tracker.launching.lock() {
-            launching.remove(&self.profile_id);
+            if launching
+                .get(&self.profile_id)
+                .is_some_and(|control| Arc::ptr_eq(control, &self.control))
+            {
+                launching.remove(&self.profile_id);
+            }
         }
     }
 }
@@ -125,7 +168,7 @@ impl Tracker {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
-            launching: Mutex::new(HashSet::new()),
+            launching: Mutex::new(HashMap::new()),
             unverified: Mutex::new(Vec::new()),
             lease_file: Mutex::new(()),
             lease_incomplete_count: Mutex::new(0),
@@ -342,14 +385,41 @@ impl Tracker {
             .launching
             .lock()
             .map_err(|_| anyhow::anyhow!("launch reservation lock poisoned"))?;
-        if !launching.insert(profile_id.to_string()) {
+        if launching.contains_key(profile_id) {
             anyhow::bail!("This browser profile is already starting");
         }
+        let control = Arc::new(LaunchControl {
+            cancelled: tokio::sync::watch::channel(false).0,
+            committed: Mutex::new(false),
+        });
+        launching.insert(profile_id.to_string(), control.clone());
 
         Ok(LaunchReservation {
             tracker: self,
             profile_id: profile_id.to_string(),
+            control,
         })
+    }
+
+    pub fn cancel_launch(&self, profile_id: &str) -> Result<bool> {
+        let control = self
+            .launching
+            .lock()
+            .map_err(|_| anyhow::anyhow!("launch reservation lock poisoned"))?
+            .get(profile_id)
+            .cloned();
+        let Some(control) = control else {
+            return Ok(false);
+        };
+        let committed = control
+            .committed
+            .lock()
+            .map_err(|_| anyhow::anyhow!("launch state lock poisoned"))?;
+        if *committed {
+            return Ok(false);
+        }
+        control.cancelled.send_replace(true);
+        Ok(true)
     }
 
     /// Take a spawned child, persist its durable lease, and monitor it. The
@@ -516,7 +586,7 @@ impl Tracker {
         }
         self.launching
             .lock()
-            .map(|profiles| profiles.contains(profile_id))
+            .map(|profiles| profiles.contains_key(profile_id))
             .unwrap_or(false)
     }
 
@@ -527,7 +597,7 @@ impl Tracker {
             .map(|entries| entries.keys().cloned().collect())
             .unwrap_or_default();
         if let Ok(launching) = self.launching.lock() {
-            active.extend(launching.iter().cloned());
+            active.extend(launching.keys().cloned());
         }
         active.into_iter().collect()
     }
@@ -1242,17 +1312,63 @@ mod tests {
         LeaseFile, ProcessLease, LEASE_FORMAT_VERSION,
     };
 
-    #[test]
-    fn launch_reservation_blocks_duplicate_starts_until_released() {
+    #[tokio::test]
+    async fn launch_reservation_blocks_duplicate_starts_until_released() {
         let tracker = super::Tracker::new();
         let reservation = tracker.reserve_launch("profile-1").unwrap();
 
         assert!(tracker.is_profile_active("profile-1"));
         assert!(tracker.reserve_launch("profile-1").is_err());
 
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (connected, connection) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            connected.send(()).unwrap();
+            // No HTTP reply: cancellation must drop the socket, not wait for a timeout.
+            let mut rest = Vec::new();
+            stream.read_to_end(&mut rest).await.unwrap();
+        });
+        let request = reservation.wait(async {
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .get(format!("http://{address}"))
+                .send()
+                .await?;
+            Ok(())
+        });
+        let cancel = async {
+            connection.await.unwrap();
+            assert!(tracker.cancel_launch("profile-1").unwrap());
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(request, cancel)
+        })
+        .await
+        .expect("cancellation must interrupt network wait");
+        assert_eq!(result.unwrap_err().to_string(), super::LAUNCH_CANCELLED);
+        assert!(reservation.commit().is_err());
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(tracker.is_profile_active("profile-1"));
         drop(reservation);
         assert!(!tracker.is_profile_active("profile-1"));
-        assert!(tracker.reserve_launch("profile-1").is_ok());
+        let next = tracker.reserve_launch("profile-1").unwrap();
+        next.commit().unwrap();
+        assert!(!tracker.cancel_launch("profile-1").unwrap());
+        drop(next);
+        let pending = tracker.reserve_launch("profile-1").unwrap();
+        assert!(tracker.cancel_launch("profile-1").unwrap());
+        assert!(pending.wait(async { Ok(()) }).await.is_err());
+        assert!(pending.commit().is_err());
     }
 
     #[test]
