@@ -96,14 +96,14 @@ const pickJsonText = () => new Promise<string | null>((resolve, reject) => {
 
 type ProfileBackupSummary = { profileCount: number; fileCount: number; dataBytes: number };
 
-/// Complete backups are binary ZIP containers and may be many gigabytes, so
+/// Profile backups are binary ZIP containers and may be many gigabytes, so
 /// pass native file paths directly to Rust instead of reading them into the
 /// webview as text/base64.
 const pickProfileBackupFiles = async (): Promise<string[] | null> => {
   const selected = await openDialog({
     multiple: true,
     directory: false,
-    filters: [{ name: tr("ShardX complete profile backup"), extensions: ["shardx-backup"] }],
+    filters: [{ name: tr("ShardX profile backup"), extensions: ["shardx-backup"] }],
   });
   if (!selected) return null;
   return Array.isArray(selected) ? selected : [selected];
@@ -1758,7 +1758,7 @@ function BrowsersView() {
       // be restored for another Windows user — which means anyone holding the
       // file can decrypt every session cookie inside it. Say so loudly.
       toast.warn(
-        tr("Exported {0} complete backup{1} ({2} files). The backup contains the browser's cookie-decryption key: anyone with this file can sign in as these accounts. Store it offline, never upload it.", summary.profileCount, summary.profileCount === 1 ? "" : "s", summary.fileCount),
+        tr("Exported {0} profile backup{1} ({2} files), excluding rebuildable caches. The backup contains the browser's cookie-decryption key: anyone with this file can sign in as these accounts. Store it offline, never upload it.", summary.profileCount, summary.profileCount === 1 ? "" : "s", summary.fileCount),
       );
       // Backups are written only inside the launcher's fixed portable exports
       // directory; no arbitrary destination path crosses the trust boundary.
@@ -1780,7 +1780,7 @@ function BrowsersView() {
     {
       label: tr("Export profile"),
       onClick: () => exportProfiles([p.id]),
-      title: tr("Export the complete browser profile, user-data, fingerprint, and bound proxy"),
+      title: tr("Back up persistent browser data, fingerprint, extensions, and bound proxy; exclude rebuildable caches"),
     },
     { sep: true, label: "", onClick: () => {} },
     { label: tr("Delete"), onClick: () => remove(p.id), danger: true },
@@ -1975,7 +1975,7 @@ function BrowsersView() {
       const summary = await invoke<ProfileBackupSummary>("profile_backup_import", { paths });
       await reload();
       toast.ok(
-        tr("Imported {0} complete profile{1}, including bound proxy settings ({2} browser-data files)", summary.profileCount, summary.profileCount === 1 ? "" : "s", summary.fileCount),
+        tr("Restored {0} profile{1}, including bound proxy settings ({2} browser-data files)", summary.profileCount, summary.profileCount === 1 ? "" : "s", summary.fileCount),
       );
     } catch (e) {
       toast.err(tr("Import failed: ") + String(e));
@@ -2210,7 +2210,7 @@ function BrowsersView() {
             className="btn-ghost btn-sm"
             onClick={bulkExport}
             disabled={selectedHasActive}
-            title={selectedHasActive ? tr("Stop selected active browsers before exporting") : tr("Export selected profiles with their sensitive cookies")}
+            title={selectedHasActive ? tr("Stop selected active browsers before exporting") : tr("Back up selected profiles, excluding rebuildable caches")}
           ><Icon.Upload /> {tr("Export")}</button>
           <button
             className="btn-ghost btn-sm"
