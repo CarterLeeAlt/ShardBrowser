@@ -6,6 +6,7 @@ compile_error!("ShardX Launcher supports only Windows x64 (x86_64-pc-windows-msv
 mod api;
 mod cookies;
 mod display_order;
+mod fingerprint_identity;
 mod fingerprints;
 mod launch;
 mod mcp_setup;
@@ -21,6 +22,7 @@ mod startup_path;
 mod store;
 mod taskbar_icon;
 
+pub(crate) use fingerprint_identity::randomize_platform_version;
 use serde_json::Value;
 
 /// App handle set in `run()` setup; lets the axum API reach a webview window.
@@ -157,53 +159,6 @@ pub(crate) fn infer_gpu_preset_id(config: &serde_json::Map<String, Value>) -> Op
         renderer_match.get_or_insert_with(|| e.id.clone());
     }
     renderer_match
-}
-
-// ---- Realistic Sec-CH-UA-Platform-Version pools (spread per profile) ----
-
-// macOS Sonoma 14.x, Sequoia 15.x, Tahoe 26.x.
-const MACOS_PLATFORM_VERSIONS: &[&str] = &[
-    "14.6.1", "14.7", "14.7.1", "14.7.2", "15.4", "15.4.1", "15.5", "15.6", "15.6.1", "15.7",
-    "26.0", "26.0.1", "26.1",
-];
-
-// Win 10 21H1+ ("10.0.0"), Win 11 21H2..25H2 ("13"–"17"); weighted to 22H2/23H2/24H2.
-const WINDOWS_PLATFORM_VERSIONS: &[&str] = &[
-    "10.0.0", "13.0.0", "14.0.0", "14.0.0", "14.0.0", "15.0.0", "15.0.0", "15.0.0", "15.0.0",
-    "16.0.0", "16.0.0", "16.0.0", "17.0.0",
-];
-
-// LTS kernels + current mainline.
-const LINUX_PLATFORM_VERSIONS: &[&str] = &[
-    "5.15.0", "6.1.0", "6.5.0", "6.6.0", "6.8.0", "6.10.0", "6.11.0", "6.12.0", "6.14.0", "6.15.0",
-    "6.16.0",
-];
-
-/// Write a random platform_version into navigator + client_hints; unknown platforms left alone.
-pub(crate) fn randomize_platform_version(payload: &mut serde_json::Map<String, Value>) {
-    let platform = payload
-        .get("navigator")
-        .and_then(|n| n.get("platform"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let pool: &[&str] = match platform {
-        "macOS" => MACOS_PLATFORM_VERSIONS,
-        "Windows" => WINDOWS_PLATFORM_VERSIONS,
-        "Linux" => LINUX_PLATFORM_VERSIONS,
-        _ => return,
-    };
-    let pick_idx = (uuid::Uuid::new_v4().as_bytes()[0] as usize) % pool.len();
-    let version = pool[pick_idx].to_string();
-
-    if let Some(nav) = payload.get_mut("navigator").and_then(|v| v.as_object_mut()) {
-        nav.insert("platform_version".into(), Value::String(version.clone()));
-    }
-    if let Some(ch) = payload
-        .get_mut("client_hints")
-        .and_then(|v| v.as_object_mut())
-    {
-        ch.insert("platform_version".into(), Value::String(version));
-    }
 }
 
 /// Realistic (hardware_concurrency, deviceMemory) combos per Mac model id.
@@ -543,6 +498,7 @@ pub fn enrich_new_config(
 ) {
     randomize_platform_version(obj);
     randomize_hardware(obj);
+    fingerprint_identity::prepare_new(obj);
     obj.entry("webrtc")
         .or_insert_with(|| Value::String("block".into()));
     if let Some(w) = window {
@@ -550,7 +506,8 @@ pub fn enrich_new_config(
     }
 }
 
-/// Core of `profile_save` callable without Tauri context; `enrich=false` stores verbatim.
+/// Core of `profile_save`; enrichment selects hardware, while all new identities
+/// receive consistency corrections at the unique-save boundary.
 pub fn save_profile_core(
     window: Option<&tauri::WebviewWindow>,
     payload: Value,
@@ -663,6 +620,16 @@ fn profile_bind_proxy(profile_id: String, proxy_id: Option<String>) -> Result<()
     let mut p = profile::load_raw(&profile_id).map_err(|e| e.to_string())?;
     p.meta.proxy_id = proxy_id;
     profile::save_raw(&mut p).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn profile_assign_proxies(
+    pairs: Vec<profile::ProxyAssignment>,
+    allow_sharing: bool,
+) -> Result<usize, String> {
+    let result = profile::assign_proxies(pairs, allow_sharing).map_err(|e| e.to_string());
+    notify_store_changed("profiles");
+    result
 }
 
 #[tauri::command]
@@ -911,6 +878,9 @@ fn enrich_picks_for_preset(preset_id: String) -> Result<PresetEnrichPicks, Strin
         serde_json::json!({ "platform": platform }),
     );
     // Generate the editor's platform version and hardware exactly once.
+    if let Some(webgl) = entry.payload.get("webgl") {
+        payload.insert("webgl".into(), webgl.clone());
+    }
     randomize_platform_version(&mut payload);
     let selected =
         hardware_configs[(uuid::Uuid::new_v4().as_bytes()[0] as usize) % hardware_configs.len()];
@@ -1218,6 +1188,13 @@ async fn launch(profile_id: String) -> Result<LaunchResult, String> {
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn launch_cancel(profile_id: String) -> Result<bool, String> {
+    process::Tracker::shared()
+        .cancel_launch(&profile_id)
+        .map_err(|e| e.to_string())
+}
+
 // ---- Cookies ----
 
 /// True if profile has a running browser process.
@@ -1362,6 +1339,7 @@ pub fn run() {
             profile_save,
             profile_delete,
             profile_bind_proxy,
+            profile_assign_proxies,
             profile_clone,
             clipboard_write,
             clipboard_read,
@@ -1390,6 +1368,7 @@ pub fn run() {
             proxy_bulk_parse,
             proxy_bulk_save,
             launch,
+            launch_cancel,
             settings_get,
             settings_save,
             api_info,

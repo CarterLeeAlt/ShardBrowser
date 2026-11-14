@@ -199,7 +199,8 @@ async fn get_profile(Path(id): Path<String>) -> ApiResult {
 
 // ---- get-new-fingerprint ----
 
-/// Uniquified fingerprint without persisting; create-profile stores verbatim.
+/// Uniquified fingerprint without persisting; creation preserves hardware picks
+/// and applies new-identity consistency rules before saving.
 async fn new_fingerprint() -> ApiResult {
     new_fingerprint_impl(None).await
 }
@@ -229,7 +230,8 @@ struct CreateReq {
     fingerprint: Value,
 }
 
-/// Persist verbatim (enrich=false); proxy_id binds, proxy string upserts+tests.
+/// Preserve selected hardware and normalize new-identity fields; proxy_id binds,
+/// proxy string upserts+tests.
 async fn persist_created(folder_override: Option<String>, body: CreateReq) -> ApiResult {
     let mut cfg = body
         .fingerprint

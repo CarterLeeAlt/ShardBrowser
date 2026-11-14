@@ -39,6 +39,8 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import "./fonts.css";
 import "./App.css";
+import { planAssignment } from "./proxy-assignment";
+import { tr, useLanguage, setLanguage, type Language } from "./i18n";
 
 // Host OS of the launcher window (never spoofed) — drives default OS tab + titlebar.
 function detectHostOs(): "macOS" | "Windows" | "Linux" {
@@ -73,7 +75,7 @@ const pickJsonText = () => new Promise<string | null>((resolve, reject) => {
     }
     try {
       if (file.size > MAX_JSON_IMPORT_BYTES) {
-        throw new Error("JSON import files must not exceed 16 MiB");
+        throw new Error(tr("JSON import files must not exceed 16 MiB"));
       }
       resolve(await file.text());
     } catch (e) {
@@ -99,7 +101,7 @@ const pickProfileBackupFiles = async (): Promise<string[] | null> => {
   const selected = await openDialog({
     multiple: true,
     directory: false,
-    filters: [{ name: "ShardX complete profile backup", extensions: ["shardx-backup"] }],
+    filters: [{ name: tr("ShardX complete profile backup"), extensions: ["shardx-backup"] }],
   });
   if (!selected) return null;
   return Array.isArray(selected) ? selected : [selected];
@@ -177,7 +179,7 @@ const pushToast = (kind: ToastItem["kind"], text: string) => {
 };
 const toast = {
   ok: (t: string) => pushToast("ok", t),
-  err: (t: string) => pushToast("err", t),
+  err: (t: string) => pushToast("err", tr(t)),
   info: (t: string) => pushToast("info", t),
   warn: (t: string) => pushToast("warn", t),
 };
@@ -249,8 +251,8 @@ function confirmModal(opts: {
   return new Promise((resolve) => {
     const buttons =
       opts.buttons ?? [
-        { label: "Cancel", value: false },
-        { label: opts.danger ? "Delete" : "OK", value: true, danger: opts.danger, primary: !opts.danger },
+        { label: tr("Cancel"), value: false },
+        { label: opts.danger ? tr("Delete") : tr("OK"), value: true, danger: opts.danger, primary: !opts.danger },
       ];
     confirmSub?.({ title: opts.title, message: opts.message, buttons, resolve });
   });
@@ -298,7 +300,7 @@ function ConfirmHost() {
     <DialogBackdrop onClose={() => done(null)}>
       <div className="dialog dialog-confirm">
         <header className="dialog-head">
-          <h2>{req.title ?? "Confirm"}</h2>
+          <h2>{req.title ?? tr("Confirm")}</h2>
           <button className="icon-btn" onClick={() => done(null)}>✕</button>
         </header>
         <div className="dialog-body">
@@ -461,9 +463,9 @@ type FingerprintEntry = {
 
 const PROFILE_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 function profileNameError(name: string): string | null {
-  if (!name.trim()) return "Profile name is required";
+  if (!name.trim()) return tr("Profile name is required");
   if (!PROFILE_NAME_PATTERN.test(name)) {
-    return "Use only letters, numbers, underscores (_), and hyphens (-)";
+    return tr("Use only letters, numbers, underscores (_), and hyphens (-)");
   }
   return null;
 }
@@ -813,6 +815,7 @@ function prepareTitlebarWindowHide(button: HTMLButtonElement) {
 }
 
 export default function App() {
+  useLanguage();
   const [section, setSection] = useState<Section>("browsers");
   const [theme, setTheme] = useState<Theme>(
     () => (localStorage.getItem("shardx-theme") as Theme) || "dark",
@@ -824,9 +827,9 @@ export default function App() {
       const count = Math.max(1, payload.running_count);
       const plural = count === 1 ? "browser is" : "browsers are";
       void confirmModal({
-        title: "Close running browsers first",
-        message: `ShardX cannot exit while ${count} launched ${plural} still running. Close ${count === 1 ? "it" : "them"} first, then try again.`,
-        buttons: [{ label: "OK", value: true, primary: true }],
+        title: tr("Close running browsers first"),
+        message: tr("ShardX cannot exit while {0} launched {1} still running. Close {2} first, then try again.", count, plural, count === 1 ? "it" : "them"),
+        buttons: [{ label: tr("OK"), value: true, primary: true }],
       });
     }).then((fn) => {
       if (disposed) fn();
@@ -854,7 +857,7 @@ export default function App() {
           <div className="titlebar-controls">
             <button
               className="tb-btn"
-              aria-label="Minimize"
+              aria-label={tr("Minimize")}
               onClick={() => getCurrentWindow().minimize()}
             >
               <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
@@ -863,7 +866,7 @@ export default function App() {
             </button>
             <button
               className="tb-btn"
-              aria-label="Maximize"
+              aria-label={tr("Maximize")}
               onClick={() => getCurrentWindow().toggleMaximize()}
             >
               <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
@@ -872,7 +875,7 @@ export default function App() {
             </button>
             <button
               className="tb-btn tb-close"
-              aria-label="Close"
+              aria-label={tr("Close")}
               onClick={(event) => {
                 prepareTitlebarWindowHide(event.currentTarget);
                 void getCurrentWindow().close();
@@ -918,22 +921,22 @@ function Sidebar({
 }) {
   const sections: { label: string; items: { id: Section; label: string; svg: ReactNode }[] }[] = [
     {
-      label: "Workspace",
+      label: tr("Workspace"),
       items: [
-        { id: "browsers", label: "Browsers", svg: <IconShard /> },
+        { id: "browsers", label: tr("Browsers"), svg: <IconShard /> },
       ],
     },
     {
-      label: "PROXYLIST",
-      items: [{ id: "proxies", label: "Proxies", svg: <IconWire /> }],
+      label: tr("PROXYLIST"),
+      items: [{ id: "proxies", label: tr("Proxies"), svg: <IconWire /> }],
     },
     {
-      label: "Library",
-      items: [{ id: "fingerprints", label: "Fingerprints", svg: <IconHex /> }],
+      label: tr("Library"),
+      items: [{ id: "fingerprints", label: tr("Fingerprints"), svg: <IconHex /> }],
     },
     {
-      label: "System",
-      items: [{ id: "settings", label: "Settings", svg: <IconCog /> }],
+      label: tr("System"),
+      items: [{ id: "settings", label: tr("Settings"), svg: <IconCog /> }],
     },
   ];
 
@@ -949,8 +952,8 @@ function Sidebar({
     setMcpBusy(true);
     try {
       const p = await invoke<string>("mcp_download");
-      toast.ok(`MCP downloaded to ${p}`);
-    } catch (e) { toast.err("MCP download failed: " + String(e)); }
+      toast.ok(tr("MCP downloaded to {0}", p));
+    } catch (e) { toast.err(tr("MCP download failed: ") + String(e)); }
     finally { setMcpBusy(false); }
   };
 
@@ -980,43 +983,40 @@ function Sidebar({
       </nav>
       <div className="sidebar-foot">
         <div className="side-auto">
-          <div className="side-auto-head">Automation API</div>
+          <div className="side-auto-head">{tr("Automation API")}</div>
           {autoUrl ? (
             <button
               className="side-auto-url"
-              title="Copy API base URL"
-              onClick={() => { clip.write(autoUrl); toast.ok("Copied API URL"); }}
+              title={tr("Copy API base URL")}
+              onClick={() => { clip.write(autoUrl); toast.ok(tr("Copied API URL")); }}
             >
               <span className="mono">{autoUrl.replace(/^https?:\/\//, "")}</span>
               <Icon.Clone />
             </button>
           ) : (
-            <div className="side-auto-off">API off — enable in Settings</div>
+            <div className="side-auto-off">{tr("API off — enable in Settings")}</div>
           )}
           <button className="side-auto-btn" onClick={downloadMcp} disabled={mcpBusy}>
-            <Icon.Download /> {mcpBusy ? "Downloading…" : "Download MCP"}
+            <Icon.Download /> {mcpBusy ? tr("Downloading…") : tr("Download MCP")}
           </button>
           <button
             className="side-auto-btn"
             onClick={() => {
               openUrl(withUtm("https://docs.proxyshard.com/eng/shardx-launcher-api/binding-and-lifecycle?fallback=true")).catch(() => {});
             }}
-            title="Open the full Automation API reference on docs.proxyshard.com"
+            title={tr("Open the full Automation API reference on docs.proxyshard.com")}
           >
-            <Icon.Info /> Documentation
-          </button>
+            <Icon.Info />  {tr("Documentation")} </button>
         </div>
         <button
           className="theme-toggle"
           onClick={onToggleTheme}
-          title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+          title={theme === "dark" ? tr("Switch to light theme") : tr("Switch to dark theme")}
         >
           <span className={`theme-seg ${theme === "light" ? "active" : ""}`}>
-            <IconSun /> Light
-          </span>
+            <IconSun />  {tr("Light")} </span>
           <span className={`theme-seg ${theme === "dark" ? "active" : ""}`}>
-            <IconMoon /> Dark
-          </span>
+            <IconMoon />  {tr("Dark")} </span>
         </button>
         <VersionPill />
       </div>
@@ -1073,8 +1073,8 @@ function CopyField({ value, secret }: { value: string; secret?: boolean }) {
       <button
         type="button"
         className="copy-icon"
-        title="Copy"
-        onClick={async () => { try { await clip.write(value); toast.ok("Copied"); } catch (e) { toast.err(String(e)); } }}
+        title={tr("Copy")}
+        onClick={async () => { try { await clip.write(value); toast.ok(tr("Copied")); } catch (e) { toast.err(String(e)); } }}
       >
         <IconCopy />
       </button>
@@ -1300,8 +1300,8 @@ function SortableRow({
             type="button"
             className="sort-handle"
             disabled={disabled}
-            title={disabledReason || "Drag to reorder · Space + arrow keys also work"}
-            aria-label={disabledReason || `Reorder ${kind}`}
+            title={disabledReason || tr("Drag to reorder · Space + arrow keys also work")}
+            aria-label={disabledReason || tr("Reorder {0}", kind)}
             {...attributes}
             {...listeners}
           >
@@ -1436,6 +1436,8 @@ function BrowsersView() {
     return () => clearInterval(h);
   }, [running]);
   const [startBusy, setStartBusy] = useState<Set<string>>(new Set());
+  const queuedLaunches = useRef(new Set<string>());
+  const [assigning, setAssigning] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [renaming, setRenaming] = useState<{ id: string; draft: string } | null>(null);
   const [fingerprints, setFingerprints] = useState<FingerprintEntry[]>([]);
@@ -1652,6 +1654,19 @@ function BrowsersView() {
     });
   };
 
+  const cancelStart = async (id: string) => {
+    if (queuedLaunches.current.delete(id)) {
+      setStartBusy((current) => new Set([...current].filter((value) => value !== id)));
+      toast.info(tr("Launch cancelled"));
+      return;
+    }
+    try {
+      const accepted = await invoke<boolean>("launch_cancel", { profileId: id });
+      if (!accepted) toast.info(tr("The browser is already starting its process; use Stop once it is running"));
+      // Keep the profile locked until the launch future has actually unwound.
+    } catch (e) { toast.err(String(e)); }
+  };
+
   // Keep the launch busy until the backend returns; failures unlock immediately.
   const startStop = async (p: ProfileMeta) => {
     if (running[p.id]) {
@@ -1663,7 +1678,7 @@ function BrowsersView() {
       return;
     }
     if (startBusy.has(p.id) || backendActiveIds.has(p.id)) {
-      toast.err("This browser profile is already starting");
+      await cancelStart(p.id);
       return;
     }
     setStartBusy((s) => new Set([...s, p.id]));
@@ -1674,7 +1689,8 @@ function BrowsersView() {
       // up the new child immediately and anchors the uptime clock.
     } catch (e) {
       clearFailedLaunch(p.id);
-      toast.err(String(e));
+      if (String(e) === "Launch cancelled") toast.info(tr("Launch cancelled"));
+      else toast.err(String(e));
     } finally {
       setStartBusy((s) => {
         const n = new Set(s);
@@ -1686,10 +1702,10 @@ function BrowsersView() {
 
   const remove = async (id: string) => {
     if (running[id] || startBusy.has(id) || backendActiveIds.has(id)) {
-      toast.err("Stop the browser before deleting this profile");
+      toast.err(tr("Stop the browser before deleting this profile"));
       return;
     }
-    if ((await confirmModal({ title: "Delete profile", message: "Delete this profile? Its user-data dir is wiped too.", danger: true })) !== true) return;
+    if ((await confirmModal({ title: tr("Delete profile"), message: tr("Delete this profile? Its user-data dir is wiped too."), danger: true })) !== true) return;
     try {
       await invoke("profile_delete", { id });
       setSelected((prev) => {
@@ -1703,7 +1719,7 @@ function BrowsersView() {
 
   const cloneProfile = async (id: string) => {
     if (running[id] || startBusy.has(id) || backendActiveIds.has(id)) {
-      toast.err("Stop the browser before cloning this profile");
+      toast.err(tr("Stop the browser before cloning this profile"));
       return;
     }
     try {
@@ -1716,7 +1732,7 @@ function BrowsersView() {
     if (ids.length === 0) return;
     const activeIds = ids.filter((id) => running[id] || startBusy.has(id) || backendActiveIds.has(id));
     if (activeIds.length > 0) {
-      toast.err(`Stop the ${activeIds.length} active browser${activeIds.length === 1 ? "" : "s"} before exporting`);
+      toast.err(tr("Stop the {0} active browser{1} before exporting", activeIds.length, activeIds.length === 1 ? "" : "s"));
       return;
     }
     try {
@@ -1725,7 +1741,7 @@ function BrowsersView() {
       // be restored for another Windows user — which means anyone holding the
       // file can decrypt every session cookie inside it. Say so loudly.
       toast.warn(
-        `Exported ${summary.profileCount} complete backup${summary.profileCount === 1 ? "" : "s"} (${summary.fileCount} files). The backup contains the browser's cookie-decryption key: anyone with this file can sign in as these accounts. Store it offline, never upload it.`,
+        tr("Exported {0} complete backup{1} ({2} files). The backup contains the browser's cookie-decryption key: anyone with this file can sign in as these accounts. Store it offline, never upload it.", summary.profileCount, summary.profileCount === 1 ? "" : "s", summary.fileCount),
       );
       // Backups are written only inside the launcher's fixed portable exports
       // directory; no arbitrary destination path crosses the trust boundary.
@@ -1735,22 +1751,22 @@ function BrowsersView() {
 
   // Per-profile action menu shared by right-click and ⋮ button.
   const profileMenu = (p: ProfileMeta) => [
-    { label: running[p.id] ? "Stop" : "Launch", onClick: () => startStop(p) },
-    { label: "Edit", onClick: () => expand(p.id) },
-    { label: "Clone", onClick: () => cloneProfile(p.id) },
+    { label: running[p.id] ? tr("Stop") : startBusy.has(p.id) || backendActiveIds.has(p.id) ? tr("Cancel launch") : tr("Launch"), onClick: () => startStop(p) },
+    { label: tr("Edit"), onClick: () => expand(p.id) },
+    { label: tr("Clone"), onClick: () => cloneProfile(p.id) },
     { sep: true, label: "", onClick: () => {} },
-    { label: "Move to folder…", onClick: () => setFolderModal({ profileId: p.id }) },
+    { label: tr("Move to folder…"), onClick: () => setFolderModal({ profileId: p.id }) },
     ...(p.folder
-      ? [{ label: "Remove from folder", onClick: () => setProfileFolder(p.id, "") }]
+      ? [{ label: tr("Remove from folder"), onClick: () => setProfileFolder(p.id, "") }]
       : []),
     { sep: true, label: "", onClick: () => {} },
     {
-      label: "Export profile",
+      label: tr("Export profile"),
       onClick: () => exportProfiles([p.id]),
-      title: "Export the complete browser profile, user-data, fingerprint, and bound proxy",
+      title: tr("Export the complete browser profile, user-data, fingerprint, and bound proxy"),
     },
     { sep: true, label: "", onClick: () => {} },
-    { label: "Delete", onClick: () => remove(p.id), danger: true },
+    { label: tr("Delete"), onClick: () => remove(p.id), danger: true },
   ];
 
   const beginRename = (p: ProfileMeta) => {
@@ -1770,7 +1786,7 @@ function BrowsersView() {
     }
     if (running[id] || startBusy.has(id) || backendActiveIds.has(id)) {
       setRenaming((current) => current?.id === id ? null : current);
-      toast.err("Stop the browser or wait for it to finish starting before renaming");
+      toast.err(tr("Stop the browser or wait for it to finish starting before renaming"));
       return;
     }
 
@@ -1794,12 +1810,12 @@ function BrowsersView() {
     // tell the user instead of silently doing nothing.
     const p = profiles.find((x) => x.id === id);
     if (running[id] || startBusy.has(id) || backendActiveIds.has(id)) {
-      toast.err("Stop the browser before moving this profile");
+      toast.err(tr("Stop the browser before moving this profile"));
       return;
     }
     if (p && p.folder === f) {
       const who = p.name || id.slice(0, 8);
-      toast.info(f ? `“${who}” is already in “${f}”` : `“${who}” isn’t in any folder`);
+      toast.info(f ? tr("“{0}” is already in “{1}”", who, f) : tr("“{0}” isn’t in any folder", who));
       return;
     }
     try {
@@ -1813,27 +1829,27 @@ function BrowsersView() {
     const count = profiles.filter((p) => p.folder === f).length;
     const runningCount = profiles.filter((p) => p.folder === f && running[p.id]).length;
     if (runningCount > 0) {
-      toast.err(`Stop the ${runningCount} running browser${runningCount === 1 ? "" : "s"} in this folder first`);
+      toast.err(tr("Stop the {0} running browser{1} in this folder first", runningCount, runningCount === 1 ? "" : "s"));
       return;
     }
     // Three outcomes: delete profiles, unfile, cancel.
     const choice = await confirmModal({
-      title: `Delete folder “${f}”`,
+      title: tr("Delete folder “{0}”", f),
       message:
         count > 0
-          ? `This folder has ${count} profile${count === 1 ? "" : "s"}. ` +
-            `Delete them too, or keep them (they move to “All”)?`
-          : `Delete the empty folder “${f}”?`,
+          ? tr("This folder has {0} profile{1}. ", count, count === 1 ? "" : "s") +
+            tr("Delete them too, or keep them (they move to “All”)?")
+          : tr("Delete the empty folder “{0}”?", f),
       buttons:
         count > 0
           ? [
-              { label: "Cancel", value: "cancel" },
-              { label: "Keep profiles", value: "keep" },
-              { label: "Delete profiles", value: "delete", danger: true },
+              { label: tr("Cancel"), value: "cancel" },
+              { label: tr("Keep profiles"), value: "keep" },
+              { label: tr("Delete profiles"), value: "delete", danger: true },
             ]
           : [
-              { label: "Cancel", value: "cancel" },
-              { label: "Delete", value: "keep", danger: true },
+              { label: tr("Cancel"), value: "cancel" },
+              { label: tr("Delete"), value: "keep", danger: true },
             ],
     });
     if (choice == null || choice === "cancel") return;
@@ -1854,8 +1870,8 @@ function BrowsersView() {
       reload();
       toast.ok(
         alsoDelete
-          ? `Deleted folder “${f}” + ${n} profile${n === 1 ? "" : "s"}`
-          : `Removed folder “${f}” (${n} profile${n === 1 ? "" : "s"} kept)`,
+          ? tr("Deleted folder “{0}” + {1} profile{2}", f, n, n === 1 ? "" : "s")
+          : tr("Removed folder “{0}” ({1} profile{2} kept)", f, n, n === 1 ? "" : "s"),
       );
     } catch (e) { toast.err(String(e)); }
   };
@@ -1865,23 +1881,26 @@ function BrowsersView() {
     if (ids.length === 0) return;
     const runningIds = ids.filter((id) => !!running[id]);
     if (runningIds.length > 0) {
-      toast.err(`Stop the ${runningIds.length} selected running browser${runningIds.length === 1 ? "" : "s"} before launching`);
+      toast.err(tr("Stop the {0} selected running browser{1} before launching", runningIds.length, runningIds.length === 1 ? "" : "s"));
       return;
     }
     const startingIds = ids.filter((id) => startBusy.has(id) || (backendActiveIds.has(id) && !running[id]));
     if (startingIds.length > 0) {
-      toast.err("Wait for the selected browser to finish starting");
+      toast.err(tr("Wait for the selected browser to finish starting"));
       return;
     }
 
     setStartBusy((state) => new Set([...state, ...ids]));
+    for (const id of ids) queuedLaunches.current.add(id);
     for (const id of ids) {
+      if (!queuedLaunches.current.delete(id)) continue;
       try {
         const res = await invoke<{ pid: number; warnings: string[] }>("launch", { profileId: id });
         for (const warning of res.warnings ?? []) toast.warn(warning);
       } catch (e) {
         clearFailedLaunch(id);
-        toast.err(`Failed to launch ${id.slice(0, 8)}: ${e}`);
+        if (String(e) === "Launch cancelled") toast.info(tr("Launch cancelled"));
+        else toast.err(tr("Failed to launch {0}: {1}", id.slice(0, 8), e));
       } finally {
         setStartBusy((state) => {
           const next = new Set(state);
@@ -1902,7 +1921,7 @@ function BrowsersView() {
         await invoke<boolean>("process_kill", { profileId: id });
         stopped.add(id);
       } catch (e) {
-        toast.err(`Failed to stop ${id.slice(0, 8)}: ${e}`);
+        toast.err(tr("Failed to stop {0}: {1}", id.slice(0, 8), e));
       }
     }
     // Keep profiles that failed to stop selected so the batch context
@@ -1915,16 +1934,16 @@ function BrowsersView() {
     if (ids.length === 0) return;
     const activeIds = ids.filter((id) => !!running[id] || startBusy.has(id) || backendActiveIds.has(id));
     if (activeIds.length > 0) {
-      toast.err(`Stop the ${activeIds.length} selected active browser${activeIds.length === 1 ? "" : "s"} first`);
+      toast.err(tr("Stop the {0} selected active browser{1} first", activeIds.length, activeIds.length === 1 ? "" : "s"));
       return;
     }
-    if ((await confirmModal({ title: "Delete profiles", message: `Delete ${ids.length} profile${ids.length === 1 ? "" : "s"}? This wipes their user-data dirs too.`, danger: true })) !== true) return;
+    if ((await confirmModal({ title: tr("Delete profiles"), message: tr("Delete {0} profile{1}? This wipes their user-data dirs too.", ids.length, ids.length === 1 ? "" : "s"), danger: true })) !== true) return;
     for (const id of ids) {
       try { await invoke("profile_delete", { id }); } catch (e) { toast.err(String(e)); }
     }
     setSelected(new Set());
     reload();
-    toast.ok(`Deleted ${ids.length}`);
+    toast.ok(tr("Deleted {0}", ids.length));
   };
 
   const bulkExport = async () => {
@@ -1939,16 +1958,16 @@ function BrowsersView() {
       const summary = await invoke<ProfileBackupSummary>("profile_backup_import", { paths });
       await reload();
       toast.ok(
-        `Imported ${summary.profileCount} complete profile${summary.profileCount === 1 ? "" : "s"}, including bound proxy settings (${summary.fileCount} browser-data files)`,
+        tr("Imported {0} complete profile{1}, including bound proxy settings ({2} browser-data files)", summary.profileCount, summary.profileCount === 1 ? "" : "s", summary.fileCount),
       );
     } catch (e) {
-      toast.err("Import failed: " + String(e));
+      toast.err(tr("Import failed: ") + String(e));
     }
   };
 
   const expand = async (id: string) => {
     if (running[id]) {
-      toast.err("Stop the browser before editing this profile");
+      toast.err(tr("Stop the browser before editing this profile"));
       return;
     }
     setRenaming(null);
@@ -2012,7 +2031,7 @@ function BrowsersView() {
       setDraft(null);
       setDraftBaseline(null);
       reload();
-      toast.ok(draft.id ? "Profile saved" : `Created "${saved.name}"`);
+      toast.ok(draft.id ? tr("Profile saved") : tr("Created \"{0}\"", saved.name));
     } catch (e) { toast.err(String(e)); }
   };
 
@@ -2086,7 +2105,7 @@ function BrowsersView() {
       // import), and overwriting it would drop those rows until the next
       // poll.
       await reload();
-      toast.err(`Could not save profile order: ${String(error)}`);
+      toast.err(tr("Could not save profile order: {0}", String(error)));
     }
   };
 
@@ -2100,18 +2119,18 @@ function BrowsersView() {
       onDragEnd={handleProfileDragEnd}
     >
     <section className="page workspace-page">
-      <Topbar crumbs={["Workspace", "Browsers"]} search={search} onSearch={setSearch} />
+      <Topbar crumbs={[tr("Workspace"), tr("Browsers")]} search={search} onSearch={setSearch} />
 
       <div className="metric-strip">
-        <Metric label="Profiles" value={String(profiles.length)} accent />
-        <Metric label="Running" value={String(runningCount)} pulse={runningCount > 0} />
-        <Metric label="Proxies" value={String(proxies.length)} />
-        <Metric label="Fingerprints" value={String(fingerprints.length)} />
+        <Metric label={tr("Profiles")} value={String(profiles.length)} accent />
+        <Metric label={tr("Running")} value={String(runningCount)} pulse={runningCount > 0} />
+        <Metric label={tr("Proxies")} value={String(proxies.length)} />
+        <Metric label={tr("Fingerprints")} value={String(fingerprints.length)} />
       </div>
 
       <div className="page-title">
         <div className="title-with-tabs">
-          <h1>Browsers</h1>
+          <h1>{tr("Browsers")}</h1>
           <div className="folder-tabs" ref={folderTabsRef}>
             <FolderDropTab
               dropId="profile-folder:all"
@@ -2119,7 +2138,7 @@ function BrowsersView() {
               className={`folder-tab ${folder === "all" ? "active" : ""}`}
               onClick={() => setFolder("all")}
             >
-              All<span className="tab-count">{profiles.length}</span>
+               {tr("All")}<span className="tab-count">{profiles.length}</span>
             </FolderDropTab>
             {folders.map((f) => (
               <FolderDropTab
@@ -2128,10 +2147,10 @@ function BrowsersView() {
                 folder={f}
                 className={`folder-tab ${folder === f ? "active" : ""}`}
                 onClick={() => setFolder(f)}
-                title="Right-click for folder actions · drop profiles to move them"
+                title={tr("Right-click for folder actions · drop profiles to move them")}
                 onContextMenu={(e) =>
                   ctx.open(e, [
-                    { label: "Delete folder…", onClick: () => deleteFolder(f), danger: true },
+                    { label: tr("Delete folder…"), onClick: () => deleteFolder(f), danger: true },
                   ])
                 }
               >
@@ -2143,7 +2162,7 @@ function BrowsersView() {
             ))}
             <button
               className="folder-tab folder-tab-add"
-              title="Create a new folder"
+              title={tr("Create a new folder")}
               onClick={() => setFolderModal({ profileId: null })}
             >
               +
@@ -2151,34 +2170,38 @@ function BrowsersView() {
           </div>
         </div>
         <div className="page-actions">
-          {selected.size > 0 && (
-            <div className="bulk-bar bulk-bar-floating">
-              <span>{selected.size} selected</span>
-              <button
-                className="btn-ghost btn-sm"
-                onClick={bulkLaunch}
-                disabled={selectedHasActive}
-                title={selectedHasRunning ? "Stop selected running browsers before launching" : selectedHasStarting ? "Wait for selected browsers to finish starting" : "Launch selected profiles"}
-              ><Icon.Play /> Launch</button>
-              <button className="btn-ghost btn-sm" onClick={bulkStop}><Icon.Stop /> Stop</button>
-              <button
-                className="btn-ghost btn-sm"
-                onClick={bulkExport}
-                disabled={selectedHasActive}
-                title={selectedHasActive ? "Stop selected active browsers before exporting" : "Export selected profiles with their sensitive cookies"}
-              ><Icon.Upload /> Export</button>
-              <button
-                className="btn-ghost btn-sm"
-                onClick={bulkDelete}
-                disabled={selectedHasActive}
-                title={selectedHasActive ? "Stop selected active browsers before deleting" : "Delete selected profiles"}
-              ><Icon.Trash /> Delete</button>
-            </div>
-          )}
-          <button className="btn-ghost profile-page-action" onClick={bulkImport} title="Import one or more .shardx-backup files"><Icon.Download /> Import profile</button>
-          <button className="btn-primary profile-page-action" onClick={newProfile}>+ New profile</button>
+          <button className="btn-ghost profile-page-action" onClick={bulkImport} title={tr("Import one or more .shardx-backup files")}><Icon.Download /> {tr("Import profile")}</button>
+          <button className="btn-primary profile-page-action" onClick={newProfile}>{tr("+ New profile")}</button>
         </div>
       </div>
+      {selected.size > 0 && (
+        <div className="bulk-bar browser-bulk-bar">
+          <span>{selected.size} {tr("selected")}</span>
+          <button
+            className="btn-ghost btn-sm"
+            onClick={bulkLaunch}
+            disabled={selectedHasActive}
+            title={selectedHasRunning ? tr("Stop selected running browsers before launching") : selectedHasStarting ? tr("Wait for selected browsers to finish starting") : tr("Launch selected profiles")}
+          ><Icon.Play /> {tr("Launch")}</button>
+          <button className="btn-ghost btn-sm" onClick={bulkStop}><Icon.Stop /> {tr("Stop")}</button>
+          {selectedHasStarting && <button className="btn-ghost btn-sm" onClick={() => {
+            for (const id of selected) if (startBusy.has(id) || (backendActiveIds.has(id) && !running[id])) void cancelStart(id);
+          }}>{tr("Cancel launch")}</button>}
+          <button className="btn-ghost btn-sm" disabled={selectedHasActive} onClick={() => setAssigning(true)}>{tr("Assign proxies")}</button>
+          <button
+            className="btn-ghost btn-sm"
+            onClick={bulkExport}
+            disabled={selectedHasActive}
+            title={selectedHasActive ? tr("Stop selected active browsers before exporting") : tr("Export selected profiles with their sensitive cookies")}
+          ><Icon.Upload /> {tr("Export")}</button>
+          <button
+            className="btn-ghost btn-sm"
+            onClick={bulkDelete}
+            disabled={selectedHasActive}
+            title={selectedHasActive ? tr("Stop selected active browsers before deleting") : tr("Delete selected profiles")}
+          ><Icon.Trash /> {tr("Delete")}</button>
+        </div>
+      )}
       {folderModal && (() => {
         const moving = folderModal.profileId
           ? profiles.find((p) => p.id === folderModal!.profileId) ?? null
@@ -2202,14 +2225,19 @@ function BrowsersView() {
         );
       })()}
 
+      {assigning && <AssignProxiesDialog
+        profiles={profiles} proxies={proxies} selected={selected}
+        activeIds={new Set([...backendActiveIds, ...startBusy, ...Object.keys(running).filter((id) => running[id])])}
+        onClose={() => setAssigning(false)} onSaved={reload}
+      />}
       <div className="rows">
         <div className="rows-head t-cols">
-          <div className="sort-head" title="Drag rows to reorder"><Icon.Grip /></div>
+          <div className="sort-head" title={tr("Drag rows to reorder")}><Icon.Grip /></div>
           <div></div>
           <div>
             <input
               type="checkbox"
-              title="Select all on this page"
+              title={tr("Select all on this page")}
               // Header checkbox toggles only visible page rows; other pages preserved.
               checked={paged.length > 0 && paged.every((p) => selected.has(p.id))}
               ref={(el) => {
@@ -2231,7 +2259,7 @@ function BrowsersView() {
               }}
             />
           </div>
-          <div>Name</div><div>Status</div><div className="head-proxy">Proxy</div><div>Notes</div><div className="head-lastrun">Last run</div><div className="head-actions">ACTIONS</div>
+          <div>{tr("Name")}</div><div>{tr("Status")}</div><div className="head-proxy">{tr("Proxy")}</div><div>{tr("Notes")}</div><div className="head-lastrun">{tr("Last run")}</div><div className="head-actions">{tr("ACTIONS")}</div>
         </div>
         {expanded === "__new__" && draft && (
           <div className="row-wrap row-expanded row-new">
@@ -2275,7 +2303,7 @@ function BrowsersView() {
               className={`row-wrap ${isRunning ? "row-running" : ""} ${isExpanded ? "row-expanded" : ""}`}
               rowClassName="row t-cols browser-data-row"
               dropPlacement={sortIndicator?.id === p.id ? sortIndicator.placement : null}
-              disabledReason={isActive ? "Stop the browser before reordering this profile" : search.trim() ? "Clear search to reorder profiles" : isExpanded ? "Close the editor before reordering" : undefined}
+              disabledReason={isActive ? tr("Stop the browser before reordering this profile") : search.trim() ? tr("Clear search to reorder profiles") : isExpanded ? tr("Close the editor before reordering") : undefined}
               onContextMenu={(e) => {
                 if (isActive) {
                   e.preventDefault();
@@ -2303,7 +2331,7 @@ function BrowsersView() {
                 <div
                   className={`cell-name ${isActive ? "cell-locked" : ""}`}
                   onClick={isActive || renaming?.id === p.id ? undefined : () => beginRename(p)}
-                  title={isActive ? "Stop the browser or wait for it to finish starting before renaming" : "Click to rename"}
+                  title={isActive ? tr("Stop the browser or wait for it to finish starting before renaming") : tr("Click to rename")}
                 >
                   {renaming?.id === p.id ? (
                     <input
@@ -2317,7 +2345,7 @@ function BrowsersView() {
                         if (e.key === "Enter") e.currentTarget.blur();
                         else if (e.key === "Escape") setRenaming(null);
                       }}
-                      aria-label={`Rename ${p.name}`}
+                      aria-label={tr("Rename {0}", p.name)}
                     />
                   ) : (
                     <div className="name-main">{p.name}</div>
@@ -2327,13 +2355,13 @@ function BrowsersView() {
                 <div className="cell-status">
                   <span className={`pill-status ${isRunning ? "ps-on" : "ps-off"}`}>
                     <i className="dot" />
-                    {isRunning ? "Running" : "Idle"}
+                    {isRunning ? tr("Running") : tr("Idle")}
                   </span>
                 </div>
                 <div
                   className={`cell-proxy cell-click ${px ? "" : "cell-proxy-direct"} ${isActive ? "cell-locked" : ""}`}
                   onClick={isActive ? undefined : () => setQuickEdit({ kind: "proxy", profile: p })}
-                  title={isActive ? "Stop the browser or wait for it to finish starting before changing proxy" : "Change proxy"}
+                  title={isActive ? tr("Stop the browser or wait for it to finish starting before changing proxy") : tr("Change proxy")}
                 >
                   {px ? (
                     <>
@@ -2348,48 +2376,47 @@ function BrowsersView() {
                       </div>
                       <div
                         className={`proxy-detail ${proxyDetailText ? "" : "muted"}`}
-                        title={proxyDetailText || "No test data"}
+                        title={proxyDetailText || tr("No test data")}
                       >
-                        <span className="proxy-detail-text">{proxyDetailText || "No test data"}</span>
+                        <span className="proxy-detail-text">{proxyDetailText || tr("No test data")}</span>
                       </div>
                     </>
-                  ) : <span className="muted small">— direct —</span>}
+                  ) : <span className="muted small">{tr("— direct —")}</span>}
                 </div>
                 <div
                   className={`cell-notes cell-click ${isActive ? "cell-locked" : ""} ${(p.notes || "").includes("\n") ? "notes-multi" : ""}`}
-                  title={isActive ? "Stop the browser or wait for it to finish starting before editing notes" : p.notes || "Click to edit notes"}
+                  title={isActive ? tr("Stop the browser or wait for it to finish starting before editing notes") : p.notes || tr("Click to edit notes")}
                   onClick={isActive ? undefined : () => setQuickEdit({ kind: "notes", profile: p })}
                 >
                   {p.notes ? <span className="notes-text">{p.notes}</span> : <span className="muted">—</span>}
                 </div>
-                <div className="cell-lastrun"><span className="muted small">{p.last_launched_at ? fmtTs(p.last_launched_at) : "never"}</span></div>
+                <div className="cell-lastrun"><span className="muted small">{p.last_launched_at ? fmtTs(p.last_launched_at) : tr("never")}</span></div>
                 <div className="row-actions">
                   <button
                     className={`btn-launch ${isRunning ? "btn-launch-stop" : ""}`}
                     onClick={() => startStop(p)}
-                    disabled={isStarting}
                     title={
                       isRunning
-                        ? "Stop browser"
+                        ? tr("Stop browser")
                         : isStarting
-                          ? "Starting browser (proxy checks: up to 5 seconds)…"
-                          : "Start browser"
+                          ? tr("Cancel launch")
+                          : tr("Start browser")
                     }
-                    aria-label={isRunning ? "Stop browser" : isStarting ? "Starting browser" : "Start browser"}
+                    aria-label={isRunning ? tr("Stop browser") : isStarting ? tr("Cancel launch") : tr("Start browser")}
                     aria-busy={isStarting}
                   >
                     <span className={`btn-launch-ico ${isStarting ? "spin" : ""}`}>
                       {isRunning ? <Icon.Stop /> : isStarting ? <Icon.Loader /> : <Icon.Play />}
                     </span>
                   </button>
-                  <button className="icon-btn" onClick={() => expand(p.id)} disabled={isActive} title={isActive ? "Stop browser before editing" : "Edit"}><Icon.Edit /></button>
-                  <button className="icon-btn" onClick={() => cloneProfile(p.id)} disabled={isActive} title={isActive ? "Stop browser before cloning" : "Clone"}><Icon.Clone /></button>
-                  <button className="icon-btn danger" onClick={() => remove(p.id)} disabled={isActive} title={isActive ? "Stop browser before deleting" : "Delete"}><Icon.Trash /></button>
+                  <button className="icon-btn" onClick={() => expand(p.id)} disabled={isActive} title={isActive ? tr("Stop browser before editing") : tr("Edit")}><Icon.Edit /></button>
+                  <button className="icon-btn" onClick={() => cloneProfile(p.id)} disabled={isActive} title={isActive ? tr("Stop browser before cloning") : tr("Clone")}><Icon.Clone /></button>
+                  <button className="icon-btn danger" onClick={() => remove(p.id)} disabled={isActive} title={isActive ? tr("Stop browser before deleting") : tr("Delete")}><Icon.Trash /></button>
                   <button
                     className="icon-btn"
                     onClick={(e) => { e.stopPropagation(); ctx.open(e, profileMenu(p)); }}
                     disabled={isActive}
-                    title={isActive ? "Stop browser before using more actions" : "More actions"}
+                    title={isActive ? tr("Stop browser before using more actions") : tr("More actions")}
                   ><Icon.More /></button>
                 </div>
             </SortableRow>
@@ -2399,10 +2426,10 @@ function BrowsersView() {
         {visible.length === 0 && !expanded && (
           <div className="empty-rich">
             <div className="empty-shard"><ShardLogo /></div>
-            <h3>No profiles yet</h3>
-            <p>Create a browser profile to get started.</p>
+            <h3>{tr("No profiles yet")}</h3>
+            <p>{tr("Create a browser profile to get started.")}</p>
             <div className="empty-cta">
-              <button className="btn-primary profile-page-action" onClick={newProfile}>+ New profile</button>
+              <button className="btn-primary profile-page-action" onClick={newProfile}>{tr("+ New profile")}</button>
             </div>
           </div>
         )}
@@ -2414,14 +2441,14 @@ function BrowsersView() {
             direction="previous"
             disabled={page <= 1}
             onClick={() => setPage((p) => Math.max(1, p - 1))}
-          >‹ Prev</PageDropButton>
-          <span className="pager-info">Page {page} of {pageCount} · {visible.length} profiles</span>
+          >{tr("‹ Prev")}</PageDropButton>
+          <span className="pager-info">{tr("Page")} {page}  {tr("of")} {pageCount} · {visible.length}  {tr("profiles")}</span>
           <PageDropButton
             dropId="profile-page-next"
             direction="next"
             disabled={page >= pageCount}
             onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
-          >Next ›</PageDropButton>
+          >{tr("Next ›")}</PageDropButton>
         </div>
       )}
       {ctx.node}
@@ -2488,6 +2515,85 @@ function proxyBindingLabel(proxy: ProxyEntry, snapshot?: ProxyTestSnapshot) {
     .join(" · ");
 }
 
+function AssignProxiesDialog({ profiles, proxies, selected, activeIds, onClose, onSaved }: {
+  profiles: ProfileMeta[]; proxies: ProxyEntry[]; selected: Set<string>; activeIds: Set<string>;
+  onClose: () => void; onSaved: () => void | Promise<void>;
+}) {
+  const [chosen, setChosen] = useState(new Set<string>());
+  const [sharing, setSharing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const targets = profiles.filter((p) => selected.has(p.id));
+  const usedBy: Record<string, string[]> = {};
+  for (const p of profiles) if (p.proxy_id) (usedBy[p.proxy_id] ??= []).push(p.id);
+  const plan = planAssignment(targets.map((p) => p.id), proxies.filter((p) => chosen.has(p.id)).map((p) => p.id), sharing, usedBy);
+  const blocked = targets.some((p) => activeIds.has(p.id));
+  const proxyName = (id: string | null) => {
+    const p = proxies.find((p) => p.id === id);
+    return p ? p.name || `${p.host}:${p.port}` : tr("Direct connection");
+  };
+  const apply = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const applied = await invoke<number>("profile_assign_proxies", {
+        pairs: plan.pairs.map((pair) => ({ ...pair, expectedProxyId: profiles.find((p) => p.id === pair.profileId)!.proxy_id })),
+        allowSharing: sharing,
+      });
+      toast.ok(tr("Assigned proxies to {0} profiles", applied));
+      onClose();
+    } catch (e) {
+      setError(tr(String(e)));
+    } finally {
+      await onSaved();
+      setBusy(false);
+    }
+  };
+  return (
+    <DialogBackdrop onClose={() => { if (!busy) onClose(); }} dismissOnBackdrop={false}>
+      <div className="dialog assign-dialog">
+        <header className="dialog-head">
+          <h2>{tr("Assign proxies")}</h2>
+          <button className="icon-btn" disabled={busy} onClick={onClose} aria-label={tr("Close")}>✕</button>
+        </header>
+        <div className="dialog-body">
+          <p className="muted small">{tr("Profiles and proxies are paired in list order. Profiles without a match keep their current binding.")}</p>
+          <div className="assign-proxy-list">
+            {proxies.length === 0 && <p>{tr("No proxies available")}</p>}
+            {proxies.map((p) => <label className="row-inline" key={p.id}>
+              <input type="checkbox" checked={chosen.has(p.id)} disabled={busy} onChange={(event) => {
+                setChosen((current) => { const next = new Set(current); if (event.target.checked) next.add(p.id); else next.delete(p.id); return next; });
+              }} />
+              <span>{p.name || `${p.host}:${p.port}`}</span>
+              <span className="muted small">{p.kind} · {usedBy[p.id]?.length ?? 0}  {tr("bindings")}</span>
+            </label>)}
+          </div>
+          <label className="row-inline">
+            <input type="checkbox" checked={sharing} disabled={busy} onChange={(e) => setSharing(e.target.checked)} />
+            <span>{tr("Allow sharing proxies (round-robin)")}</span>
+          </label>
+          <p className="muted small">{plan.pairs.length}  {tr("assignments ·")} {plan.left.length}  {tr("unchanged ·")} {plan.skippedShared.length}  {tr("occupied proxies skipped")}</p>
+          <div className="assign-preview">
+            <table>
+              <thead><tr><th>{tr("Profile")}</th><th>{tr("Current proxy")}</th><th>{tr("Assigned proxy")}</th></tr></thead>
+              <tbody>{targets.map((p) => {
+                const pair = plan.pairs.find((pair) => pair.profileId === p.id);
+                return <tr key={p.id}><td>{p.name}</td><td>{proxyName(p.proxy_id)}</td><td>{pair ? proxyName(pair.proxyId) : tr("Unchanged")}</td></tr>;
+              })}</tbody>
+            </table>
+          </div>
+          {blocked && <p className="error">{tr("Stop the selected browsers before assigning proxies")}</p>}
+          {error && <p className="error" role="alert">{error}</p>}
+        </div>
+        <footer className="dialog-foot">
+          <button className="btn-ghost" disabled={busy} onClick={onClose}>{tr("Cancel")}</button>
+          <button className="btn-primary" disabled={busy || blocked || plan.pairs.length === 0} onClick={apply}>{busy ? tr("Applying…") : tr("Apply assignment")}</button>
+        </footer>
+      </div>
+    </DialogBackdrop>
+  );
+}
+
 function QuickEditDialog({
   kind, profile, proxies, proxySnapshots, onClose, onSaved,
 }: {
@@ -2504,7 +2610,7 @@ function QuickEditDialog({
   const saveProxy = async () => {
     try {
       await invoke("profile_bind_proxy", { profileId: profile.id, proxyId });
-      toast.ok("Proxy updated");
+      toast.ok(tr("Proxy updated"));
       onSaved();
     } catch (e) { toast.err(String(e)); }
   };
@@ -2515,7 +2621,7 @@ function QuickEditDialog({
       const stored = await invoke<any>("profile_get", { id: profile.id });
       stored.notes = notes;
       await invoke<ProfileMeta>("profile_save", { payload: stored });
-      toast.ok("Notes saved");
+      toast.ok(tr("Notes saved"));
       onSaved();
     } catch (e) { toast.err(String(e)); }
   };
@@ -2524,15 +2630,15 @@ function QuickEditDialog({
     <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
       <div className="dialog">
         <header className="dialog-head">
-          <h2><ShardMini /> {kind === "proxy" ? "Bind proxy" : "Edit notes"} — {profile.name}</h2>
+          <h2><ShardMini /> {kind === "proxy" ? tr("Bind proxy") : tr("Edit notes")} — {profile.name}</h2>
           <button className="icon-btn" onClick={onClose}>✕</button>
         </header>
         <div className="dialog-body">
           {kind === "proxy" ? (
             <label>
-              <span className="lbl">Proxy</span>
+              <span className="lbl">{tr("Proxy")}</span>
               <select value={proxyId ?? ""} onChange={(e) => setProxyId(e.target.value || null)}>
-                <option value="">— direct connection —</option>
+                <option value="">{tr("— direct connection —")}</option>
                 {proxies.map((px) => (
                   <option key={px.id} value={px.id}>
                     {proxyBindingLabel(px, proxySnapshots[px.id])}
@@ -2542,16 +2648,15 @@ function QuickEditDialog({
             </label>
           ) : (
             <label>
-              <span className="lbl">Notes</span>
+              <span className="lbl">{tr("Notes")}</span>
               <textarea rows={6} value={notes} onChange={(e) => setNotes(e.target.value)} autoFocus />
             </label>
           )}
         </div>
         <footer className="dialog-foot">
-          <button className="btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn-ghost" onClick={onClose}>{tr("Cancel")}</button>
           <button className="btn-primary" onClick={kind === "proxy" ? saveProxy : saveNotes}>
-            <ShardMini /> Save
-          </button>
+            <ShardMini />  {tr("Save")} </button>
         </footer>
       </div>
     </DialogBackdrop>
@@ -2610,7 +2715,7 @@ function InlineEditor({
     try {
       picks = await invoke<PresetEnrichPicks>("enrich_picks_for_preset", { presetId: id });
     } catch (e) {
-      toast.err(`Unable to load hardware configurations: ${String(e)}`);
+      toast.err(tr("Unable to load hardware configurations: {0}", String(e)));
       return;
     }
     if (request !== gpuPickRequest.current) return;
@@ -2621,7 +2726,7 @@ function InlineEditor({
         c.device_memory === picks.device_memory,
     );
     if (!selectedIsValid) {
-      toast.err("Backend returned an invalid hardware configuration");
+      toast.err(tr("Backend returned an invalid hardware configuration"));
       return;
     }
     setHardwareSource({ presetId: id, configs });
@@ -2650,7 +2755,7 @@ function InlineEditor({
         await setGpu(id, true);
         return;
       }
-      console.warn(`recommended fingerprint is not in the loaded library: ${id}`);
+      console.warn(tr("recommended fingerprint is not in the loaded library: {0}", id));
     } catch (e) {
       if (request !== gpuRecommendationRequest.current) return;
       console.warn("fingerprint recommendation failed:", e);
@@ -2740,17 +2845,17 @@ function InlineEditor({
       <div className="ie-grid">
         {/* ----- col 1: identity + hardware ----- */}
         <div className="ie-section">
-          <div className="ie-section-title">Identity</div>
+          <div className="ie-section-title">{tr("Identity")}</div>
           <Field
-            label="Profile name"
+            label={tr("Profile name")}
             value={f.name}
             onChange={(v) => u("name", v)}
-            placeholder="e.g. shop-pl-1"
+            placeholder={tr("e.g. shop-pl-1")}
             error={nameError}
           />
 
           <label>
-            <span className="lbl">Operating system</span>
+            <span className="lbl">{tr("Operating system")}</span>
             <div className="seg">
               {OS_OPTIONS.map((o) => (
                 <button
@@ -2766,26 +2871,26 @@ function InlineEditor({
           </label>
 
           <label>
-            <span className="lbl">GPU / device (from Fingerprint Library)</span>
+            <span className="lbl">{tr("GPU / device (from Fingerprint Library)")}</span>
             <CSSelect
               value={f.gpu_preset_id}
               onChange={(v) => setGpu(v)}
-              placeholder={`— no ${osFilter} fingerprints in library —`}
+              placeholder={tr("— no {0} fingerprints in library —", osFilter)}
               options={gpusForOs.map((g) => ({ value: g.id, label: g.label }))}
             />
           </label>
 
-          <Field label="User-Agent" value={f.user_agent} onChange={(v) => u("user_agent", v)} mono />
+          <Field label={tr("User-Agent")} value={f.user_agent} onChange={(v) => u("user_agent", v)} mono />
 
           <div className="form-row">
             <SelectField
-              label="Logical CPUs"
+              label={tr("Logical CPUs")}
               value={f.hardware_concurrency}
               onChange={setCpu}
               options={cpuOptions}
             />
             <SelectField
-              label="Memory (GB)"
+              label={tr("Memory (GB)")}
               value={f.device_memory}
               onChange={setMemory}
               options={memoryOptions}
@@ -2793,12 +2898,12 @@ function InlineEditor({
           </div>
 
           <label>
-            <span className="lbl">Proxy</span>
+            <span className="lbl">{tr("Proxy")}</span>
             <CSSelect
               value={f.proxy_id ?? ""}
               onChange={(v) => u("proxy_id", v ? v : null)}
               options={[
-                { value: "", label: "— direct connection —" },
+                { value: "", label: tr("— direct connection —") },
                 ...proxies.map((px) => ({
                   value: px.id,
                   label: `${px.name || `${px.host}:${px.port}`} · ${px.country || px.kind}`,
@@ -2810,41 +2915,41 @@ function InlineEditor({
 
         {/* ----- col 2: locale + noise ----- */}
         <div className="ie-section">
-          <div className="ie-section-title">Locale</div>
+          <div className="ie-section-title">{tr("Locale")}</div>
           <div className="form-row">
             <label>
-              <span className="lbl">Timezone</span>
+              <span className="lbl">{tr("Timezone")}</span>
               <CSSelect
                 value={f.timezone}
                 onChange={(v) => u("timezone", v)}
                 options={TIMEZONES.map((tz) => ({
                   value: tz,
-                  label: tz === AUTO_TZ ? "Auto (from proxy geo)" : tz,
+                  label: tz === AUTO_TZ ? tr("Auto (from proxy geo)") : tz,
                 }))}
               />
             </label>
             <label>
-              <span className="lbl">Language</span>
+              <span className="lbl">{tr("Language")}</span>
               <CSSelect
                 value={f.language}
                 onChange={(v) => u("language", v)}
-                options={LOCALES.map((l) => ({ value: l.code, label: l.label }))}
+                options={LOCALES.map((l) => ({ value: l.code, label: tr(l.label) }))}
               />
             </label>
           </div>
 
-          <div className="ie-section-title" style={{ marginTop: 6 }}>Noise</div>
+          <div className="ie-section-title" style={{ marginTop: 6 }}>{tr("Noise")}</div>
           <div className="noise-grid noise-grid-3">
             <Pair label="Canvas"        value={f.noise_canvas}        on={(v) => u("noise_canvas", v)} />
             <Pair label="WebGL"         value={f.noise_webgl}         on={(v) => u("noise_webgl", v)} />
-            <Pair label="Audio"         value={f.noise_audio}         on={(v) => u("noise_audio", v)} />
-            <Pair label="Client rects"  value={f.noise_client_rects}  on={(v) => u("noise_client_rects", v)} />
-            <Pair label="Sensors"       value={f.noise_sensors}       on={(v) => u("noise_sensors", v)} />
-            <Pair label="Fonts"         value={f.noise_fonts}         on={(v) => u("noise_fonts", v)} />
+            <Pair label={tr("Audio")}         value={f.noise_audio}         on={(v) => u("noise_audio", v)} />
+            <Pair label={tr("Client rects")}  value={f.noise_client_rects}  on={(v) => u("noise_client_rects", v)} />
+            <Pair label={tr("Sensors")}       value={f.noise_sensors}       on={(v) => u("noise_sensors", v)} />
+            <Pair label={tr("Fonts")}         value={f.noise_fonts}         on={(v) => u("noise_fonts", v)} />
           </div>
 
           <PortList
-            label="Ports to block"
+            label={tr("Ports to block")}
             value={f.blocked_ports}
             onChange={(v) => u("blocked_ports", v)}
           />
@@ -2852,7 +2957,7 @@ function InlineEditor({
 
         {/* ----- col 3: privacy + media + notes ----- */}
         <div className="ie-section">
-          <div className="ie-section-title">Privacy</div>
+          <div className="ie-section-title">{tr("Privacy")}</div>
           <div className="form-row">
             <label>
               <span className="lbl">WebRTC</span>
@@ -2860,60 +2965,60 @@ function InlineEditor({
                 value={f.webrtc}
                 onChange={(v) => u("webrtc", v as WebRtcMode)}
                 options={[
-                  { value: "auto", label: "Auto" },
-                  { value: "tcp_only", label: "TCP only" },
-                  { value: "block", label: "Block" },
+                  { value: "auto", label: tr("Auto") },
+                  { value: "tcp_only", label: tr("TCP only") },
+                  { value: "block", label: tr("Block") },
                 ]}
               />
             </label>
             <label>
-              <span className="lbl">Do Not Track</span>
+              <span className="lbl">{tr("Do Not Track")}</span>
               <CSSelect
                 value={f.do_not_track ? "1" : "0"}
                 onChange={(v) => u("do_not_track", v === "1")}
                 options={[
-                  { value: "0", label: "Off" },
-                  { value: "1", label: "On (send DNT: 1)" },
+                  { value: "0", label: tr("Off") },
+                  { value: "1", label: tr("On (send DNT: 1)") },
                 ]}
               />
             </label>
           </div>
 
           <label>
-            <span className="lbl">Geolocation</span>
+            <span className="lbl">{tr("Geolocation")}</span>
             <div className="seg seg-2">
               {(["auto", "manual"] as GeoMode[]).map((m) => (
                 <button key={m} className={`seg-btn ${f.geo_mode === m ? "active" : ""}`} onClick={() => u("geo_mode", m)}>
-                  {m === "auto" ? "Auto (from proxy)" : "Manual coords"}
+                  {m === "auto" ? tr("Auto (from proxy)") : tr("Manual coords")}
                 </button>
               ))}
             </div>
           </label>
           {f.geo_mode === "manual" && (
             <div className="form-row form-row-3">
-              <NumField label="Latitude" value={f.geo_lat} onChange={(v) => u("geo_lat", v)} step={0.0001} />
-              <NumField label="Longitude" value={f.geo_lng} onChange={(v) => u("geo_lng", v)} step={0.0001} />
-              <NumField label="Accuracy m" value={f.geo_accuracy} onChange={(v) => u("geo_accuracy", v)} />
+              <NumField label={tr("Latitude")} value={f.geo_lat} onChange={(v) => u("geo_lat", v)} step={0.0001} />
+              <NumField label={tr("Longitude")} value={f.geo_lng} onChange={(v) => u("geo_lng", v)} step={0.0001} />
+              <NumField label={tr("Accuracy m")} value={f.geo_accuracy} onChange={(v) => u("geo_accuracy", v)} />
             </div>
           )}
 
-          <div className="ie-section-title" style={{ marginTop: 10 }}>Media devices</div>
+          <div className="ie-section-title" style={{ marginTop: 10 }}>{tr("Media devices")}</div>
           <div className="form-row form-row-3">
-            <SelectField label="Mic in" value={f.media_audio_in} onChange={(v) => u("media_audio_in", v)} options={MEDIA_COUNT_OPTIONS} />
-            <SelectField label="Speakers" value={f.media_audio_out} onChange={(v) => u("media_audio_out", v)} options={MEDIA_COUNT_OPTIONS} />
-            <SelectField label="Webcam" value={f.media_video_in} onChange={(v) => u("media_video_in", v)} options={MEDIA_COUNT_OPTIONS} />
+            <SelectField label={tr("Mic in")} value={f.media_audio_in} onChange={(v) => u("media_audio_in", v)} options={MEDIA_COUNT_OPTIONS} />
+            <SelectField label={tr("Speakers")} value={f.media_audio_out} onChange={(v) => u("media_audio_out", v)} options={MEDIA_COUNT_OPTIONS} />
+            <SelectField label={tr("Webcam")} value={f.media_video_in} onChange={(v) => u("media_video_in", v)} options={MEDIA_COUNT_OPTIONS} />
           </div>
 
           <label>
-            <span className="lbl">Notes</span>
-            <textarea rows={2} value={f.notes} onChange={(e) => u("notes", e.target.value)} placeholder="Free-form notes…" />
+            <span className="lbl">{tr("Notes")}</span>
+            <textarea rows={2} value={f.notes} onChange={(e) => u("notes", e.target.value)} placeholder={tr("Free-form notes…")} />
           </label>
         </div>
       </div>
       <div className="ie-foot">
-        <button className="btn-ghost" onClick={onCancel}>Cancel</button>
+        <button className="btn-ghost" onClick={onCancel}>{tr("Cancel")}</button>
         <button className="btn-primary" onClick={onSave} disabled={nameError != null} title={nameError ?? undefined}>
-          <ShardMini /> {f.id ? "Save changes" : "Create profile"}
+          <ShardMini /> {f.id ? tr("Save changes") : tr("Create profile")}
         </button>
       </div>
     </div>
@@ -2974,8 +3079,8 @@ function Pair({
   const opts: NoiseMode[] = ["real", "auto"];
   const labelFor = (o: NoiseMode) =>
     blockLabel
-      ? (o === "real" ? "Allow" : "Block")
-      : (o === "real" ? "Real" : "Auto noise");
+      ? (o === "real" ? tr("Allow") : tr("Block"))
+      : (o === "real" ? tr("Real") : tr("Auto noise"));
   return (
     <label>
       <span className="lbl">{label}</span>
@@ -3018,7 +3123,7 @@ function PortList({
         {value.map((p) => (
           <span key={p} className="port-chip">
             <span>{p}</span>
-            <button type="button" className="port-chip-x" onClick={() => remove(p)} title="Remove">✕</button>
+            <button type="button" className="port-chip-x" onClick={() => remove(p)} title={tr("Remove")}>✕</button>
           </span>
         ))}
         <input
@@ -3029,7 +3134,7 @@ function PortList({
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter" || e.key === "," || e.key === " ") { e.preventDefault(); commit(); } }}
           onBlur={commit}
-          placeholder={value.length === 0 ? "e.g. 3389, 5900, 8080" : "add port…"}
+          placeholder={value.length === 0 ? tr("e.g. 3389, 5900, 8080") : tr("add port…")}
         />
       </div>
     </label>
@@ -3166,7 +3271,7 @@ function Topbar({ crumbs, search, onSearch }: { crumbs: string[]; search: string
       </div>
       <div className="search">
         <span className="search-icon">⌕</span>
-        <input placeholder="Search…   ⌘K" value={search} onChange={(e) => onSearch(e.target.value)} />
+        <input placeholder={tr("Search…   ⌘K")} value={search} onChange={(e) => onSearch(e.target.value)} />
       </div>
     </div>
   );
@@ -3208,8 +3313,8 @@ type ProxyBatchTestResult = {
 };
 
 function proxyTestFailureReason(snapshot: ProxyTestSnapshot): string | null {
-  if (snapshot.tcp_ms == null) return "Proxy TCP test failed";
-  if (!snapshot.ip.trim()) return "Proxy test did not return an exit IP";
+  if (snapshot.tcp_ms == null) return tr("Proxy TCP test failed");
+  if (!snapshot.ip.trim()) return tr("Proxy test did not return an exit IP");
   return null;
 }
 
@@ -3329,7 +3434,7 @@ function ProxiesView() {
     if (!entry) { setRenaming(null); return; }
     if (lockedProxyIds.has(entry.id)) {
       setRenaming(null);
-      toast.err("Stop the running browser using this proxy before renaming it");
+      toast.err(tr("Stop the running browser using this proxy before renaming it"));
       return;
     }
     const newName = renaming.draft.trim();
@@ -3422,11 +3527,11 @@ function ProxiesView() {
 
   const remove = async (id: string) => {
     if (lockedProxyIds.has(id)) {
-      toast.err("Stop the running browser using this proxy before deleting it");
+      toast.err(tr("Stop the running browser using this proxy before deleting it"));
       return;
     }
-    if ((await confirmModal({ title: "Delete proxy", message: "Delete this proxy?", danger: true })) !== true) return;
-    try { await invoke("proxy_delete", { id }); reload(); toast.ok("Proxy deleted"); }
+    if ((await confirmModal({ title: tr("Delete proxy"), message: tr("Delete this proxy?"), danger: true })) !== true) return;
+    try { await invoke("proxy_delete", { id }); reload(); toast.ok(tr("Proxy deleted")); }
     catch (e) { toast.err(String(e)); }
   };
 
@@ -3436,7 +3541,7 @@ function ProxiesView() {
     const ids = [...proxySel];
     if (ids.length === 0) return;
     const targets = proxies.filter((p) => proxySel.has(p.id));
-    toast.info(`Testing ${ids.length} prox${ids.length === 1 ? "y" : "ies"}…`);
+    toast.info(tr("Testing {0} prox{1}…", ids.length, ids.length === 1 ? "y" : "ies"));
     setBusy((state) => {
       const next = { ...state };
       for (const target of targets) next[target.id] = true;
@@ -3464,11 +3569,11 @@ function ProxiesView() {
         else failed += 1;
       }
       await reload();
-      const summary = `Bulk test done: ${passed} passed, ${failed} failed${incomplete > 0 ? `, ${incomplete} incomplete` : ""}`;
+      const summary = tr("Bulk test done: {0} passed, {1} failed{2}", passed, failed, incomplete > 0 ? `, ${incomplete} incomplete` : "");
       if (failed === 0 && incomplete === 0) toast.ok(summary);
       else toast.info(summary);
     } catch (e) {
-      toast.err(`Bulk test failed: ${e}`);
+      toast.err(tr("Bulk test failed: {0}", e));
     } finally {
       setBusy((state) => {
         const next = { ...state };
@@ -3483,16 +3588,16 @@ function ProxiesView() {
     if (ids.length === 0) return;
     const lockedIds = ids.filter((id) => lockedProxyIds.has(id));
     if (lockedIds.length > 0) {
-      toast.err(`Stop browsers using the ${lockedIds.length} selected locked prox${lockedIds.length === 1 ? "y" : "ies"} before deleting`);
+      toast.err(tr("Stop browsers using the {0} selected locked prox{1} before deleting", lockedIds.length, lockedIds.length === 1 ? "y" : "ies"));
       return;
     }
-    if ((await confirmModal({ title: "Delete proxies", message: `Delete ${ids.length} prox${ids.length === 1 ? "y" : "ies"}?`, danger: true })) !== true) return;
+    if ((await confirmModal({ title: tr("Delete proxies"), message: tr("Delete {0} prox{1}?", ids.length, ids.length === 1 ? "y" : "ies"), danger: true })) !== true) return;
     for (const id of ids) {
       try { await invoke("proxy_delete", { id }); } catch (e) { toast.err(String(e)); }
     }
     setProxySel(new Set());
     reload();
-    toast.ok(`Deleted ${ids.length}`);
+    toast.ok(tr("Deleted {0}", ids.length));
   };
 
   // Export in bulk-import format so round-trip preserves country tag.
@@ -3507,8 +3612,8 @@ function ProxiesView() {
     });
     const text = lines.join("\n");
     clip.write(text).then(
-      () => toast.ok(`Copied ${targets.length} to clipboard`),
-      (e) => toast.err("Copy failed: " + String(e)),
+      () => toast.ok(tr("Copied {0} to clipboard", targets.length)),
+      (e) => toast.err(tr("Copy failed: ") + String(e)),
     );
   };
 
@@ -3516,11 +3621,11 @@ function ProxiesView() {
   const bulkImportClipboard = async () => {
     try {
       const text = await clip.read();
-      if (!text.trim()) { toast.err("Clipboard is empty"); return; }
+      if (!text.trim()) { toast.err(tr("Clipboard is empty")); return; }
       const n = await invoke<number>("proxy_bulk_import", { text, kind: "socks5" });
       reload();
-      toast.ok(`Imported ${n} prox${n === 1 ? "y" : "ies"}`);
-    } catch (e) { toast.err("Import failed: " + String(e)); }
+      toast.ok(tr("Imported {0} prox{1}", n, n === 1 ? "y" : "ies"));
+    } catch (e) { toast.err(tr("Import failed: ") + String(e)); }
   };
 
   const resetProxyDrag = () => {
@@ -3576,7 +3681,7 @@ function ProxiesView() {
       await invoke("proxy_move_order", { id: activeId, anchorId, placement });
     } catch (error) {
       setProxies(previous);
-      toast.err(`Could not save proxy order: ${String(error)}`);
+      toast.err(tr("Could not save proxy order: {0}", String(error)));
     }
   };
 
@@ -3590,34 +3695,34 @@ function ProxiesView() {
       onDragEnd={handleProxyDragEnd}
     >
     <section className="page workspace-page">
-      <Topbar crumbs={["Proxylist", "Proxies"]} search={search} onSearch={setSearch} />
+      <Topbar crumbs={[tr("Proxylist"), tr("Proxies")]} search={search} onSearch={setSearch} />
       <div className="page-title">
-        <h1>Proxies</h1>
+        <h1>{tr("Proxies")}</h1>
         <div className="page-actions">
           {proxySel.size > 0 && (
             <div className="bulk-bar bulk-bar-floating">
-              <span>{proxySel.size} selected</span>
-              <button className="btn-ghost btn-sm" onClick={bulkTest}><Icon.Refresh /> Test</button>
-              <button className="btn-ghost btn-sm" onClick={bulkExport}><Icon.Upload /> Export</button>
+              <span>{proxySel.size}  {tr("selected")}</span>
+              <button className="btn-ghost btn-sm" onClick={bulkTest}><Icon.Refresh />  {tr("Test")}</button>
+              <button className="btn-ghost btn-sm" onClick={bulkExport}><Icon.Upload />  {tr("Export")}</button>
               <button
                 className="btn-ghost btn-sm"
                 onClick={bulkDelete}
                 disabled={selectedHasLockedProxy}
-                title={selectedHasLockedProxy ? "Stop browsers using selected proxies before deleting" : "Delete selected proxies"}
-              ><Icon.Trash /> Delete</button>
+                title={selectedHasLockedProxy ? tr("Stop browsers using selected proxies before deleting") : tr("Delete selected proxies")}
+              ><Icon.Trash />  {tr("Delete")}</button>
             </div>
           )}
-          <button className="btn-ghost" onClick={bulkImportClipboard} title="Import proxies from the clipboard"><Icon.Download /> Import</button>
-          <button className="btn-primary" onClick={() => setBulkOpen(true)}>+ New proxy</button>
+          <button className="btn-ghost" onClick={bulkImportClipboard} title={tr("Import proxies from the clipboard")}><Icon.Download />  {tr("Import")}</button>
+          <button className="btn-primary" onClick={() => setBulkOpen(true)}>{tr("+ New proxy")}</button>
         </div>
       </div>
       <div className="rows">
         <div className="rows-head p-cols">
-          <div className="sort-head" title="Drag rows to reorder"><Icon.Grip /></div>
+          <div className="sort-head" title={tr("Drag rows to reorder")}><Icon.Grip /></div>
           <div>
             <input
               type="checkbox"
-              title="Select all on this page"
+              title={tr("Select all on this page")}
               // Page-only header toggle (matches profile table behaviour).
               checked={pagedProxies.length > 0 && pagedProxies.every((p) => proxySel.has(p.id))}
               ref={(el) => {
@@ -3639,7 +3744,7 @@ function ProxiesView() {
               }}
             />
           </div>
-          <div>Name</div><div>Type</div><div>Host:Port</div><div>Country</div><div>Profiles</div><div>Test result</div><div className="head-actions">ACTIONS</div>
+          <div>{tr("Name")}</div><div>{tr("Type")}</div><div>{tr("Host:Port")}</div><div>{tr("Country")}</div><div>{tr("Profiles")}</div><div>{tr("Test result")}</div><div className="head-actions">{tr("ACTIONS")}</div>
         </div>
         <SortableContext items={pagedProxies.map((proxy) => proxy.id)} strategy={verticalListSortingStrategy}>
         {pagedProxies.map((p) => {
@@ -3658,24 +3763,24 @@ function ProxiesView() {
               className="row-wrap"
               rowClassName="row p-cols proxy-data-row"
               dropPlacement={proxySortIndicator?.id === p.id ? proxySortIndicator.placement : null}
-              disabledReason={isLocked ? "Stop the browser using this proxy before reordering" : search.trim() ? "Clear search to reorder proxies" : renaming?.id === p.id ? "Finish renaming before reordering" : undefined}
+              disabledReason={isLocked ? tr("Stop the browser using this proxy before reordering") : search.trim() ? tr("Clear search to reorder proxies") : renaming?.id === p.id ? tr("Finish renaming before reordering") : undefined}
               onContextMenu={(e) =>
                 ctx.open(e, [
-                  { label: "Test (TCP/UDP/geo)", onClick: () => fullTest(p) },
-                  { label: "View details", onClick: () => setInfoFor({ proxy: p, anchor: { x: e.clientX, y: e.clientY } }) },
+                  { label: tr("Test (TCP/UDP/geo)"), onClick: () => fullTest(p) },
+                  { label: tr("View details"), onClick: () => setInfoFor({ proxy: p, anchor: { x: e.clientX, y: e.clientY } }) },
                   {
-                    label: "Edit",
+                    label: tr("Edit"),
                     onClick: () => setEditing(p),
                     disabled: isLocked,
-                    title: isLocked ? "Stop the browser using this proxy before editing" : "Edit proxy",
+                    title: isLocked ? tr("Stop the browser using this proxy before editing") : tr("Edit proxy"),
                   },
                   { sep: true, label: "", onClick: () => {} },
                   {
-                    label: "Delete",
+                    label: tr("Delete"),
                     onClick: () => remove(p.id),
                     danger: true,
                     disabled: isLocked,
-                    title: isLocked ? "Stop the browser using this proxy before deleting" : "Delete proxy",
+                    title: isLocked ? tr("Stop the browser using this proxy before deleting") : tr("Delete proxy"),
                   },
                 ])
               }
@@ -3710,7 +3815,7 @@ function ProxiesView() {
                     <span
                       className={isLocked ? "cell-locked" : "cell-click"}
                       onClick={isLocked ? undefined : () => setRenaming({ id: p.id, draft: p.name })}
-                      title={isLocked ? "Stop the browser using this proxy before renaming" : "Click to rename"}
+                      title={isLocked ? tr("Stop the browser using this proxy before renaming") : tr("Click to rename")}
                     >
                       {p.name || "—"}
                     </span>
@@ -3721,7 +3826,7 @@ function ProxiesView() {
                   <span
                     className={`mono small ${isLocked ? "cell-locked" : "cell-click"}`}
                     onClick={isLocked ? undefined : () => setEditing(p)}
-                    title={isLocked ? "Stop the browser using this proxy before editing" : "Edit proxy"}
+                    title={isLocked ? tr("Stop the browser using this proxy before editing") : tr("Edit proxy")}
                   >
                     {p.host}:{p.port}
                   </span>
@@ -3736,20 +3841,20 @@ function ProxiesView() {
                   <span className="proxy-city muted small">{r?.city.trim() || "—"}</span>
                 </div>
                 <div>
-                  <span className="profile-count" title={`${profileCountByProxy[p.id] ?? 0} profile(s) bound to this proxy`}>
+                  <span className="profile-count" title={tr("{0} profile(s) bound to this proxy", profileCountByProxy[p.id] ?? 0)}>
                     {profileCountByProxy[p.id] ?? 0}
                   </span>
                 </div>
                 <div className="proxy-test-cell">
-                  {!r && !isBusy && <span className="muted small">not tested</span>}
-                  {isBusy && <span className="muted small">testing…</span>}
+                  {!r && !isBusy && <span className="muted small">{tr("not tested")}</span>}
+                  {isBusy && <span className="muted small">{tr("testing…")}</span>}
                   {r && !isBusy && (
                     <div className="proxy-test">
                       <span
                         className={`status-pill ${isActive ? "status-active" : "status-failed status-unavailable"}`}
-                        title={isActive ? `TCP ${r.tcp_ms} ms` : (testFailure ?? "Proxy test failed")}
+                        title={isActive ? `TCP ${r.tcp_ms} ms` : (testFailure ?? tr("Proxy test failed"))}
                       >
-                        {isActive ? "Active" : "Failed"}
+                        {isActive ? tr("Active") : tr("Failed")}
                       </span>
                       {/* UDP remains a proxy capability used by WebRTC policy
                           and diagnostics. QUIC is disabled independently for
@@ -3758,7 +3863,7 @@ function ProxiesView() {
                         <button
                           type="button"
                           className="status-pill status-udp status-link"
-                          title={`UDP relay works (${r.udp_ms} ms) — QUIC remains disabled by launcher policy. Click for docs.`}
+                          title={tr("UDP relay works ({0} ms) — QUIC remains disabled by launcher policy. Click for docs.", r.udp_ms)}
                           onClick={() => { openUrl(UDP_DOCS_URL).catch(() => {}); }}
                         >
                           UDP
@@ -3768,7 +3873,7 @@ function ProxiesView() {
                         <button
                           type="button"
                           className="status-pill status-no-udp status-unavailable status-link"
-                          title="No UDP support — WebRTC cannot use a proxied UDP relay; QUIC remains disabled. Click for docs."
+                          title={tr("No UDP support — WebRTC cannot use a proxied UDP relay; QUIC remains disabled. Click for docs.")}
                           onClick={() => { openUrl(UDP_DOCS_URL).catch(() => {}); }}
                         >
                           UDP
@@ -3784,20 +3889,20 @@ function ProxiesView() {
                   <button
                     className="icon-btn"
                     onClick={(e) => setInfoFor({ proxy: p, anchor: { x: e.clientX, y: e.clientY } })}
-                    title="Details + history"
+                    title={tr("Details + history")}
                   ><Icon.Info /></button>
-                  <button className="icon-btn" onClick={() => fullTest(p)} disabled={isBusy} title="Test TCP + UDP + geo"><Icon.Refresh /></button>
+                  <button className="icon-btn" onClick={() => fullTest(p)} disabled={isBusy} title={tr("Test TCP + UDP + geo")}><Icon.Refresh /></button>
                   <button
                     className="icon-btn"
                     onClick={() => setEditing(p)}
                     disabled={isLocked}
-                    title={isLocked ? "Stop the browser using this proxy before editing" : "Edit"}
+                    title={isLocked ? tr("Stop the browser using this proxy before editing") : tr("Edit")}
                   ><Icon.Edit /></button>
                   <button
                     className="icon-btn danger"
                     onClick={() => remove(p.id)}
                     disabled={isLocked}
-                    title={isLocked ? "Stop the browser using this proxy before deleting" : "Delete"}
+                    title={isLocked ? tr("Stop the browser using this proxy before deleting") : tr("Delete")}
                   ><Icon.Trash /></button>
                 </div>
             </SortableRow>
@@ -3807,10 +3912,10 @@ function ProxiesView() {
         {proxies.length === 0 && (
           <div className="empty-rich">
             <div className="empty-shard"><IconWire /></div>
-            <h3>No proxies yet</h3>
-            <p>Add a SOCKS5/HTTP(S) endpoint so profiles can route through it.</p>
+            <h3>{tr("No proxies yet")}</h3>
+            <p>{tr("Add a SOCKS5/HTTP(S) endpoint so profiles can route through it.")}</p>
             <div className="empty-cta">
-              <button className="btn-primary" onClick={() => setBulkOpen(true)}>+ New proxy</button>
+              <button className="btn-primary" onClick={() => setBulkOpen(true)}>{tr("+ New proxy")}</button>
             </div>
           </div>
         )}
@@ -3822,14 +3927,14 @@ function ProxiesView() {
             direction="previous"
             disabled={proxyPage <= 1}
             onClick={() => setProxyPage((p) => Math.max(1, p - 1))}
-          >‹ Prev</PageDropButton>
-          <span className="pager-info">Page {proxyPage} of {proxyPageCount} · {proxies.length} proxies</span>
+          >{tr("‹ Prev")}</PageDropButton>
+          <span className="pager-info">{tr("Page")} {proxyPage}  {tr("of")} {proxyPageCount} · {tr("{0} proxies", proxies.length)}</span>
           <PageDropButton
             dropId="proxy-page-next"
             direction="next"
             disabled={proxyPage >= proxyPageCount}
             onClick={() => setProxyPage((p) => Math.min(proxyPageCount, p + 1))}
-          >Next ›</PageDropButton>
+          >{tr("Next ›")}</PageDropButton>
         </div>
       )}
       {editing && <ProxyEditor initial={editing} onClose={() => { setEditing(null); reload(); }} />}
@@ -3929,12 +4034,12 @@ function ProxyInfoPopover({
             </div>
           </>
         ) : (
-          <div className="muted small">Not tested yet — click ↻ on the row.</div>
+          <div className="muted small">{tr("Not tested yet — click ↻ on the row.")}</div>
         )}
       </div>
-      <div className="popover-divider">IP HISTORY</div>
+      <div className="popover-divider">{tr("IP HISTORY")}</div>
       <div className="popover-history">
-        {history.length === 0 && <div className="muted small" style={{ padding: "10px 0" }}>No history yet</div>}
+        {history.length === 0 && <div className="muted small" style={{ padding: "10px 0" }}>{tr("No history yet")}</div>}
         {history.map((s, i) => (
           <div key={`${s.ip}-${s.first_seen}-${i}`} className="history-item">
             <div className="hi-head">
@@ -4015,7 +4120,7 @@ function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
   const [skipped, setSkipped] = useState({ duplicateLines: 0, existingDuplicates: 0 });
 
   const parse = async () => {
-    if (!text.trim()) { toast.err("Nothing to parse"); return; }
+    if (!text.trim()) { toast.err(tr("Nothing to parse")); return; }
     try {
       const preview = await invoke<ProxyBulkParsePreview>("proxy_bulk_parse", { text, kind });
       setParseIssues(preview.invalid);
@@ -4024,17 +4129,17 @@ function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
         existingDuplicates: preview.existing_duplicates,
       });
       if (preview.invalid.length > 0) {
-        toast.err(`Fix ${preview.invalid.length} invalid proxy line${preview.invalid.length === 1 ? "" : "s"}`);
+        toast.err(tr("Fix {0} invalid proxy line{1}", preview.invalid.length, preview.invalid.length === 1 ? "" : "s"));
         return;
       }
       const duplicateCount = preview.duplicate_lines + preview.existing_duplicates;
       if (preview.entries.length === 0) {
-        toast.info(duplicateCount > 0 ? "No new proxies: every valid line is a duplicate" : "No valid proxy lines found");
+        toast.info(duplicateCount > 0 ? tr("No new proxies: every valid line is a duplicate") : tr("No valid proxy lines found"));
         return;
       }
       setRows(preview.entries.map((entry) => ({ entry, selected: true, status: "idle" })));
       if (duplicateCount > 0) {
-        toast.info(`Skipped ${duplicateCount} duplicate proxy line${duplicateCount === 1 ? "" : "s"}`);
+        toast.info(tr("Skipped {0} duplicate proxy line{1}", duplicateCount, duplicateCount === 1 ? "" : "s"));
       }
     } catch (e) { toast.err(String(e)); }
   };
@@ -4077,7 +4182,7 @@ function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
             return {
               ...row,
               status: "incomplete",
-              error: result.error ?? "Proxy test failed",
+              error: result.error ?? tr("Proxy test failed"),
             };
           }
           const failure = proxyTestFailureReason(snap);
@@ -4103,14 +4208,14 @@ function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
 
   const saveSelected = async () => {
     const entries = rows.filter((r) => r.selected).map((r) => r.entry);
-    if (entries.length === 0) { toast.err("Nothing selected"); return; }
+    if (entries.length === 0) { toast.err(tr("Nothing selected")); return; }
     try {
       const n = await invoke<number>("proxy_bulk_save", { entries });
       const skippedOnSave = entries.length - n;
       if (skippedOnSave > 0) {
-        toast.info(`Imported ${n}; skipped ${skippedOnSave} duplicate${skippedOnSave === 1 ? "" : "s"}`);
+        toast.info(tr("Imported {0}; skipped {1} duplicate{2}", n, skippedOnSave, skippedOnSave === 1 ? "" : "s"));
       } else {
-        toast.ok(`Imported ${n} prox${n === 1 ? "y" : "ies"}`);
+        toast.ok(tr("Imported {0} prox{1}", n, n === 1 ? "y" : "ies"));
       }
       onClose();
     } catch (e) { toast.err(String(e)); }
@@ -4124,14 +4229,14 @@ function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
     <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
       <div className="dialog dialog-wide">
         <header className="dialog-head">
-          <h2><ShardMini /> Bulk import proxies</h2>
+          <h2><ShardMini />  {tr("Bulk import proxies")}</h2>
           <button className="icon-btn" onClick={onClose}>✕</button>
         </header>
         <div className="dialog-body">
           {rows.length === 0 ? (
             <>
               <label>
-                <span className="lbl">Default type (used when a line has no scheme)</span>
+                <span className="lbl">{tr("Default type (used when a line has no scheme)")}</span>
                 <select value={kind} onChange={(e) => setKind(e.target.value as ProxyEntry["kind"])}>
                   <option value="socks5">SOCKS5</option>
                   <option value="http">HTTP</option>
@@ -4139,7 +4244,7 @@ function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
                 </select>
               </label>
               <label>
-                <span className="lbl">Paste one proxy per line</span>
+                <span className="lbl">{tr("Paste one proxy per line")}</span>
                 <textarea
                   rows={12}
                   className="mono"
@@ -4157,22 +4262,21 @@ host:8080               # no auth
                 />
               </label>
               <p className="muted small">
-                Invalid lines must be fixed. Duplicates use type, host, port, and username and are skipped automatically.
-              </p>
+                 {tr("Invalid lines must be fixed. Duplicates use type, host, port, and username and are skipped automatically.")} </p>
               {parseIssues.length > 0 && (
                 <div className="bulk-parse-errors" role="alert">
-                  <strong>Invalid proxy format</strong>
+                  <strong>{tr("Invalid proxy format")}</strong>
                   <ul>
                     {parseIssues.slice(0, 6).map((issue) => (
-                      <li key={`${issue.line}:${issue.reason}`}>Line {issue.line}: {issue.reason}</li>
+                      <li key={`${issue.line}:${issue.reason}`}>{tr("Line")} {issue.line}: {issue.reason}</li>
                     ))}
-                    {parseIssues.length > 6 && <li>And {parseIssues.length - 6} more invalid lines</li>}
+                    {parseIssues.length > 6 && <li>{tr("And")} {parseIssues.length - 6}  {tr("more invalid lines")}</li>}
                   </ul>
                 </div>
               )}
               {skippedCount > 0 && rows.length === 0 && (
                 <div className="bulk-dedupe-note">
-                  Found {skippedCount} duplicate{skippedCount === 1 ? "" : "s"}: {skipped.duplicateLines} repeated in this input, {skipped.existingDuplicates} already saved. They will not be imported.
+                  {tr("Found {0} duplicates: {1} repeated in this input, {2} already saved. They will not be imported.", skippedCount, skipped.duplicateLines, skipped.existingDuplicates)}
                 </div>
               )}
             </>
@@ -4187,7 +4291,7 @@ host:8080               # no auth
                       setRows((rs) => rs.map((r) => ({ ...r, selected: e.target.checked })))
                     }
                   />
-                  <span>{selCount} of {rows.length} selected</span>
+                  <span>{selCount}  {tr("of")} {rows.length}  {tr("selected")}</span>
                 </label>
                 <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
                   <button
@@ -4196,9 +4300,9 @@ host:8080               # no auth
                       setRows([]);
                       setSkipped({ duplicateLines: 0, existingDuplicates: 0 });
                     }}
-                  >← Back</button>
+                  >{tr("← Back")}</button>
                   <button className="btn-ghost btn-sm" onClick={testAll} disabled={busy}>
-                    {busy ? "Testing…" : <><Icon.Refresh /> Test all</>}
+                    {busy ? tr("Testing…") : <><Icon.Refresh />  {tr("Test all")}</>}
                   </button>
                   <button
                     className="btn-ghost btn-sm"
@@ -4207,16 +4311,15 @@ host:8080               # no auth
                         rs.map((r) => ({ ...r, selected: r.status === "ok" }))
                       )
                     }
-                    title="Tick only proxies whose latest test succeeded"
+                    title={tr("Tick only proxies whose latest test succeeded")}
                   >
-                    ✓ Keep working only
-                  </button>
+                     {tr("✓ Keep working only")} </button>
                 </div>
               </div>
               {skippedCount > 0 && (
                 <div className="bulk-dedupe-note">
-                  Skipped {skippedCount} duplicate{skippedCount === 1 ? "" : "s"}
-                  {skipped.existingDuplicates > 0 ? ` (${skipped.existingDuplicates} already saved)` : ""}.
+                  {tr("Skipped {0} duplicates", skippedCount)}
+                  {skipped.existingDuplicates > 0 ? tr(" ({0} already saved)", skipped.existingDuplicates) : ""}.
                 </div>
               )}
               <div className="bulk-preview-list">
@@ -4235,13 +4338,13 @@ host:8080               # no auth
                       {r.entry.username && <span className="muted"> · {r.entry.username}</span>}
                     </span>
                     <div className="bulk-status">
-                      {r.status === "idle" && <span className="muted small">not tested</span>}
-                      {r.status === "testing" && <span className="muted small">testing…</span>}
+                      {r.status === "idle" && <span className="muted small">{tr("not tested")}</span>}
+                      {r.status === "testing" && <span className="muted small">{tr("testing…")}</span>}
                       {r.status === "ok" && (
                         <>
-                          <span className="status-pill status-active" title={`TCP ${r.tcp_ms} ms`}>Active</span>
+                          <span className="status-pill status-active" title={`TCP ${r.tcp_ms} ms`}>{tr("Active")}</span>
                           {r.entry.kind === "socks5" && r.udp_ms != null && (
-                            <span className="status-pill status-udp" title={`UDP relay works (${r.udp_ms} ms)`}>UDP</span>
+                            <span className="status-pill status-udp" title={tr("UDP relay works ({0} ms)", r.udp_ms)}>UDP</span>
                           )}
                           {r.country && (
                             <span className="bulk-country">
@@ -4252,13 +4355,13 @@ host:8080               # no auth
                         </>
                       )}
                       {r.status === "fail" && (
-                        <span className="status-pill status-failed status-unavailable" title={r.error}>Failed</span>
+                        <span className="status-pill status-failed status-unavailable" title={r.error}>{tr("Failed")}</span>
                       )}
                       {r.status === "incomplete" && (
-                        <span className="status-pill" title={r.error}>Incomplete</span>
+                        <span className="status-pill" title={r.error}>{tr("Incomplete")}</span>
                       )}
                     </div>
-                    <button className="btn-sm btn-ghost icon-only" onClick={() => testOne(i)} disabled={r.status === "testing"} title="Test this row"><Icon.Refresh /></button>
+                    <button className="btn-sm btn-ghost icon-only" onClick={() => testOne(i)} disabled={r.status === "testing"} title={tr("Test this row")}><Icon.Refresh /></button>
                   </div>
                 ))}
               </div>
@@ -4266,12 +4369,12 @@ host:8080               # no auth
           )}
         </div>
         <footer className="dialog-foot">
-          <button className="btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn-ghost" onClick={onClose}>{tr("Cancel")}</button>
           {rows.length === 0 ? (
-            <button className="btn-primary" onClick={parse}><ShardMini /> Parse →</button>
+            <button className="btn-primary" onClick={parse}><ShardMini />  {tr("Parse →")}</button>
           ) : (
             <button className="btn-primary" onClick={saveSelected}>
-              <ShardMini /> Import {selCount}
+              <ShardMini />  {tr("Import")} {selCount}
             </button>
           )}
         </footer>
@@ -4299,7 +4402,7 @@ function ProxyEditor({ initial, onClose }: { initial: ProxyEntry; onClose: () =>
         credentials,
       };
       await invoke("proxy_save", { entry: request });
-      toast.ok(initial.id ? "Proxy saved" : "Proxy added");
+      toast.ok(initial.id ? tr("Proxy saved") : tr("Proxy added"));
       onClose();
     } catch (e) { toast.err(String(e)); }
   };
@@ -4311,27 +4414,27 @@ function ProxyEditor({ initial, onClose }: { initial: ProxyEntry; onClose: () =>
     <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
       <div className="dialog">
         <header className="dialog-head">
-          <h2><ShardMini /> {initial.id ? "Edit proxy" : "New proxy"}</h2>
+          <h2><ShardMini /> {initial.id ? tr("Edit proxy") : tr("New proxy")}</h2>
           <button className="icon-btn" onClick={onClose}>✕</button>
         </header>
         <div className="dialog-body">
-          <Field label="Name" value={p.name} onChange={(v: string) => setP({ ...p, name: v })} />
+          <Field label={tr("Name")} value={p.name} onChange={(v: string) => setP({ ...p, name: v })} />
           <div className="form-row">
             <label>
-              <span className="lbl">Type</span>
+              <span className="lbl">{tr("Type")}</span>
               <select value={p.kind} onChange={(e) => setP({ ...p, kind: e.target.value as ProxyEntry["kind"] })}>
                 <option value="socks5">SOCKS5</option><option value="http">HTTP</option><option value="https">HTTPS</option>
               </select>
             </label>
-            <Field label="Country" value={p.country} onChange={(v: string) => setP({ ...p, country: v })} />
+            <Field label={tr("Country")} value={p.country} onChange={(v: string) => setP({ ...p, country: v })} />
           </div>
           <div className="form-row">
-            <Field label="Host" value={p.host} onChange={(v: string) => setP({ ...p, host: v })} />
-            <NumField label="Port" value={p.port} onChange={(v) => setP({ ...p, port: v as any })} />
+            <Field label={tr("Host")} value={p.host} onChange={(v: string) => setP({ ...p, host: v })} />
+            <NumField label={tr("Port")} value={p.port} onChange={(v) => setP({ ...p, port: v as any })} />
           </div>
           <div className="form-row">
             <Field
-              label="Username"
+              label={tr("Username")}
               value={p.username ?? ""}
               onChange={(v: string) => {
                 setP({ ...p, username: v, credentials_unavailable: false });
@@ -4339,7 +4442,7 @@ function ProxyEditor({ initial, onClose }: { initial: ProxyEntry; onClose: () =>
               }}
             />
             <Field
-              label="Password"
+              label={tr("Password")}
               value={p.password ?? ""}
               onChange={(v: string) => {
                 setP({ ...p, password: v, credentials_unavailable: false });
@@ -4349,13 +4452,13 @@ function ProxyEditor({ initial, onClose }: { initial: ProxyEntry; onClose: () =>
             />
           </div>
           {(p.credentials_configured || p.credentials_unavailable) && credentialsMode === "keep" && (
-            <button className="btn-ghost" type="button" onClick={clearCredentials}>Clear saved credentials</button>
+            <button className="btn-ghost" type="button" onClick={clearCredentials}>{tr("Clear saved credentials")}</button>
           )}
-          {p.credentials_unavailable && credentialsMode === "keep" && <p className="muted small">Credentials belong to another Windows user. Re-enter both values before testing or launching.</p>}
+          {p.credentials_unavailable && credentialsMode === "keep" && <p className="muted small">{tr("Credentials belong to another Windows user. Re-enter both values before testing or launching.")}</p>}
         </div>
         <footer className="dialog-foot">
-          <button className="btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="btn-primary" onClick={save}><ShardMini /> Save</button>
+          <button className="btn-ghost" onClick={onClose}>{tr("Cancel")}</button>
+          <button className="btn-primary" onClick={save}><ShardMini />  {tr("Save")}</button>
         </footer>
       </div>
     </DialogBackdrop>
@@ -4373,17 +4476,17 @@ function FingerprintsView() {
   const use = async (id: string) => {
     try {
       const meta = await invoke<ProfileMeta>("profile_create_from_template", { templateId: id });
-      toast.ok(`Created "${meta.name}" — open Browsers to edit`);
+      toast.ok(tr("Created \"{0}\" — open Browsers to edit", meta.name));
     } catch (e) {
       toast.err(String(e));
     }
   };
 
   const remove = async (id: string) => {
-    if ((await confirmModal({ title: "Remove fingerprint", message: "Remove this fingerprint from the library?", danger: true })) !== true) return;
+    if ((await confirmModal({ title: tr("Remove fingerprint"), message: tr("Remove this fingerprint from the library?"), danger: true })) !== true) return;
     try {
       await invoke("fingerprint_delete", { id });
-      toast.ok("Removed");
+      toast.ok(tr("Removed"));
       reload();
     } catch (e) { toast.err(String(e)); }
   };
@@ -4393,16 +4496,16 @@ function FingerprintsView() {
       const txt = await pickJsonText();
       if (txt === null) return;
       const e = await invoke<FingerprintEntry>("fingerprint_import", { jsonText: txt, idHint: null });
-      toast.ok(`Imported "${e.label}"`);
+      toast.ok(tr("Imported \"{0}\"", e.label));
       reload();
     } catch (e) { toast.err(String(e)); }
   };
 
   return (
     <section className="page workspace-page">
-      <Topbar crumbs={["Library", "Fingerprints"]} search="" onSearch={() => {}} />
+      <Topbar crumbs={[tr("Library"), tr("Fingerprints")]} search="" onSearch={() => {}} />
       <div className="page-title">
-        <h1>Fingerprint Library</h1>
+        <h1>{tr("Fingerprint Library")}</h1>
         <div className="page-actions">
           <button
             className="btn-ghost"
@@ -4411,20 +4514,17 @@ function FingerprintsView() {
                 await invoke("open_fingerprint_dir");
               } catch (e) { toast.err(String(e)); }
             }}
-            title="Reveal the on-disk library folder; drop JSONs here to add them"
+            title={tr("Reveal the on-disk library folder; drop JSONs here to add them")}
           >
-            <Icon.Folder /> Library folder
-          </button>
-          <button className="btn-ghost" onClick={importJsonFile}><Icon.Folder /> Import from file</button>
-          <button className="btn-primary" onClick={() => setImporterOpen(true)}>+ Paste JSON</button>
+            <Icon.Folder />  {tr("Library folder")} </button>
+          <button className="btn-ghost" onClick={importJsonFile}><Icon.Folder />  {tr("Import from file")}</button>
+          <button className="btn-primary" onClick={() => setImporterOpen(true)}>{tr("+ Paste JSON")}</button>
         </div>
       </div>
       <p className="muted small" style={{ marginBottom: 14 }}>
-        These FingerprintConfig snapshots populate the <strong>GPU</strong> select in the profile editor.
-        Import your own from any working ShardX profile JSON to expand the list.
-      </p>
+         {tr("These FingerprintConfig snapshots populate the")} <strong>GPU</strong>  {tr("select in the profile editor. Import your own from any working ShardX profile JSON to expand the list.")} </p>
       {items.length === 0 ? (
-        <div className="empty">Library is empty — click "Import from file" or "Paste JSON".</div>
+        <div className="empty">{tr("Library is empty — click \"Import from file\" or \"Paste JSON\".")}</div>
       ) : (
         <LibraryGroups items={items} onUse={use} onRemove={remove} />
       )}
@@ -4463,7 +4563,7 @@ function LibraryGroups({
         <div key={platform} className="lib-group">
           <div className="lib-group-head">
             <span className={`lib-group-dot lib-dot-${platform.toLowerCase()}`} />
-            <h3>{platform}</h3>
+            <h3>{tr(platform)}</h3>
             <span className="lib-group-count">{list.length}</span>
           </div>
           <div className="lib-grid">
@@ -4479,10 +4579,10 @@ function LibraryGroups({
                 </div>
                 <div className="lib-gpu mono" title={t.gpu}>{t.gpu || "—"}</div>
                 <div className="lib-card-foot">
-                  <button className="btn-sm btn-ghost" onClick={() => onUse(t.id)}>Use →</button>
+                  <button className="btn-sm btn-ghost" onClick={() => onUse(t.id)}>{tr("Use →")}</button>
                   {t.builtin
-                    ? <span className="lib-tag">built-in</span>
-                    : <button className="btn-sm btn-ghost danger" onClick={() => onRemove(t.id)} title="Remove">✕</button>}
+                    ? <span className="lib-tag">{tr("built-in")}</span>
+                    : <button className="btn-sm btn-ghost danger" onClick={() => onRemove(t.id)} title={tr("Remove")}>✕</button>}
                 </div>
               </div>
             ))}
@@ -4499,7 +4599,7 @@ function FingerprintImporter({ onClose }: { onClose: () => void }) {
   const save = async () => {
     try {
       const e = await invoke<FingerprintEntry>("fingerprint_import", { jsonText: text, idHint: name || null });
-      toast.ok(`Imported "${e.label}"`);
+      toast.ok(tr("Imported \"{0}\"", e.label));
       onClose();
     } catch (e) { toast.err(String(e)); }
   };
@@ -4507,19 +4607,19 @@ function FingerprintImporter({ onClose }: { onClose: () => void }) {
     <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
       <div className="dialog dialog-wide">
         <header className="dialog-head">
-          <h2><ShardMini /> Paste FingerprintConfig JSON</h2>
+          <h2><ShardMini />  {tr("Paste FingerprintConfig JSON")}</h2>
           <button className="icon-btn" onClick={onClose}>✕</button>
         </header>
         <div className="dialog-body">
-          <Field label="Name (optional, becomes the file id)" value={name} onChange={setName} placeholder="e.g. mac-m4-pro-real" />
+          <Field label={tr("Name (optional, becomes the file id)")} value={name} onChange={setName} placeholder={tr("e.g. mac-m4-pro-real")} />
           <label>
-            <span className="lbl">Paste the full JSON</span>
+            <span className="lbl">{tr("Paste the full JSON")}</span>
             <textarea rows={14} className="mono" value={text} onChange={(e) => setText(e.target.value)} placeholder='{ "name": "...", "navigator": { ... }, "webgl": { ... }, ... }' />
           </label>
         </div>
         <footer className="dialog-foot">
-          <button className="btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="btn-primary" onClick={save}><ShardMini /> Import</button>
+          <button className="btn-ghost" onClick={onClose}>{tr("Cancel")}</button>
+          <button className="btn-primary" onClick={save}><ShardMini />  {tr("Import")}</button>
         </footer>
       </div>
     </DialogBackdrop>
@@ -4547,13 +4647,13 @@ function FolderModal({
     <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
       <div className="dialog">
         <header className="dialog-head">
-          <h2><ShardMini /> {mode === "move" ? "Move to folder" : "New folder"}</h2>
+          <h2><ShardMini /> {mode === "move" ? tr("Move to folder") : tr("New folder")}</h2>
           <button className="icon-btn" onClick={onClose}>✕</button>
         </header>
         <div className="dialog-body">
           {showList && (
             <>
-              <span className="lbl">Existing folders</span>
+              <span className="lbl">{tr("Existing folders")}</span>
               <div className="folder-pick-list">
                 {existing.map((f) => (
                   <button key={f} className="folder-pick" onClick={() => onPick(f)}>
@@ -4561,15 +4661,15 @@ function FolderModal({
                   </button>
                 ))}
               </div>
-              <div className="folder-pick-sep"><span>or create new</span></div>
+              <div className="folder-pick-sep"><span>{tr("or create new")}</span></div>
             </>
           )}
           <label>
-            <span className="lbl">{showList ? "New folder name" : "Folder name"}</span>
+            <span className="lbl">{showList ? tr("New folder name") : tr("Folder name")}</span>
             <input
               ref={ref}
               value={name}
-              placeholder="e.g. Shops, Socials, QA…"
+              placeholder={tr("e.g. Shops, Socials, QA…")}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") create();
@@ -4577,11 +4677,11 @@ function FolderModal({
               }}
             />
           </label>
-          {dup && <div className="muted small" style={{ color: "var(--err)" }}>Folder “{trimmed}” already exists.</div>}
+          {dup && <div className="muted small" style={{ color: "var(--err)" }}>{tr("Folder “")}{trimmed}{tr("” already exists.")}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 4 }}>
-            <button className="btn-ghost" onClick={onClose}>Cancel</button>
+            <button className="btn-ghost" onClick={onClose}>{tr("Cancel")}</button>
             <button className="btn-primary" disabled={!trimmed || dup} onClick={create}>
-              {showList ? "Create & move" : "Create"}
+              {showList ? tr("Create & move") : tr("Create")}
             </button>
           </div>
         </div>
@@ -4655,7 +4755,7 @@ function FirstRunGate({ children }: { children: ReactNode }) {
         const result = await invoke<RtStatus>("runtime_install", { force });
         if (cancelled) return;
         if (!result.installed || !result.fingerprints_installed || !result.widevine_installed) {
-          throw new Error("Browser runtime installation did not complete");
+          throw new Error(tr("Browser runtime installation did not complete"));
         }
         setProg(null);
         setPhase("ready");
@@ -4724,22 +4824,22 @@ function FirstRunGate({ children }: { children: ReactNode }) {
 
   const copy = phase === "checking"
     ? {
-        title: "Starting ShardX",
-        description: "Checking the local browser runtime…",
+        title: tr("Starting ShardX"),
+        description: tr("Checking the local browser runtime…"),
       }
     : phase === "repair-required"
       ? {
-          title: "Browser runtime needs repair",
-          description: "Required local files are missing or incomplete. Nothing will be downloaded until you choose Repair.",
+          title: tr("Browser runtime needs repair"),
+          description: tr("Required local files are missing or incomplete. Nothing will be downloaded until you choose Repair."),
         }
       : installMode === "repair"
         ? {
-            title: "Repairing ShardX browser",
-            description: "Restoring missing browser runtime files.",
+            title: tr("Repairing ShardX browser"),
+            description: tr("Restoring missing browser runtime files."),
           }
         : {
-            title: "Setting up ShardX browser",
-            description: "Downloading the browser runtime for this installation.",
+            title: tr("Setting up ShardX browser"),
+            description: tr("Downloading the browser runtime for this installation."),
           };
 
   return (
@@ -4752,13 +4852,13 @@ function FirstRunGate({ children }: { children: ReactNode }) {
         {prog && (
           <div className="runtime-progress-wrap">
             <div className="runtime-progress-label">
-              <span>{prog.label}</span>
+              <span>{tr(prog.label)}</span>
               <span>
                 {prog.phase === "download"
                   ? prog.total > 0
                     ? `${fmt(prog.received)} / ${fmt(prog.total)} (${prog.percent}%)`
-                    : "Starting download…"
-                  : "Extracting…"}
+                    : tr("Starting download…")
+                  : tr("Extracting…")}
               </span>
             </div>
             <div className="runtime-progress-track">
@@ -4769,15 +4869,14 @@ function FirstRunGate({ children }: { children: ReactNode }) {
         {!prog && !err && phase === "installing" && (
           <div className="runtime-gate-status">
             <span className="runtime-spinner" aria-hidden="true" />
-            Preparing browser runtime…
-          </div>
+             {tr("Preparing browser runtime…")} </div>
         )}
         {err && (
           <div className="runtime-gate-error">{err}</div>
         )}
         {phase === "repair-required" && (
           <button className="btn-primary runtime-repair-btn" onClick={() => setRepairAttempt((attempt) => attempt + 1)}>
-            <Icon.Refresh /> {err ? "Retry browser runtime repair" : "Repair browser runtime"}
+            <Icon.Refresh /> {err ? tr("Retry browser runtime repair") : tr("Repair browser runtime")}
           </button>
         )}
       </div>
@@ -4826,14 +4925,14 @@ function RuntimeUpdateRow({
   updating?: boolean;
 }) {
   const status = tone === "current"
-    ? "Up to date"
+    ? tr("Up to date")
     : tone === "available"
-      ? "Update available"
+      ? tr("Update available")
       : tone === "missing"
-        ? "Missing files"
+        ? tr("Missing files")
         : tone === "unavailable"
-          ? "Check unavailable"
-          : "Not checked";
+          ? tr("Check unavailable")
+          : tr("Not checked");
   return (
     <div className="runtime-update-row">
       <div className="runtime-update-copy">
@@ -4860,7 +4959,7 @@ function RuntimeUpdateRow({
             onClick={onUpdate}
             disabled={updating}
           >
-            {updating ? "Updating…" : "Update"}
+            {updating ? tr("Updating…") : tr("Update")}
           </button>
         )}
         <span className={`runtime-update-state runtime-update-${tone}`}>{status}</span>
@@ -4933,9 +5032,9 @@ function RuntimeUpdateCard() {
 
   const chromiumDetail = result
     ? result.chromium_installed
-      ? `Installed ${result.chromium_installed_version ?? "unknown"} · Latest ${result.chromium_latest_version ?? "unknown"}`
-      : "The local Chromium runtime is incomplete."
-    : "Compare the installed browser engine with the latest runtime manifest.";
+      ? tr("Installed {0} · Latest {1}", result.chromium_installed_version ?? "unknown", result.chromium_latest_version ?? "unknown")
+      : tr("The local Chromium runtime is incomplete.")
+    : tr("Compare the installed browser engine with the latest runtime manifest.");
   const lastAttempt = snapshot?.last_attempt_at ?? null;
   const lastSuccess = snapshot?.last_success_at ?? null;
   const checkError = snapshot?.error ?? null;
@@ -4944,25 +5043,24 @@ function RuntimeUpdateCard() {
     <div className="card settings-card runtime-update-card">
       <div className="runtime-update-head">
         <div className="settings-card-heading">
-          <h3>Runtime update check</h3>
+          <h3>{tr("Runtime update check")}</h3>
           <p className="muted small">
-            Checks run automatically at startup and every hour. Updates download and install only when you click Update.
-          </p>
+             {tr("Checks run automatically at startup and every hour. Updates download and install only when you click Update.")} </p>
           <p className="runtime-update-last-check">
             {lastAttempt
-              ? `Last checked ${fmtTs(lastAttempt)}`
-              : "No update check has completed yet."}
-            {lastSuccess && lastSuccess !== lastAttempt ? ` Last successful result ${fmtTs(lastSuccess)}.` : ""}
+              ? tr("Last checked {0}", fmtTs(lastAttempt))
+              : tr("No update check has completed yet.")}
+            {lastSuccess && lastSuccess !== lastAttempt ? tr(" Last successful result {0}.", fmtTs(lastSuccess)) : ""}
           </p>
         </div>
         <button className="btn-ghost runtime-update-check" onClick={check} disabled={checking}>
-          <Icon.Refresh /> {checking ? "Checking…" : "Check for updates"}
+          <Icon.Refresh /> {checking ? tr("Checking…") : tr("Check for updates")}
         </button>
       </div>
 
       <div className="runtime-update-list">
         <RuntimeUpdateRow
-          label="Chromium browser runtime"
+          label={tr("Chromium browser runtime")}
           detail={chromiumDetail}
           url={result?.chromium_download_url}
           tone={tone(result?.chromium_installed ?? true, result?.chromium_update_available ?? false)}
@@ -4970,12 +5068,12 @@ function RuntimeUpdateCard() {
           updating={updating === "chromium"}
         />
         <RuntimeUpdateRow
-          label="Fingerprint library"
+          label={tr("Fingerprint library")}
           detail={result?.fingerprints_installed === false
-            ? "The bundled fingerprint templates are incomplete."
+            ? tr("The bundled fingerprint templates are incomplete.")
             : result?.fingerprints_check_available === false
-              ? "Unable to confirm the latest fingerprint archive."
-              : "Bundled multi-platform fingerprint templates."}
+              ? tr("Unable to confirm the latest fingerprint archive.")
+              : tr("Bundled multi-platform fingerprint templates.")}
           url={result?.fingerprints_download_url}
           tone={tone(
             result?.fingerprints_installed ?? true,
@@ -4988,10 +5086,10 @@ function RuntimeUpdateCard() {
         <RuntimeUpdateRow
           label="Widevine CDM"
           detail={result?.widevine_installed === false
-            ? "Required Widevine runtime files are incomplete."
+            ? tr("Required Widevine runtime files are incomplete.")
             : result?.widevine_check_available === false
-              ? "Unable to confirm the latest Widevine archive."
-              : "DRM component bundled with the browser runtime."}
+              ? tr("Unable to confirm the latest Widevine archive.")
+              : tr("DRM component bundled with the browser runtime.")}
           url={result?.widevine_download_url}
           tone={tone(
             result?.widevine_installed ?? true,
@@ -5005,13 +5103,12 @@ function RuntimeUpdateCard() {
 
       {checkError && (
         <div className="runtime-update-error">
-          {lastAttempt ? `Last check failed ${fmtTs(lastAttempt)}: ` : "Last check failed: "}{checkError}
+          {lastAttempt ? tr("Last check failed {0}: ", fmtTs(lastAttempt)) : tr("Last check failed: ")}{checkError}
         </div>
       )}
       {actionError && <div className="runtime-update-error">{actionError}</div>}
       <div className="runtime-update-note">
-        ShardX Launcher itself is excluded from update checks. Engine and Widevine updates stop running browsers first.
-      </div>
+         {tr("ShardX Launcher itself is excluded from update checks. Engine and Widevine updates stop running browsers first.")} </div>
     </div>
   );
 }
@@ -5027,20 +5124,21 @@ function VersionPill() {
       type="button"
       className="version-pill"
       disabled
-      title={version ? `Running ${version}` : "Version unavailable"}
+      title={version ? tr("Running {0}", version) : tr("Version unavailable")}
     >
       <ShardMini />
       <div className="version-pill-text">
         <div className="version-pill-current">
           ShardX Launcher v{version ?? "…"}
         </div>
-        <div className="version-pill-sub">update checks disabled</div>
+        <div className="version-pill-sub">{tr("update checks disabled")}</div>
       </div>
     </button>
   );
 }
 
 function SettingsView() {
+  const language = useLanguage();
   const [s, setS] = useState<Settings>({
     theme: "dark",
     geo_checker: "ipwho.is",
@@ -5061,7 +5159,7 @@ function SettingsView() {
       const refreshed = await invoke<Settings>("settings_get");
       setS(refreshed);
       setSaved(refreshed);
-      toast.ok("Token regenerated");
+      toast.ok(tr("Token regenerated"));
     }
     catch (e) { toast.err(String(e)); }
   };
@@ -5072,61 +5170,65 @@ function SettingsView() {
     setMcpBusy(true);
     try {
       const path = await invoke<string>("mcp_download");
-      toast.ok(`MCP downloaded to ${path}`);
-    } catch (e) { toast.err("MCP download failed: " + String(e)); }
+      toast.ok(tr("MCP downloaded to {0}", path));
+    } catch (e) { toast.err(tr("MCP download failed: ") + String(e)); }
     finally { setMcpBusy(false); }
   };
   const save = async () => {
-    try { await invoke("settings_save", { value: s }); setSaved(s); toast.ok("Settings saved"); }
+    try { await invoke("settings_save", { value: s }); setSaved(s); toast.ok(tr("Settings saved")); }
     catch (e) { toast.err(String(e)); }
   };
   const settingsDirty = saved !== null && JSON.stringify(s) !== JSON.stringify(saved);
   return (
     <section className="page settings-page">
-      <Topbar crumbs={["System", "Settings"]} search="" onSearch={() => {}} />
-      <div className="page-title"><h1>Settings</h1></div>
+      <Topbar crumbs={[tr("System"), tr("Settings")]} search="" onSearch={() => {}} />
+      <div className="page-title"><h1>{tr("Settings")}</h1></div>
 
       <div className="settings-card-list">
         <div className="card settings-card">
-          <h3>Proxy geo checker</h3>
-          <p className="muted small">Preferred free public IP-geo service for manual and scheduled proxy tests. If it times out, returns HTTP 429, or sends invalid JSON, ShardX automatically tries the next provider.</p>
+          <h3>{tr("Interface language")}</h3>
+          <p className="muted small">{tr("Language changes apply immediately and are saved on this device.")}</p>
+          <select aria-label={tr("Interface language")} value={language} onChange={(e) => setLanguage(e.target.value as Language)}>
+            <option value="zh">简体中文</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+        <div className="card settings-card">
+          <h3>{tr("Proxy geo checker")}</h3>
+          <p className="muted small">{tr("Preferred free public IP-geo service for manual and scheduled proxy tests. If it times out, returns HTTP 429, or sends invalid JSON, ShardX automatically tries the next provider.")}</p>
           <label>
-            <span className="lbl">Preferred provider</span>
+            <span className="lbl">{tr("Preferred provider")}</span>
             <select value={s.geo_checker ?? "ipwho.is"} onChange={(e) => setS({ ...s, geo_checker: e.target.value })}>
-              <option value="ipwho.is">ipwho.is (1k/day, HTTPS)</option>
-              <option value="geojs.io">geojs.io (no rate limits, HTTPS)</option>
-              <option value="country.is">country.is (10 req/s, HTTPS)</option>
-              <option value="bigdatacloud.com">BigDataCloud (client-side fair use, HTTPS)</option>
-              <option value="freeipapi.com">freeipapi.com (60 req/min, HTTPS)</option>
-              <option value="ipapi.is">ipapi.is (1k/day, HTTPS)</option>
+              <option value="ipwho.is">{tr("ipwho.is (1k/day, HTTPS)")}</option>
+              <option value="geojs.io">{tr("geojs.io (no rate limits, HTTPS)")}</option>
+              <option value="country.is">{tr("country.is (10 req/s, HTTPS)")}</option>
+              <option value="bigdatacloud.com">{tr("BigDataCloud (client-side fair use, HTTPS)")}</option>
+              <option value="freeipapi.com">{tr("freeipapi.com (60 req/min, HTTPS)")}</option>
+              <option value="ipapi.is">{tr("ipapi.is (1k/day, HTTPS)")}</option>
             </select>
           </label>
         </div>
 
       <div className="card settings-card">
-        <h3>Screen resolution</h3>
+        <h3>{tr("Screen resolution")}</h3>
         <p className="muted small">
-          <strong>From fingerprint</strong> reports the screen carried in the bound profile (recommended for anti-detect coherence).
-          <strong> Real</strong> lets ShardX expose the host monitor's actual size.
-        </p>
+          <strong>{tr("From fingerprint")}</strong>  {tr("reports the screen carried in the bound profile (recommended for anti-detect coherence).")} <strong>  {tr("Real")}</strong>  {tr("lets ShardX expose the host monitor's actual size.")} </p>
         <label>
-          <span className="lbl">Mode</span>
+          <span className="lbl">{tr("Mode")}</span>
           <select
             value={s.screen_resolution_mode ?? "fingerprint"}
             onChange={(e) => setS({ ...s, screen_resolution_mode: e.target.value })}
           >
-            <option value="fingerprint">From fingerprint</option>
-            <option value="real">Real (host monitor)</option>
+            <option value="fingerprint">{tr("From fingerprint")}</option>
+            <option value="real">{tr("Real (host monitor)")}</option>
           </select>
         </label>
       </div>
 
       <div className="card settings-card">
-        <h3>Automation API</h3>
+        <h3>{tr("Automation API")}</h3>
         <p className="muted small">
-          Local HTTP API (axum) for scripting — create/launch/close profiles
-          and get a CDP WebSocket URL. Binds <strong>127.0.0.1</strong> only,
-          JWT Bearer auth. Changes to enable/port apply after restarting the app.{" "}
+           {tr("Local HTTP API (axum) for scripting — create/launch/close profiles and get a CDP WebSocket URL. Binds")} <strong>127.0.0.1</strong>  {tr("only, JWT Bearer auth. Changes to enable/port apply after restarting the app.")}{" "}
           <a
             href="#"
             onClick={(e) => {
@@ -5134,8 +5236,7 @@ function SettingsView() {
               openUrl(withUtm("https://docs.proxyshard.com/eng/shardx-launcher-api/binding-and-lifecycle?fallback=true")).catch(() => {});
             }}
           >
-            Full API reference →
-          </a>
+             {tr("Full API reference →")} </a>
         </p>
         <label className="row-inline">
           <input
@@ -5143,10 +5244,10 @@ function SettingsView() {
             checked={s.api_enabled ?? true}
             onChange={(e) => setS({ ...s, api_enabled: e.target.checked })}
           />
-          <span className="lbl">Enable API server</span>
+          <span className="lbl">{tr("Enable API server")}</span>
         </label>
         <label>
-          <span className="lbl">Port</span>
+          <span className="lbl">{tr("Port")}</span>
           <input
             type="number"
             value={s.api_port ?? 40325}
@@ -5156,34 +5257,30 @@ function SettingsView() {
         {api && (
           <>
             <label>
-              <span className="lbl">Base URL</span>
+              <span className="lbl">{tr("Base URL")}</span>
               <CopyField value={api.base_url} />
             </label>
             <label>
-              <span className="lbl">Bearer token</span>
+              <span className="lbl">{tr("Bearer token")}</span>
               <CopyField value={api.token} secret />
             </label>
             <div className="row-inline settings-card-inline-action">
-              <button className="btn-ghost" onClick={regenToken}>Regenerate token</button>
-              <span className="muted small">Invalidates the current token immediately.</span>
+              <button className="btn-ghost" onClick={regenToken}>{tr("Regenerate token")}</button>
+              <span className="muted small">{tr("Invalidates the current token immediately.")}</span>
             </div>
             <p className="muted small settings-card-footnote">
-              Send it as <code>Authorization: Bearer &lt;token&gt;</code>.
+               {tr("Send it as")} <code>Authorization: Bearer &lt;token&gt;</code>.
             </p>
           </>
         )}
       </div>
 
       <div className="card settings-card">
-        <h3>MCP server</h3>
+        <h3>{tr("MCP server")}</h3>
         <p className="muted small">
-          Download the <strong>MCP</strong> server source (lets an AI client drive
-          profiles and a CDP browser) into a folder you choose. The app does not run
-          it — install its deps and register it with your MCP client per the included
-          README. Requires Node.js.
-        </p>
+           {tr("Download the")} <strong>MCP</strong>  {tr("server source (lets an AI client drive profiles and a CDP browser) into a folder you choose. The app does not run it — install its deps and register it with your MCP client per the included README. Requires Node.js.")} </p>
         <button className="btn-ghost" onClick={downloadMcp} disabled={mcpBusy}>
-          <Icon.Download /> {mcpBusy ? "Downloading…" : "Download MCP server"}
+          <Icon.Download /> {mcpBusy ? tr("Downloading…") : tr("Download MCP server")}
         </button>
       </div>
 
@@ -5191,7 +5288,7 @@ function SettingsView() {
       </div>
 
       <div className="card-actions">
-        <button className="btn-primary" onClick={async () => { await save(); refreshApi(); }} disabled={!settingsDirty}><ShardMini /> Save settings</button>
+        <button className="btn-primary" onClick={async () => { await save(); refreshApi(); }} disabled={!settingsDirty}><ShardMini />  {tr("Save settings")}</button>
       </div>
     </section>
   );

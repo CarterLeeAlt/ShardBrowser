@@ -38,7 +38,7 @@ pub async fn launch_profile(
     // Reserve before any proxy probes or file writes. Launch preflight can take
     // several seconds, so a plain running-process check would leave a window
     // where a second caller could start the same profile or mutate its proxy.
-    let _launch_reservation = Tracker::shared().reserve_launch(profile_id)?;
+    let launch_reservation = Tracker::shared().reserve_launch(profile_id)?;
     let bin = resolve_binary()?;
     let mut stored = profile::load_raw(profile_id)?;
     // Older editor builds reconstructed an existing profile from its donor
@@ -97,8 +97,12 @@ pub async fn launch_profile(
             .get("webrtc")
             .and_then(|value| value.as_str())
             .unwrap_or("block");
-        let check =
-            proxy::check_for_launch(bound_proxy, !matches!(webrtc, "block" | "tcp_only")).await?;
+        let check = launch_reservation
+            .wait(proxy::check_for_launch(
+                bound_proxy,
+                !matches!(webrtc, "block" | "tcp_only"),
+            ))
+            .await?;
         proxy_udp_ok = check.udp_ok;
         match check.geo {
             Ok(geo) => {
@@ -127,14 +131,15 @@ pub async fn launch_profile(
     // Strip launcher-only fields and resolve "auto" sentinels before serialising.
     let mut raw = stored.config.clone();
     raw.remove("_meta");
-    resolve_auto_fields(
-        &mut raw,
-        bound_proxy.as_ref(),
-        session_geo.as_ref(),
-        preflight_geo_exhausted,
-        &mut warnings,
-    )
-    .await?;
+    launch_reservation
+        .wait(resolve_auto_fields(
+            &mut raw,
+            bound_proxy.as_ref(),
+            session_geo.as_ref(),
+            preflight_geo_exhausted,
+            &mut warnings,
+        ))
+        .await?;
     // ShardX Browser renders `name` as the blue label in its chrome. Override
     // only this launch-time clone: the launcher-visible NAME remains stored,
     // while profile id, user-data directory, noise seeds, and every actual
@@ -278,6 +283,7 @@ pub async fn launch_profile(
         launch_args.push("--headless=new".into());
     }
 
+    launch_reservation.commit()?;
     let (child, taskbar_binary, actual_launch_bin) = match browser_command(
         &launch_bin,
         &launch_args,

@@ -762,6 +762,7 @@ fn colliding_profile_id(
 /// is rejected because changing the UUID would not change its fingerprint.
 pub fn save_new_unique(stored: &mut StoredProfile) -> Result<()> {
     const MAX_ATTEMPTS: usize = 16;
+    crate::fingerprint_identity::prepare_new(&mut stored.config);
 
     if stored.meta.id.is_empty() {
         stored.meta.id = uuid::Uuid::new_v4().to_string();
@@ -1135,6 +1136,82 @@ pub fn clone_profile(id: &str) -> Result<ProfileMeta> {
         folder: src.meta.folder,
         total_runtime_ms: 0,
     })
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyAssignment {
+    pub profile_id: String,
+    pub proxy_id: String,
+    pub expected_proxy_id: Option<String>,
+}
+
+/// Apply a preview under the same lock that protects launches and proxy edits.
+pub fn assign_proxies(pairs: Vec<ProxyAssignment>, allow_sharing: bool) -> Result<usize> {
+    let _resource_guard = crate::process::lock_profile_resources()?;
+    recover_interrupted_operations_locked()?;
+    let target_ids: std::collections::HashSet<_> =
+        pairs.iter().map(|p| p.profile_id.as_str()).collect();
+    anyhow::ensure!(
+        target_ids.len() == pairs.len(),
+        "Duplicate assignment targets"
+    );
+    let mut proxy_ids = std::collections::HashSet::new();
+    let profiles = list_all()?;
+    let mut changes = Vec::new();
+    for pair in &pairs {
+        ensure_stopped(&pair.profile_id)?;
+        anyhow::ensure!(
+            crate::proxy::get(&pair.proxy_id)?.is_some(),
+            "Assigned proxy no longer exists"
+        );
+        if !allow_sharing {
+            anyhow::ensure!(
+                proxy_ids.insert(&pair.proxy_id),
+                "Proxy sharing is disabled"
+            );
+            anyhow::ensure!(
+                !profiles.iter().any(|p| !target_ids.contains(p.id.as_str())
+                    && p.proxy_id.as_deref() == Some(&pair.proxy_id)),
+                "Proxy bindings changed. Close this dialog and preview the assignment again."
+            );
+        }
+        let before = load_raw(&pair.profile_id)?;
+        anyhow::ensure!(
+            before.meta.proxy_id == pair.expected_proxy_id,
+            "Proxy bindings changed. Close this dialog and preview the assignment again."
+        );
+        let mut after = before.clone();
+        after.meta.proxy_id = Some(pair.proxy_id.clone());
+        if after.meta.proxy_id != before.meta.proxy_id {
+            after.meta.session_network_identity = None;
+        }
+        changes.push(ProfileRetag {
+            profile_id: pair.profile_id.clone(),
+            path: path_for(&pair.profile_id)?,
+            before,
+            after,
+        });
+    }
+    if changes.is_empty() {
+        return Ok(0);
+    }
+    persist_operation(&ProfileOperation::Retag {
+        changes: changes.clone(),
+        apply_after: true,
+    })?;
+    if let Err(error) = apply_retags(&changes, true) {
+        persist_operation(&ProfileOperation::Retag {
+            changes: changes.clone(),
+            apply_after: false,
+        })?;
+        apply_retags(&changes, false)
+            .with_context(|| format!("{error}; proxy assignment rollback failed"))?;
+        clear_operation()?;
+        return Err(error);
+    }
+    clear_operation()?;
+    Ok(changes.len())
 }
 
 /// Assign folder tag (empty string clears).
