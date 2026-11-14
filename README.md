@@ -334,6 +334,9 @@ browserscan.net、fp.haru.gay、antcpt 的 reCAPTCHA 得分检测器 — 通常�
 ### 方式 A — 下载预构建发行版
 
 发行版通过 GitHub Actions 的 `Release` 工作流手动发布，运行分支为 `main`。
+工作流使用源码声明的版本，发布后保持版本号不变。需要调整版本时，显式运行
+`node scripts/bump-release-version.mjs --from <当前版本> --to <目标版本>` 同步所有声明，
+再执行 `node scripts/check-version-consistency.mjs`；手动填写的 tag 必须与源码版本完全一致。
 
 从 [GitHub Releases](../../releases) 获取 Windows x64 构建。每个 Release
 提供两种产物，按需选择：

@@ -3,46 +3,24 @@
 // Used by .github/workflows/release.yml. Modes:
 //   * explicit  — `--explicit v2.0.5` publishes exactly that tag (manual runs)
 //   * auto      — `--base 2.0.5` publishes exactly the source-tree version
-// After a successful publish the workflow writes bump(base) back into the
-// version files, so the next manual run publishes the next number: 2.0.2 → 2.0.3.
-//
-// Increment rules: patch and minor roll over at 9 (2.0.9 → 2.1.0,
-// 2.9.9 → 3.0.0); major is unbounded.
+// Publishing preserves this version; version changes are explicit source edits.
 //
 // Usage:
 //   node scripts/next-release-version.mjs --base 2.0.2
 //   node scripts/next-release-version.mjs --explicit v3.1.4
-//   node scripts/next-release-version.mjs --base 2.0.9 --next   (post-release write-back)
 // Output (KEY=VALUE lines, consumed via GITHUB_OUTPUT):
-//   tag=v2.0.3
-//   version=2.0.3
+//   tag=v2.0.2
+//   version=2.0.2
 
 import { parseArgs } from "node:util";
 
 const TAG_RE = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const VER_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
-function bump(version) {
-  let [major, minor, patch] = version.split(".").map(Number);
-  patch += 1;
-  if (patch > 9) {
-    patch = 0;
-    minor += 1;
-  }
-  if (minor > 9) {
-    minor = 0;
-    major += 1;
-  }
-  return `${major}.${minor}.${patch}`;
-}
-
 const { values } = parseArgs({
   options: {
     base: { type: "string" },
     explicit: { type: "string" },
-    // Resolve the version AFTER the input one instead of publishing the input
-    // (used to write the next number back into the version files).
-    next: { type: "boolean", default: false },
   },
 });
 
@@ -63,10 +41,6 @@ if (values.explicit) {
     process.exit(1);
   }
   version = values.base;
-}
-
-if (values.next) {
-  version = bump(version);
 }
 
 console.log(`tag=v${version}`);
