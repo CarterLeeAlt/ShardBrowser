@@ -6,6 +6,7 @@ compile_error!("ShardX Launcher supports only Windows x64 (x86_64-pc-windows-msv
 mod api;
 mod cookies;
 mod display_order;
+mod extensions;
 mod fingerprint_identity;
 mod fingerprints;
 mod launch;
@@ -21,6 +22,7 @@ mod settings;
 mod startup_path;
 mod store;
 mod taskbar_icon;
+mod trash;
 
 pub(crate) use fingerprint_identity::randomize_platform_version;
 use serde_json::Value;
@@ -530,6 +532,7 @@ pub fn save_profile_core(
 
     let mut stored: profile::StoredProfile =
         serde_json::from_value(payload).map_err(|e| e.to_string())?;
+    extensions::load_paths(&stored.meta.extensions).map_err(|e| format!("{e:#}"))?;
     let profile_name = stored
         .config
         .get("name")
@@ -609,8 +612,78 @@ pub fn save_profile_core(
 }
 
 #[tauri::command]
-fn profile_delete(id: String) -> Result<(), String> {
-    profile::delete(&id).map_err(|e| e.to_string())
+async fn profile_delete(id: String) -> Result<(), String> {
+    profile_trash_many(vec![id]).await.map(|_| ())
+}
+
+#[tauri::command]
+async fn profile_trash_many(ids: Vec<String>) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || trash::move_profiles(&ids))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn trash_list() -> Result<Vec<trash::TrashEntry>, String> {
+    tauri::async_runtime::spawn_blocking(trash::list)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn trash_restore(id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || trash::restore(&id))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn trash_purge(ids: Vec<String>) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || trash::purge(&ids))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn trash_empty() -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(trash::empty)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn extension_list() -> Result<Vec<extensions::ExtensionEntry>, String> {
+    tauri::async_runtime::spawn_blocking(extensions::list)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn extension_import(path: String) -> Result<extensions::ExtensionEntry, String> {
+    let entry = tauri::async_runtime::spawn_blocking(move || {
+        extensions::import(std::path::Path::new(&path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))?;
+    notify_store_changed("extensions");
+    Ok(entry)
+}
+
+#[tauri::command]
+async fn extension_delete(id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || extensions::delete(&id))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))?;
+    notify_store_changed("extensions");
+    Ok(())
 }
 
 #[tauri::command]
@@ -682,8 +755,11 @@ fn profile_set_folder(id: String, folder: String) -> Result<(), String> {
 
 /// Delete folder; `delete_profiles` true → remove, false → unfile.
 #[tauri::command]
-fn folder_delete(folder: String, delete_profiles: bool) -> Result<usize, String> {
-    profile::delete_folder(&folder, delete_profiles).map_err(|e| e.to_string())
+async fn folder_delete(folder: String, delete_profiles: bool) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || profile::delete_folder(&folder, delete_profiles))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// Host OS in fingerprint-library vocabulary.
@@ -1338,6 +1414,14 @@ pub fn run() {
             profile_rename,
             profile_save,
             profile_delete,
+            profile_trash_many,
+            trash_list,
+            trash_restore,
+            trash_purge,
+            trash_empty,
+            extension_list,
+            extension_import,
+            extension_delete,
             profile_bind_proxy,
             profile_assign_proxies,
             profile_clone,
@@ -1516,6 +1600,16 @@ pub fn run() {
             // Compare runtime metadata in the background now and every hour.
             // This never downloads or installs a runtime component.
             start_runtime_update_check_loop();
+            tauri::async_runtime::spawn(async {
+                loop {
+                    match tauri::async_runtime::spawn_blocking(trash::purge_expired).await {
+                        Ok(Ok(_)) => {},
+                        Ok(Err(error)) => eprintln!("[trash] expiry cleanup failed: {error:#}"),
+                        Err(error) => eprintln!("[trash] expiry worker failed: {error}"),
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                }
+            });
 
             // API task on the shared tokio runtime.
             match settings::ensure_secret() {

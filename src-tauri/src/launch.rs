@@ -41,6 +41,7 @@ pub async fn launch_profile(
     let launch_reservation = Tracker::shared().reserve_launch(profile_id)?;
     let bin = resolve_binary()?;
     let mut stored = profile::load_raw(profile_id)?;
+    let extension_paths = crate::extensions::load_paths(&stored.meta.extensions)?;
     // Older editor builds reconstructed an existing profile from its donor
     // fingerprint whenever an unrelated field such as NAME changed. That
     // restored the donor's fixed screen/window dimensions and made Chromium's
@@ -181,6 +182,23 @@ pub async fn launch_profile(
     }
 
     let mut launch_args = Vec::<OsString>::new();
+    // The current ShardX engine keeps library extensions not selected for this
+    // launch unloaded, while preserving extensions installed inside the profile.
+    launch_args.push(
+        format!(
+            "--shardx-extension-library={}",
+            store::extensions_dir()?.display()
+        )
+        .into(),
+    );
+    if !extension_paths.is_empty() {
+        let joined = extension_paths
+            .iter()
+            .map(|path| path.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(",");
+        launch_args.push(format!("--load-extension={joined}").into());
+    }
     launch_args.push(format!("--fingerprint-profile={}", fp_file.display()).into());
     launch_args.push(format!("--user-data-dir={}", udd.display()).into());
     launch_args.push("--no-first-run".into());

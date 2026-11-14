@@ -51,6 +51,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # Windows cookie crypto: AES-256-GCM + DPAPI key from Local State.
 aes-gcm = "0.10"
 getrandom = "0.2"
+ring = "0.17"
 ico = "0.5"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",            # HLOCAL + LocalFree live here in 0.59

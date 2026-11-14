@@ -1,14 +1,15 @@
 //! Complete, versioned ShardX profile backups.
 //!
-//! A v3 `.shardx-backup` is a binary ZIP container holding the exact launcher
+//! A v4 `.shardx-backup` is a binary ZIP container holding the exact launcher
 //! profile, its bound proxy, the complete Chromium user-data tree, and the raw
 //! OSCrypt key. Proxy credentials are encrypted with the exporting Windows
 //! user's DPAPI; v2 plaintext proxy payloads remain import-compatible. The key
 //! is re-wrapped with the destination Windows user's DPAPI credentials during
-//! restore, so Chromium keeps the same encrypted database key even though the
+//! restore. Selected library extensions are included with their stable IDs,
+//! so Chromium keeps the same encrypted database key even though the
 //! launcher assigns a fresh profile UUID.
 
-use crate::{cookies, display_order, fingerprints, process, profile, proxy, store};
+use crate::{cookies, display_order, extensions, fingerprints, process, profile, proxy, store};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,13 +21,14 @@ use std::sync::Mutex;
 use zip::write::SimpleFileOptions;
 
 const BACKUP_FORMAT: &str = "shardx-profile-backup";
-const BACKUP_VERSION: u32 = 3;
+const BACKUP_VERSION: u32 = 4;
 const MIN_BACKUP_VERSION: u32 = 2;
 const MANIFEST_ENTRY: &str = "manifest.json";
 const PROFILE_ENTRY: &str = "profile.json";
 const PROXY_ENTRY: &str = "proxy.json";
 const OS_CRYPT_KEY_ENTRY: &str = "crypto/os-crypt-key.bin";
 const USER_DATA_PREFIX: &str = "user-data/";
+const EXTENSIONS_PREFIX: &str = "extensions/";
 
 const MAX_BACKUP_BATCH: usize = 100;
 const MAX_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
@@ -94,6 +96,7 @@ struct PendingExport {
 struct PreparedImport {
     stage_root: PathBuf,
     staged_user_data: PathBuf,
+    staged_extensions: PathBuf,
     new_profile_id: String,
     backup_id: String,
     profile: profile::StoredProfile,
@@ -227,7 +230,7 @@ fn collect_user_data_entries(
     Ok(())
 }
 
-fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
+pub(crate) fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
         return true;
     }
@@ -420,11 +423,30 @@ fn build_backup_archive(profile_id: &str, stamp: u128, exported_at: &str) -> Res
         )?;
         let (file_count, data_bytes) =
             write_user_data_entries(&mut archive, &user_data, &mut records)?;
+        for id in &stored.meta.extensions {
+            let root = extensions::path_for(id)?;
+            extensions::read_entry(id, &root)?;
+            for relative in extensions::tree_files(&root)? {
+                let name = format!(
+                    "{EXTENSIONS_PREFIX}{id}/{}",
+                    archive_relative_path(&relative)?
+                );
+                write_bytes_entry(
+                    &mut archive,
+                    &name,
+                    &fs::read(root.join(relative))?,
+                    &mut records,
+                )?;
+            }
+        }
         let payload_bytes = records.iter().try_fold(0u64, |total, record| {
             total
                 .checked_add(record.size)
                 .ok_or_else(|| anyhow!("backup size overflow"))
         })?;
+        if records.len() > MAX_ARCHIVE_ENTRIES + 4 {
+            bail!("backup contains too many entries");
+        }
         if payload_bytes > MAX_UNCOMPRESSED_BYTES {
             bail!("backup exceeds the 64 GiB uncompressed limit");
         }
@@ -526,7 +548,7 @@ pub(crate) fn export(
     })
 }
 
-fn validate_archive_entry_name(name: &str) -> Result<()> {
+pub(crate) fn validate_archive_entry_name(name: &str) -> Result<()> {
     if name.is_empty()
         || name.starts_with('/')
         || name.starts_with('\\')
@@ -570,7 +592,8 @@ fn validate_record_path(record: &BackupEntry) -> Result<()> {
     let allowed = record.path == PROFILE_ENTRY
         || record.path == PROXY_ENTRY
         || record.path == OS_CRYPT_KEY_ENTRY
-        || record.path.starts_with(USER_DATA_PREFIX);
+        || record.path.starts_with(USER_DATA_PREFIX)
+        || record.path.starts_with(EXTENSIONS_PREFIX);
     if !allowed {
         bail!("backup contains an unsupported entry: {}", record.path);
     }
@@ -593,6 +616,7 @@ fn extract_record(
     archive: &mut zip::ZipArchive<File>,
     record: &BackupEntry,
     staged_user_data: &Path,
+    staged_extensions: &Path,
 ) -> Result<Option<Vec<u8>>> {
     let mut entry = archive
         .by_name(&record.path)
@@ -611,6 +635,9 @@ fn extract_record(
             let relative = record.path[USER_DATA_PREFIX.len()..].trim_end_matches('/');
             let destination = safe_user_data_destination(staged_user_data, relative)?;
             fs::create_dir_all(destination)?;
+        } else if record.path.starts_with(EXTENSIONS_PREFIX) {
+            let relative = record.path[EXTENSIONS_PREFIX.len()..].trim_end_matches('/');
+            fs::create_dir_all(safe_user_data_destination(staged_extensions, relative)?)?;
         }
         return Ok(None);
     }
@@ -620,9 +647,14 @@ fn extract_record(
 
     let mut hasher = Sha256::new();
     let mut total = 0u64;
-    if record.path.starts_with(USER_DATA_PREFIX) {
-        let relative = &record.path[USER_DATA_PREFIX.len()..];
-        let destination = safe_user_data_destination(staged_user_data, relative)?;
+    let file_destination = if let Some(relative) = record.path.strip_prefix(USER_DATA_PREFIX) {
+        Some(safe_user_data_destination(staged_user_data, relative)?)
+    } else if let Some(relative) = record.path.strip_prefix(EXTENSIONS_PREFIX) {
+        Some(safe_user_data_destination(staged_extensions, relative)?)
+    } else {
+        None
+    };
+    if let Some(destination) = file_destination {
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -695,7 +727,7 @@ fn prepare_import_inner(
         bail!("{} exceeds the 32 GiB backup limit", path.display());
     }
     let file = File::open(path)?;
-    let mut archive = zip::ZipArchive::new(file).context("backup is not a valid v2 archive")?;
+    let mut archive = zip::ZipArchive::new(file).context("backup is not a valid archive")?;
     // MAX_ARCHIVE_ENTRIES limits entries copied from user-data. A valid
     // archive additionally contains the user-data root, profile, OSCrypt key,
     // optional proxy, and manifest entries.
@@ -730,7 +762,7 @@ fn prepare_import_inner(
     if manifest.format != BACKUP_FORMAT
         || !(MIN_BACKUP_VERSION..=BACKUP_VERSION).contains(&manifest.version)
     {
-        bail!("backup is not a supported ShardX v2 or v3 profile backup");
+        bail!("backup is not a supported ShardX v2, v3 or v4 profile backup");
     }
     if manifest.entries.len() > MAX_ARCHIVE_ENTRIES + 4 {
         bail!("backup manifest contains too many entries");
@@ -800,13 +832,16 @@ fn prepare_import_inner(
         );
     }
 
-    let staged_user_data = stage_root.clone();
+    let staged_user_data = stage_root.join("user-data");
+    let staged_extensions = stage_root.join("extensions");
     fs::create_dir_all(&staged_user_data)?;
     let mut profile_bytes = None;
     let mut proxy_bytes = None;
     let mut os_crypt_key = None;
     for record in &manifest.entries {
-        if let Some(bytes) = extract_record(&mut archive, record, &staged_user_data)? {
+        if let Some(bytes) =
+            extract_record(&mut archive, record, &staged_user_data, &staged_extensions)?
+        {
             match record.path.as_str() {
                 PROFILE_ENTRY => profile_bytes = Some(bytes),
                 PROXY_ENTRY => proxy_bytes = Some(bytes),
@@ -820,6 +855,11 @@ fn prepare_import_inner(
         profile_bytes.ok_or_else(|| anyhow!("backup profile payload is missing"))?;
     let mut stored: profile::StoredProfile =
         serde_json::from_slice(&profile_bytes).context("backup profile payload is invalid")?;
+    let selected: HashSet<_> = stored.meta.extensions.iter().collect();
+    ensure_extension_payloads(&staged_extensions, &stored.meta.extensions)?;
+    if selected.len() != stored.meta.extensions.len() {
+        bail!("backup contains duplicate extension selections");
+    }
     if stored.meta.id != manifest.source_profile_id {
         bail!("backup profile id does not match its manifest");
     }
@@ -850,6 +890,7 @@ fn prepare_import_inner(
     Ok(PreparedImport {
         stage_root,
         staged_user_data,
+        staged_extensions,
         new_profile_id,
         backup_id: manifest.backup_id,
         profile: stored,
@@ -858,6 +899,24 @@ fn prepare_import_inner(
         data_bytes: user_data_bytes,
         restore_bytes: total_uncompressed,
     })
+}
+
+fn ensure_extension_payloads(root: &Path, ids: &[String]) -> Result<()> {
+    let expected: HashSet<_> = ids.iter().cloned().collect();
+    let mut found = HashSet::new();
+    if root.exists() {
+        for entry in fs::read_dir(root)? {
+            let entry = entry?;
+            let id = entry.file_name().to_string_lossy().to_string();
+            extensions::read_entry(&id, &entry.path())?;
+            extensions::tree_files(&entry.path())?;
+            found.insert(id);
+        }
+    }
+    if found != expected {
+        bail!("backup extension files do not match the profile selection");
+    }
+    Ok(())
 }
 
 fn prepare_import(path: &Path, remaining_batch_bytes: u64) -> Result<PreparedImport> {
@@ -1002,12 +1061,20 @@ pub(crate) fn import(paths: Vec<String>) -> std::result::Result<ProfileBackupSum
     };
 
     let mut imported = Vec::with_capacity(prepared.len());
+    let mut installed_extensions = Vec::new();
     let bound_proxies = prepared
         .iter()
         .map(|item| item.bound_proxy.clone())
         .collect();
     let commit =
         proxy::with_restored_proxy_bindings(bound_proxies, |restored_proxy_ids| -> Result<()> {
+            for item in &prepared {
+                for id in &item.profile.meta.extensions {
+                    if extensions::restore_files(id, &item.staged_extensions.join(id))? {
+                        installed_extensions.push(id.clone());
+                    }
+                }
+            }
             let mut imported_ids = Vec::with_capacity(prepared.len());
             for (item, restored_proxy_id) in prepared.iter_mut().zip(restored_proxy_ids) {
                 let created_fingerprint_id;
@@ -1057,7 +1124,17 @@ pub(crate) fn import(paths: Vec<String>) -> std::result::Result<ProfileBackupSum
         });
 
     if let Err(error) = commit {
-        return Err(import_failure(error, &prepared, &imported));
+        let failure = import_failure(error, &prepared, &imported);
+        for id in installed_extensions {
+            if extensions::references(&id)
+                .map_err(|e| e.to_string())?
+                .is_empty()
+            {
+                fs::remove_dir_all(extensions::path_for(&id).map_err(|e| e.to_string())?)
+                    .map_err(|e| format!("{failure}; extension rollback failed: {e}"))?;
+            }
+        }
+        return Err(failure);
     }
 
     for item in &prepared {
@@ -1104,6 +1181,110 @@ pub(crate) fn cleanup_stale_artifacts() -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v2_and_v3_backups_without_library_extensions_remain_readable() {
+        let test = store::TestStore::new();
+        let mut stored: profile::StoredProfile = serde_json::from_value(serde_json::json!({
+            "_meta": {"id": "legacy-backup"}, "name": "LegacyBackup", "navigator": {"platform_version": "17.0.0"}
+        })).unwrap();
+        profile::save_raw(&mut stored).unwrap();
+        cookies::install_os_crypt_key(&profile::user_data_dir(&stored.meta.id).unwrap(), &[9; 32])
+            .unwrap();
+        export(vec![stored.meta.id.clone()]).unwrap();
+        let source = fs::read_dir(store::exports_dir().unwrap())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        for version in [2, 3] {
+            let path = test.root.join(format!("version-{version}.shardx-backup"));
+            let mut input = zip::ZipArchive::new(File::open(&source).unwrap()).unwrap();
+            let mut output = zip::ZipWriter::new(File::create(&path).unwrap());
+            for index in 0..input.len() {
+                let mut entry = input.by_index(index).unwrap();
+                if entry.is_dir() {
+                    output.add_directory(entry.name(), zip_options()).unwrap();
+                    continue;
+                }
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).unwrap();
+                if entry.name() == MANIFEST_ENTRY {
+                    let mut manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    manifest["version"] = version.into();
+                    bytes = serde_json::to_vec(&manifest).unwrap();
+                }
+                output.start_file(entry.name(), zip_options()).unwrap();
+                output.write_all(&bytes).unwrap();
+            }
+            output.finish().unwrap();
+            import(vec![path.to_string_lossy().into()]).unwrap();
+        }
+        assert_eq!(profile::list_all().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn complete_backup_restores_extension_files_and_rejects_version_conflicts() {
+        let test = store::TestStore::new();
+        let extension = extensions::tests::fixture(&test.root.join("source"));
+        let mut stored: profile::StoredProfile = serde_json::from_value(serde_json::json!({
+            "_meta": {"id": "backup-source", "extensions": [extension.id]},
+            "name": "BackupSource", "navigator": {"platform": "Windows", "platform_version": "17.0.0"},
+            "noise": {"canvas": {"enabled": true, "seed": 99}}
+        })).unwrap();
+        profile::save_raw(&mut stored).unwrap();
+        let data = profile::user_data_dir(&stored.meta.id).unwrap();
+        cookies::install_os_crypt_key(&data, &[7; 32]).unwrap();
+        fs::create_dir_all(data.join("Default/Local Extension Settings")).unwrap();
+        fs::write(
+            data.join("Default/Local Extension Settings/data"),
+            b"account-settings",
+        )
+        .unwrap();
+        export(vec![stored.meta.id.clone()]).unwrap();
+        let backup = fs::read_dir(store::exports_dir().unwrap())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let archive = zip::ZipArchive::new(File::open(&backup).unwrap()).unwrap();
+        assert!(archive
+            .file_names()
+            .any(|name| name == format!("extensions/{}/manifest.json", extension.id)));
+        drop(archive);
+        let installed = extensions::path_for(&extension.id).unwrap();
+        let original_worker = fs::read(installed.join("worker.js")).unwrap();
+        fs::write(installed.join("worker.js"), b"newer-version").unwrap();
+        assert!(import(vec![backup.to_string_lossy().into()])
+            .unwrap_err()
+            .contains("conflict"));
+        assert_eq!(profile::list_all().unwrap().len(), 1);
+        assert_eq!(
+            fs::read(installed.join("worker.js")).unwrap(),
+            b"newer-version"
+        );
+        fs::write(installed.join("worker.js"), original_worker).unwrap();
+        profile::delete(&stored.meta.id).unwrap();
+        extensions::delete(&extension.id).unwrap();
+        import(vec![backup.to_string_lossy().into()]).unwrap();
+        let restored = profile::list_all().unwrap().remove(0);
+        assert_ne!(restored.id, stored.meta.id);
+        let restored = profile::load_raw(&restored.id).unwrap();
+        assert_eq!(restored.meta.extensions, stored.meta.extensions);
+        assert_eq!(restored.config["navigator"]["platform_version"], "17.0.0");
+        assert_eq!(
+            fs::read(
+                profile::user_data_dir(&restored.meta.id)
+                    .unwrap()
+                    .join("Default/Local Extension Settings/data")
+            )
+            .unwrap(),
+            b"account-settings"
+        );
+        assert_eq!(extensions::list().unwrap()[0].id, extension.id);
+    }
 
     #[test]
     fn rejects_archive_path_traversal() {

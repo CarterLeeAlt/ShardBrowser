@@ -134,6 +134,54 @@ async fn auth(req: Request, next: Next) -> Result<Response, StatusCode> {
 
 // ---- handlers ----
 
+async fn storage_job<T: serde::Serialize + Send + 'static>(
+    job: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> ApiResult {
+    let value = tokio::task::spawn_blocking(job)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+    Ok(Json(serde_json::to_value(value).map_err(|e| {
+        err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?))
+}
+
+async fn list_trash() -> ApiResult {
+    storage_job(crate::trash::list).await
+}
+async fn restore_trash(Path(id): Path<String>) -> ApiResult {
+    storage_job(move || Ok(json!({"restored_id": crate::trash::restore(&id)?}))).await
+}
+async fn purge_trash(Path(id): Path<String>) -> ApiResult {
+    storage_job(move || Ok(json!({"purged": crate::trash::purge(&[id])?}))).await
+}
+async fn empty_trash() -> ApiResult {
+    storage_job(|| Ok(json!({"purged": crate::trash::empty()?}))).await
+}
+async fn list_extensions() -> ApiResult {
+    storage_job(crate::extensions::list).await
+}
+#[derive(Deserialize)]
+struct ExtensionImportReq {
+    path: String,
+}
+async fn import_extension(Json(body): Json<ExtensionImportReq>) -> ApiResult {
+    storage_job(move || {
+        let entry = crate::extensions::import(std::path::Path::new(&body.path))?;
+        crate::notify_store_changed("extensions");
+        Ok(entry)
+    })
+    .await
+}
+async fn delete_extension(Path(id): Path<String>) -> ApiResult {
+    storage_job(move || {
+        crate::extensions::delete(&id)?;
+        crate::notify_store_changed("extensions");
+        Ok(json!({"deleted": id}))
+    })
+    .await
+}
+
 async fn health() -> Json<Value> {
     Json(json!({
         "ok": true,
@@ -221,6 +269,8 @@ async fn new_fingerprint_impl(platform: Option<String>) -> ApiResult {
 
 #[derive(Deserialize)]
 struct CreateReq {
+    #[serde(default)]
+    extensions: Vec<String>,
     name: Option<String>,
     notes: Option<String>,
     proxy_id: Option<String>,
@@ -250,7 +300,7 @@ async fn persist_created(folder_override: Option<String>, body: CreateReq) -> Ap
         .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let folder = folder_override.or(body.folder).unwrap_or_default();
-    let mut meta = json!({ "id": "", "folder": folder });
+    let mut meta = json!({ "id": "", "folder": folder, "extensions": body.extensions });
     if let Some(pid) = body.proxy_id.as_ref() {
         meta["proxy_id"] = json!(pid);
     } else if let Some(pstr) = body.proxy.as_ref() {
@@ -291,6 +341,8 @@ async fn create_profile_in_folder(
 
 #[derive(Deserialize)]
 struct TempReq {
+    #[serde(default)]
+    extensions: Vec<String>,
     fingerprint_id: Option<String>,
     platform: Option<String>,
     /// Inline proxy (not stored).
@@ -314,8 +366,7 @@ async fn create_temporary(Json(body): Json<TempReq>) -> ApiResult {
     let profile_name = cfg.get("name").and_then(|v| v.as_str()).unwrap_or("");
     crate::profile::validate_profile_name(profile_name)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
-    let mut meta =
-        json!({ "id": "", "folder": body.folder.unwrap_or_default(), "temporary": true });
+    let mut meta = json!({ "id": "", "folder": body.folder.unwrap_or_default(), "temporary": true, "extensions": body.extensions });
     if let Some(pstr) = body.proxy.as_ref() {
         let entry = crate::proxy::parse_single(pstr).ok_or_else(|| {
             err(
@@ -342,14 +393,22 @@ async fn create_temporary(Json(body): Json<TempReq>) -> ApiResult {
 
 async fn delete_profile(Path(id): Path<String>) -> ApiResult {
     crate::profile::ensure_stopped(&id).map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
-    crate::profile::delete(&id)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    crate::notify_store_changed("profiles");
-    Ok(Json(json!({ "deleted": true, "id": id })))
+    storage_job(move || {
+        let temporary = crate::profile::load_raw(&id)?.meta.temporary;
+        if temporary {
+            crate::profile::delete(&id)?;
+        } else {
+            crate::trash::move_profiles(std::slice::from_ref(&id))?;
+        }
+        crate::notify_store_changed("profiles");
+        Ok(json!({ "deleted": true, "id": id, "recycled": !temporary }))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
 struct EditReq {
+    extensions: Option<Vec<String>>,
     name: Option<String>,
     notes: Option<String>,
     /// "" unfiles.
@@ -425,6 +484,16 @@ async fn edit_profile(Path(id): Path<String>, Json(body): Json<EditReq>) -> ApiR
     let _resource_guard = crate::process::lock_profile_resources()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     crate::profile::ensure_stopped(&id).map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
+    if let Some(extensions) = body.extensions {
+        crate::extensions::load_paths(&extensions)
+            .map_err(|e| err(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+        stored.meta.extensions = extensions;
+    } else {
+        stored.meta.extensions = crate::profile::load_raw(&id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .meta
+            .extensions;
+    }
     crate::profile::save_raw(&mut stored)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     // set_folder handles unfile; save_raw keeps the existing folder when empty.
@@ -475,14 +544,12 @@ async fn delete_folder_ep(
     Path(folder): Path<String>,
     Query(q): Query<DeleteFolderQuery>,
 ) -> ApiResult {
-    let n = crate::profile::delete_folder(&folder, q.delete_profiles)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    crate::notify_store_changed("profiles");
-    Ok(Json(json!({
-        "deleted_folder": folder,
-        "delete_profiles": q.delete_profiles,
-        "profiles": n,
-    })))
+    storage_job(move || {
+        let n = crate::profile::delete_folder(&folder, q.delete_profiles)?;
+        crate::notify_store_changed("profiles");
+        Ok(json!({ "deleted_folder": folder, "delete_profiles": q.delete_profiles, "profiles": n }))
+    })
+    .await
 }
 
 #[derive(Deserialize, Default)]
@@ -700,6 +767,11 @@ pub async fn serve(secret: String, port: u16) {
     set_secret(&secret);
 
     let protected = Router::new()
+        .route("/trash", get(list_trash).delete(empty_trash))
+        .route("/trash/:id", delete(purge_trash))
+        .route("/trash/:id/restore", post(restore_trash))
+        .route("/extensions", get(list_extensions).post(import_extension))
+        .route("/extensions/:id", delete(delete_extension))
         .route("/profiles", get(list_profiles).post(create_profile))
         .route("/profiles/temporary", post(create_temporary))
         .route(
