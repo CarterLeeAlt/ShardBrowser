@@ -27,6 +27,25 @@ pub struct Cookie {
     /// "Strict" | "Lax" | "None" | "unspecified" (case-insensitive).
     #[serde(default, alias = "sameSite")]
     pub same_site: Option<String>,
+    #[serde(default)]
+    pub top_frame_site_key: String,
+    #[serde(default = "default_cross_site_ancestor")]
+    pub has_cross_site_ancestor: bool,
+    #[serde(default)]
+    pub source_scheme: Option<i64>,
+    #[serde(default)]
+    pub source_port: Option<i64>,
+    #[serde(default)]
+    pub source_type: i64,
+    #[serde(default = "default_priority")]
+    pub priority: i64,
+}
+
+fn default_cross_site_ancestor() -> bool {
+    true
+}
+fn default_priority() -> i64 {
+    1
 }
 
 fn default_path() -> String {
@@ -67,9 +86,13 @@ impl Crypt {
 
     fn decrypt(&self, encrypted: &[u8], plain: &str) -> Result<String> {
         // Legacy rows: value in `value` column, no v10 blob.
-        if encrypted.len() < 3 || &encrypted[..3] != b"v10" {
+        if encrypted.is_empty() {
             return Ok(plain.to_string());
         }
+        anyhow::ensure!(
+            encrypted.starts_with(b"v10"),
+            "Unsupported browser Cookie encryption; export was stopped to avoid losing values"
+        );
         let plaintext = cipher_decrypt(&self.key, &encrypted[3..])
             .context("could not authenticate encrypted Chromium cookie")?;
         Ok(String::from_utf8_lossy(&strip_host_prefix(plaintext)).into_owned())
@@ -326,7 +349,8 @@ pub fn export(profile_id: &str) -> Result<Vec<Cookie>> {
 
     let mut stmt = conn.prepare(
         "SELECT host_key, name, value, encrypted_value, path, expires_utc, \
-         is_secure, is_httponly, has_expires, samesite FROM cookies",
+         is_secure, is_httponly, has_expires, samesite, top_frame_site_key, \
+         has_cross_site_ancestor, source_scheme, source_port, source_type, priority FROM cookies",
     )?;
     let rows = stmt.query_map([], |r| {
         let host: String = r.get(0)?;
@@ -358,6 +382,12 @@ pub fn export(profile_id: &str) -> Result<Vec<Cookie>> {
             secure: is_secure != 0,
             http_only: is_httponly != 0,
             same_site: Some(samesite_to_str(samesite).to_string()),
+            top_frame_site_key: r.get(10)?,
+            has_cross_site_ancestor: r.get::<_, i64>(11)? != 0,
+            source_scheme: Some(r.get(12)?),
+            source_port: Some(r.get(13)?),
+            source_type: r.get(14)?,
+            priority: r.get(15)?,
         })
     })?;
     let mut out = Vec::new();
@@ -373,7 +403,7 @@ pub fn import(profile_id: &str, cookies: &[Cookie]) -> Result<usize> {
     let udd = profile::user_data_dir(profile_id)?;
     let path = cookies_db_path(&udd);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
+        std::fs::create_dir_all(parent)?;
     }
     let crypt = Crypt::open(&udd)?;
     let conn =
@@ -393,14 +423,14 @@ pub fn import(profile_id: &str, cookies: &[Cookie]) -> Result<usize> {
              path, expires_utc, is_secure, is_httponly, last_access_utc, has_expires, \
              is_persistent, priority, samesite, source_scheme, source_port, \
              last_update_utc, source_type, has_cross_site_ancestor) \
-             VALUES (?1, ?2, '', ?3, '', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12, ?13, ?14, ?15, 0, 1)",
+              VALUES (?1, ?2, ?16, ?3, '', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?19, ?12, ?13, ?14, ?15, ?18, ?17)",
         )?;
         for c in cookies {
             let enc = crypt.encrypt(&c.domain, &c.value);
             let has_expires = c.expires.is_some();
             let expires_utc = c.expires.map(unix_to_chromium).unwrap_or(0);
-            let source_scheme = if c.secure { 2 } else { 1 };
-            let source_port = if c.secure { 443 } else { 80 };
+            let source_scheme = c.source_scheme.unwrap_or(if c.secure { 2 } else { 1 });
+            let source_port = c.source_port.unwrap_or(if c.secure { 443 } else { 80 });
             stmt.execute(rusqlite::params![
                 now,
                 c.domain,
@@ -417,11 +447,16 @@ pub fn import(profile_id: &str, cookies: &[Cookie]) -> Result<usize> {
                 source_scheme,
                 source_port,
                 now,
+                c.top_frame_site_key,
+                c.has_cross_site_ancestor as i64,
+                c.source_type,
+                c.priority,
             ])?;
         }
     }
+    let imported = tx.query_row("SELECT count(*) FROM cookies", [], |row| row.get(0))?;
     tx.commit()?;
-    Ok(cookies.len())
+    Ok(imported)
 }
 
 /// Create cookies table + meta to match Chromium v24 schema for a fresh DB.
@@ -443,4 +478,42 @@ fn ensure_schema(conn: &rusqlite::Connection) -> Result<()> {
             host_key, top_frame_site_key, has_cross_site_ancestor, name, path, source_scheme, source_port);",
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partitioned_cookie_roundtrip_keeps_identity_and_reports_database_count() {
+        let _test = crate::store::TestStore::new();
+        let id = "cookie-roundtrip";
+        install_os_crypt_key(&profile::user_data_dir(id).unwrap(), &[7; 32]).unwrap();
+        let cookie = |partition: &str, ancestor: bool| {
+            serde_json::from_value::<Cookie>(serde_json::json!({
+            "domain": ".example.test", "name": "session", "value": format!("secret-{partition}-{ancestor}"), "path": "/",
+            "secure": true, "http_only": true, "same_site": "None", "expires": 1900000000.25,
+            "top_frame_site_key": partition, "has_cross_site_ancestor": ancestor,
+            "source_scheme": 2, "source_port": 8443, "source_type": 1, "priority": 2
+        })).unwrap()
+        };
+        let cookies = vec![
+            cookie("https://one.test", true),
+            cookie("https://two.test", true),
+            cookie("https://one.test", false),
+        ];
+        assert_eq!(import(id, &cookies).unwrap(), 3);
+        let exported = export(id).unwrap();
+        for expected in &cookies {
+            assert!(exported
+                .iter()
+                .any(|actual| serde_json::to_value(actual).unwrap()
+                    == serde_json::to_value(expected).unwrap()));
+        }
+        let mut duplicate = cookies.clone();
+        duplicate.push(cookies[0].clone());
+        assert_eq!(import(id, &duplicate).unwrap(), 3);
+        let crypt = Crypt::open(&profile::user_data_dir(id).unwrap()).unwrap();
+        assert!(crypt.decrypt(b"v20unsupported", "").is_err());
+    }
 }

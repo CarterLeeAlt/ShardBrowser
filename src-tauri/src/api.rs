@@ -85,7 +85,13 @@ struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({ "error": self.1 }))).into_response()
+        let code = match self.0 {
+            StatusCode::CONFLICT => "conflict",
+            StatusCode::NOT_FOUND => "not_found",
+            StatusCode::BAD_REQUEST => "invalid_input",
+            _ => "internal_error",
+        };
+        (self.0, Json(json!({ "error": self.1, "code": code }))).into_response()
     }
 }
 
@@ -94,6 +100,51 @@ fn err(code: StatusCode, msg: impl Into<String>) -> ApiError {
 }
 
 type ApiResult = Result<Json<Value>, ApiError>;
+
+fn storage_error(error: anyhow::Error) -> ApiError {
+    use crate::errors::Failure;
+    let code = if let Some(failure) = error.downcast_ref::<Failure>() {
+        match failure {
+            Failure::Conflict(_) => StatusCode::CONFLICT,
+            Failure::InvalidInput(_) => StatusCode::BAD_REQUEST,
+            Failure::NotFound(_) => StatusCode::NOT_FOUND,
+        }
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    err(code, format!("{error:#}"))
+}
+
+#[derive(Clone, Default, serde::Serialize)]
+pub struct ListenerStatus {
+    state: &'static str,
+    port: Option<u16>,
+    error: Option<String>,
+}
+fn listener_cell() -> &'static RwLock<ListenerStatus> {
+    static STATUS: OnceLock<RwLock<ListenerStatus>> = OnceLock::new();
+    STATUS.get_or_init(|| {
+        RwLock::new(ListenerStatus {
+            state: "stopped",
+            port: None,
+            error: None,
+        })
+    })
+}
+pub fn listener_status() -> ListenerStatus {
+    listener_cell()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+fn set_listener(state: &'static str, port: u16, error: Option<String>) {
+    *listener_cell().write().unwrap_or_else(|e| e.into_inner()) = ListenerStatus {
+        state,
+        port: Some(port),
+        error,
+    };
+    crate::notify_store_changed("api");
+}
 
 // ---- auth middleware ----
 
@@ -137,10 +188,13 @@ async fn auth(req: Request, next: Next) -> Result<Response, StatusCode> {
 async fn storage_job<T: serde::Serialize + Send + 'static>(
     job: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
 ) -> ApiResult {
-    let value = tokio::task::spawn_blocking(job)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+    let value = tokio::task::spawn_blocking(move || {
+        let _activity = crate::operations::activity();
+        job()
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(storage_error)?;
     Ok(Json(serde_json::to_value(value).map_err(|e| {
         err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     })?))
@@ -167,7 +221,18 @@ struct ExtensionImportReq {
 }
 async fn import_extension(Json(body): Json<ExtensionImportReq>) -> ApiResult {
     storage_job(move || {
-        let entry = crate::extensions::import(std::path::Path::new(&body.path))?;
+        let entry =
+            crate::extensions::import(std::path::Path::new(&body.path)).map_err(|error| {
+                if error.downcast_ref::<std::io::Error>().is_some()
+                    || error.downcast_ref::<crate::errors::Failure>().is_some()
+                {
+                    error
+                } else {
+                    error.context(crate::errors::Failure::InvalidInput(
+                        "Invalid extension package".into(),
+                    ))
+                }
+            })?;
         crate::notify_store_changed("extensions");
         Ok(entry)
     })
@@ -221,8 +286,8 @@ async fn list_profiles() -> ApiResult {
 }
 
 async fn get_profile(Path(id): Path<String>) -> ApiResult {
-    let stored =
-        crate::profile::load_raw(&id).map_err(|e| err(StatusCode::NOT_FOUND, e.to_string()))?;
+    let _ = crate::process::Tracker::shared().refresh_cdp(&id).await;
+    let stored = crate::profile::load_raw(&id).map_err(storage_error)?;
     let mut val = serde_json::to_value(stored)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if let Some(inline) = val
@@ -233,15 +298,13 @@ async fn get_profile(Path(id): Path<String>) -> ApiResult {
         inline.remove("password");
         inline.remove("credentials_protected");
     }
-    if let Some(cdp) = crate::process::Tracker::shared().cdp(&id) {
-        if let Some(obj) = val.as_object_mut() {
-            obj.insert("running".into(), json!(true));
-            obj.insert(
-                "cdp".into(),
-                serde_json::to_value(cdp).unwrap_or(Value::Null),
-            );
-        }
-    }
+    val["running"] = json!(crate::is_profile_running(&id));
+    val["cdp"] = json!(crate::process::Tracker::shared().cdp(&id));
+    val["cdp_error"] = json!(crate::process::Tracker::shared()
+        .running()
+        .iter()
+        .find(|r| r.profile_id == id)
+        .and_then(|r| r.cdp_error.clone()));
     Ok(Json(val))
 }
 
@@ -321,7 +384,7 @@ async fn persist_created(folder_override: Option<String>, body: CreateReq) -> Ap
     cfg.insert("_meta".into(), meta);
 
     let pm = crate::save_profile_core(crate::main_window().as_ref(), Value::Object(cfg), false)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+        .map_err(storage_error)?;
     crate::notify_store_changed("profiles");
     Ok(Json(serde_json::to_value(pm).unwrap_or(Value::Null)))
 }
@@ -381,7 +444,7 @@ async fn create_temporary(Json(body): Json<TempReq>) -> ApiResult {
     cfg.insert("_meta".into(), meta);
 
     let pm = crate::save_profile_core(crate::main_window().as_ref(), Value::Object(cfg), false)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+        .map_err(storage_error)?;
     Ok(Json(json!({
         "id": pm.id,
         "name": pm.name,
@@ -424,8 +487,27 @@ struct EditReq {
 /// Edit profile; only provided fields change. Returns the updated profile.
 async fn edit_profile(Path(id): Path<String>, Json(body): Json<EditReq>) -> ApiResult {
     crate::profile::ensure_stopped(&id).map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
-    let mut stored =
-        crate::profile::load_raw(&id).map_err(|e| err(StatusCode::NOT_FOUND, e.to_string()))?;
+    let prepared_proxy = if body.proxy_id.is_none() {
+        if let Some(pstr) = body.proxy.as_ref() {
+            let entry = crate::proxy::parse_single(pstr)
+                .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Unparseable proxy"))?;
+            let saved = crate::proxy::upsert_dedup(entry)
+                .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+            let _ = crate::proxy::full_test_background(&saved).await;
+            crate::notify_store_changed("proxies");
+            Some(saved.id)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    // Apply a partial edit to the latest state after network I/O, under the
+    // same lock as every profile writer and launch reservation.
+    let _resource_guard = crate::process::lock_profile_resources()
+        .map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
+    crate::profile::ensure_stopped(&id).map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
+    let mut stored = crate::profile::load_raw(&id).map_err(storage_error)?;
     let original_name = stored
         .config
         .get("name")
@@ -463,36 +545,18 @@ async fn edit_profile(Path(id): Path<String>, Json(body): Json<EditReq>) -> ApiR
             Some(pid.clone())
         };
         stored.meta.inline_proxy = None;
-    } else if let Some(pstr) = body.proxy.as_ref() {
-        let entry = crate::proxy::parse_single(pstr).ok_or_else(|| {
-            err(
-                StatusCode::BAD_REQUEST,
-                format!("unparseable proxy: {pstr}"),
-            )
-        })?;
-        let s = crate::proxy::upsert_dedup(entry)
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let _ = crate::proxy::full_test_background(&s).await;
-        stored.meta.proxy_id = Some(s.id);
+    } else if let Some(proxy_id) = prepared_proxy {
+        stored.meta.proxy_id = Some(proxy_id);
         stored.meta.inline_proxy = None;
-        crate::notify_store_changed("proxies");
     }
 
     // Re-check under the same resource lock used by launch reservation. The
     // optional proxy test above awaits network I/O and therefore cannot safely
     // hold a synchronous mutex guard across it.
-    let _resource_guard = crate::process::lock_profile_resources()
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    crate::profile::ensure_stopped(&id).map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
     if let Some(extensions) = body.extensions {
         crate::extensions::load_paths(&extensions)
             .map_err(|e| err(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
         stored.meta.extensions = extensions;
-    } else {
-        stored.meta.extensions = crate::profile::load_raw(&id)
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            .meta
-            .extensions;
     }
     crate::profile::save_raw(&mut stored)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -560,6 +624,7 @@ struct StartReq {
 
 /// Launch with CDP; body `{ "headless": true }` opt-in.
 async fn start_profile(Path(id): Path<String>, body: Option<Json<StartReq>>) -> ApiResult {
+    crate::profile::load_raw(&id).map_err(storage_error)?;
     if crate::is_profile_active(&id) {
         return Err(err(
             StatusCode::CONFLICT,
@@ -569,7 +634,7 @@ async fn start_profile(Path(id): Path<String>, body: Option<Json<StartReq>>) -> 
     let headless = body.map(|Json(b)| b.headless).unwrap_or(false);
     let outcome = crate::launch::launch_profile(&id, true, headless)
         .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(storage_error)?;
     Ok(Json(json!({
         "profile_id": id,
         "pid": outcome.pid,
@@ -583,11 +648,12 @@ async fn stop_profile(Path(id): Path<String>) -> ApiResult {
     let stopped = crate::process::Tracker::shared()
         .close(&id)
         .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(storage_error)?;
     Ok(Json(json!({ "profile_id": id, "stopped": stopped })))
 }
 
 async fn export_cookies(Path(id): Path<String>) -> ApiResult {
+    crate::profile::load_raw(&id).map_err(storage_error)?;
     let _resource_guard = crate::process::lock_profile_resources()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     crate::profile::ensure_stopped(&id).map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
@@ -602,22 +668,20 @@ struct ImportCookiesReq {
 }
 
 async fn import_cookies(Path(id): Path<String>, Json(body): Json<ImportCookiesReq>) -> ApiResult {
+    crate::profile::load_raw(&id).map_err(storage_error)?;
     let _resource_guard = crate::process::lock_profile_resources()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     // Running browser would clobber imports on exit.
-    if crate::is_profile_active(&id) {
-        return Err(err(
-            StatusCode::CONFLICT,
-            "stop the profile before importing cookies",
-        ));
-    }
+    crate::profile::ensure_stopped(&id).map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
     let n = crate::cookies::import(&id, &body.cookies)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(json!({ "imported": n })))
 }
 
 async fn list_running() -> Json<Value> {
-    Json(json!(crate::process::Tracker::shared().running()))
+    Json(json!(
+        crate::process::Tracker::shared().running_with_cdp().await
+    ))
 }
 
 async fn list_fingerprints() -> ApiResult {
@@ -765,6 +829,7 @@ fn least_used_fingerprint_for(platform: Option<&str>) -> Result<String, ApiError
 
 pub async fn serve(secret: String, port: u16) {
     set_secret(&secret);
+    set_listener("starting", port, None);
 
     let protected = Router::new()
         .route("/trash", get(list_trash).delete(empty_trash))
@@ -814,11 +879,101 @@ pub async fn serve(secret: String, port: u16) {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => {
+            set_listener("listening", port, None);
             eprintln!("[launcher] automation API listening on http://{addr}");
             if let Err(e) = axum::serve(listener, app).await {
+                set_listener("failed", port, Some(e.to_string()));
                 eprintln!("[launcher] API server error: {e}");
+            } else {
+                set_listener("stopped", port, None);
             }
         }
-        Err(e) => eprintln!("[launcher] API bind {addr} failed: {e}"),
+        Err(e) => {
+            set_listener("failed", port, Some(e.to_string()));
+            eprintln!("[launcher] API bind {addr} failed: {e}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn partial_patch_after_proxy_probe_preserves_concurrent_note_edit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _test = crate::store::TestStore::new();
+        let mut profile: crate::profile::StoredProfile = serde_json::from_value(
+            json!({"_meta":{"id":"concurrent-edit"},"name":"Before","notes":"old"}),
+        )
+        .unwrap();
+        crate::profile::save_raw(&mut profile).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let signal = started.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                signal.notify_one();
+                tokio::spawn(async move {
+                    let mut buf = [0; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    let _ = stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                });
+            }
+        });
+        let request = serde_json::from_value(
+            json!({"name":"Renamed","proxy": format!("http://127.0.0.1:{port}")}),
+        )
+        .unwrap();
+        let update_notes = async {
+            started.notified().await;
+            edit_profile(
+                Path("concurrent-edit".into()),
+                Json(serde_json::from_value(json!({"notes":"new"})).unwrap()),
+            )
+            .await
+        };
+        let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(45), async {
+            tokio::join!(
+                edit_profile(Path("concurrent-edit".into()), Json(request)),
+                update_notes
+            )
+        })
+        .await
+        .unwrap();
+        server.abort();
+        assert!(first.is_ok());
+        assert!(second.is_ok());
+        let saved = crate::profile::load_raw("concurrent-edit").unwrap();
+        assert_eq!(saved.config["name"], "Renamed");
+        assert_eq!(saved.config["notes"], "new");
+    }
+
+    #[tokio::test]
+    async fn listener_reports_bind_failure_and_storage_errors_keep_categories() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        serve("test-secret".into(), port).await;
+        let status = listener_status();
+        assert_eq!(status.state, "failed");
+        assert_eq!(status.port, Some(port));
+        assert!(status.error.is_some());
+        assert_eq!(
+            storage_error(crate::errors::conflict("busy").into()).0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            storage_error(crate::errors::Failure::NotFound("missing".into()).into()).0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            storage_error(std::io::Error::from(std::io::ErrorKind::NotFound).into()).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            storage_error(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

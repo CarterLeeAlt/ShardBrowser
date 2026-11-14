@@ -4,13 +4,16 @@
 compile_error!("ShardX Launcher supports only Windows x64 (x86_64-pc-windows-msvc)");
 
 mod api;
+mod browser_cdp;
 mod cookies;
 mod display_order;
+mod errors;
 mod extensions;
 mod fingerprint_identity;
 mod fingerprints;
 mod launch;
 mod mcp_setup;
+mod operations;
 mod pixel_font_data;
 mod process;
 mod profile;
@@ -105,7 +108,9 @@ fn profile_get(id: String) -> Result<Value, String> {
             let _ = profile::save_raw(&mut stored);
         }
     }
+    let revision = profile::revision(&stored).map_err(|e| e.to_string())?;
     let mut value = serde_json::to_value(stored).map_err(|e| e.to_string())?;
+    value["_revision"] = revision.into();
     if let Some(inline) = value
         .pointer_mut("/_meta/inline_proxy")
         .and_then(|value| value.as_object_mut())
@@ -489,7 +494,7 @@ fn profile_save(
         validate_hardware_selection(obj)?;
         clamp_screen_to_real_display(&window, obj);
     }
-    save_profile_core(Some(&window), payload, false)
+    save_profile_core(Some(&window), payload, false).map_err(|e| format!("{e:#}"))
 }
 
 /// Enrich a new profile in place: platform_version, hardware, screen clamp,
@@ -514,9 +519,13 @@ pub fn save_profile_core(
     window: Option<&tauri::WebviewWindow>,
     payload: Value,
     enrich: bool,
-) -> Result<profile::ProfileMeta, String> {
-    let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
+) -> anyhow::Result<profile::ProfileMeta> {
+    let _resource_guard = process::lock_profile_resources()?;
     let mut payload = payload;
+    operations::ensure_runtime_available()?;
+    let expected_revision = payload
+        .as_object_mut()
+        .and_then(|obj| obj.remove("_revision"));
 
     let is_new = payload
         .get("_meta")
@@ -530,9 +539,13 @@ pub fn save_profile_core(
         }
     }
 
-    let mut stored: profile::StoredProfile =
-        serde_json::from_value(payload).map_err(|e| e.to_string())?;
-    extensions::load_paths(&stored.meta.extensions).map_err(|e| format!("{e:#}"))?;
+    let mut stored: profile::StoredProfile = serde_json::from_value(payload)
+        .map_err(|e| errors::Failure::InvalidInput(e.to_string()))?;
+    extensions::load_paths(&stored.meta.extensions).map_err(|e| {
+        e.context(errors::Failure::InvalidInput(
+            "Invalid extension selection".into(),
+        ))
+    })?;
     let profile_name = stored
         .config
         .get("name")
@@ -554,15 +567,24 @@ pub fn save_profile_core(
             })
             .unwrap_or(true);
     if name_changed {
-        profile::validate_profile_name(&profile_name).map_err(|e| e.to_string())?;
+        profile::validate_profile_name(&profile_name)
+            .map_err(|e| errors::Failure::InvalidInput(e.to_string()))?;
     }
     if !is_new {
-        profile::ensure_stopped(&stored.meta.id).map_err(|e| e.to_string())?;
+        profile::ensure_stopped(&stored.meta.id)?;
+        let current = profile::load_raw(&stored.meta.id)?;
+        let current_revision = profile::revision(&current)?;
+        if expected_revision.as_ref().and_then(Value::as_str) != Some(&current_revision) {
+            return Err(errors::conflict(
+                "Profile changed while saving. Reload the editor and try again.",
+            )
+            .into());
+        }
     }
     if is_new {
-        profile::save_new_unique(&mut stored).map_err(|e| e.to_string())?;
+        profile::save_new_unique(&mut stored)?;
     } else {
-        profile::save_raw(&mut stored).map_err(|e| e.to_string())?;
+        profile::save_raw(&mut stored)?;
     }
     if is_new && !stored.meta.temporary {
         let order_result = (|| -> Result<(), String> {
@@ -876,7 +898,7 @@ pub fn create_from_fingerprint_core(
 ) -> Result<profile::ProfileMeta, String> {
     let mut merged = merge_library_fingerprint(template_id)?;
     apply_default_noise(&mut merged);
-    save_profile_core(window, Value::Object(merged), true)
+    save_profile_core(window, Value::Object(merged), true).map_err(|e| format!("{e:#}"))
 }
 
 /// Produce uniquified fingerprint config WITHOUT persisting (API get-new-fingerprint).
@@ -1325,6 +1347,7 @@ fn api_info() -> Result<Value, String> {
         "port": settings.public.api_port,
         "base_url": format!("http://127.0.0.1:{}", settings.public.api_port),
         "token": token,
+        "listener": api::listener_status(),
     }))
 }
 
@@ -1333,13 +1356,30 @@ fn api_info() -> Result<Value, String> {
 fn api_regenerate_token() -> Result<Value, String> {
     let settings = settings::rotate_secret().map_err(|e| e.to_string())?;
     api::set_secret(&settings.api_secret);
-    let token = api::long_lived_token(&settings.api_secret)?;
-    Ok(serde_json::json!({
-        "enabled": settings.public.api_enabled,
-        "port": settings.public.api_port,
-        "base_url": format!("http://127.0.0.1:{}", settings.public.api_port),
-        "token": token,
-    }))
+    api_info()
+}
+
+#[tauri::command]
+fn operation_status() -> operations::Status {
+    operations::status()
+}
+
+#[tauri::command]
+fn process_recovery_status() -> Value {
+    process::Tracker::shared().recovery_status()
+}
+
+#[tauri::command]
+async fn process_recovery_retry() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        process::Tracker::shared()
+            .recover()
+            .map_err(|e| format!("{e:#}"))?;
+        profile::recover_interrupted_operations().map_err(|e| format!("{e:#}"))?;
+        Ok(process::Tracker::shared().recovery_status())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Bring the main window back from the tray / minimized state and focus it.
@@ -1355,6 +1395,7 @@ fn show_main_window(app: &tauri::AppHandle) {
 #[derive(Clone, serde::Serialize)]
 struct ExitBlockedPayload {
     running_count: usize,
+    busy: bool,
 }
 
 /// Refuse normal launcher exit paths while a ShardX browser child is alive.
@@ -1363,8 +1404,9 @@ struct ExitBlockedPayload {
 fn block_exit_if_browsers_running(app: &tauri::AppHandle) -> bool {
     use tauri::Emitter;
 
-    let running_count = process::Tracker::shared().running().len();
-    if running_count == 0 {
+    let running_count = process::Tracker::shared().active_profile_ids().len();
+    let busy = operations::is_busy() || process::lease_recovery_is_incomplete();
+    if running_count == 0 && !busy {
         return false;
     }
 
@@ -1372,7 +1414,10 @@ fn block_exit_if_browsers_running(app: &tauri::AppHandle) -> bool {
     show_main_window(app);
     let _ = app.emit(
         "launcher:exit-blocked",
-        ExitBlockedPayload { running_count },
+        ExitBlockedPayload {
+            running_count,
+            busy,
+        },
     );
     true
 }
@@ -1439,6 +1484,9 @@ pub fn run() {
             open_exports_dir,
             process_list,
             profile_active_ids,
+            operation_status,
+            process_recovery_status,
+            process_recovery_retry,
             process_kill,
             proxy_list,
             proxy_active_ids,

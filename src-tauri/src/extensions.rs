@@ -6,7 +6,7 @@ use base64::Engine;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -22,6 +22,8 @@ pub struct ExtensionEntry {
     pub description: String,
     pub profile_names: Vec<String>,
     pub trash_count: usize,
+    pub error: Option<String>,
+    pub usage_error: Option<String>,
 }
 
 pub fn validate_id(id: &str) -> Result<()> {
@@ -47,8 +49,8 @@ fn read_manifest(root: &Path) -> Result<Value> {
     let manifest: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
         .context("Invalid extension manifest.json")?;
     ensure!(
-        matches!(manifest["manifest_version"].as_u64(), Some(2 | 3)),
-        "Unsupported extension manifest version"
+        manifest["manifest_version"].as_u64() == Some(3),
+        "This browser requires Manifest V3. Import a Manifest V3 extension."
     );
     for field in ["name", "version"] {
         ensure!(
@@ -352,13 +354,29 @@ pub(crate) fn read_entry(id: &str, root: &Path) -> Result<ExtensionEntry> {
         description: text("description"),
         profile_names: Vec::new(),
         trash_count: 0,
+        error: None,
+        usage_error: None,
     })
 }
 
 pub fn import(source: &Path) -> Result<ExtensionEntry> {
-    let _guard = crate::process::lock_profile_resources()?;
-    profile::recover_interrupted_operations_locked()?;
-    cleanup_staging_locked()?;
+    ensure!(
+        source.try_exists()?,
+        crate::errors::Failure::NotFound(format!(
+            "Extension source does not exist: {}",
+            source.display()
+        ))
+    );
+    static IMPORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _import = IMPORT_LOCK
+        .try_lock()
+        .map_err(|_| crate::errors::conflict("Extension import is in progress"))?;
+    let _activity = crate::operations::activity();
+    {
+        let _guard = crate::process::lock_profile_resources()?;
+        profile::recover_interrupted_operations_locked()?;
+        cleanup_staging_locked()?;
+    }
     let lib = store::extensions_dir()?;
     let stage = lib.join(format!(".import-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&stage)?;
@@ -385,10 +403,11 @@ pub fn import(source: &Path) -> Result<ExtensionEntry> {
         )?;
         let entry = read_entry(&id, &root)?;
         tree_files(&root)?;
+        let _guard = crate::process::lock_profile_resources()?;
         let destination = path_for(&id)?;
         ensure!(
             !destination.exists(),
-            "Extension already exists in the library; remove its references before replacing it"
+            crate::errors::conflict("Extension already exists in the library; remove its references before replacing it")
         );
         fs::rename(&root, &destination)?;
         Ok(entry)
@@ -400,15 +419,19 @@ pub fn import(source: &Path) -> Result<ExtensionEntry> {
 }
 
 pub(crate) fn references(id: &str) -> Result<Vec<String>> {
-    let mut names = Vec::new();
+    Ok(profile_references()?.remove(id).unwrap_or_default())
+}
+
+fn profile_references() -> Result<HashMap<String, Vec<String>>> {
+    let mut references = HashMap::<String, Vec<String>>::new();
     for entry in fs::read_dir(store::profiles_dir()?)? {
         let path = entry?.path();
         if path.extension().and_then(|v| v.to_str()) != Some("json") {
             continue;
         }
         let stored: profile::StoredProfile = store::load_json_with_backup(&path)?;
-        if stored.meta.extensions.iter().any(|value| value == id) {
-            names.push(
+        for id in &stored.meta.extensions {
+            references.entry(id.clone()).or_default().push(
                 stored
                     .config
                     .get("name")
@@ -418,14 +441,26 @@ pub(crate) fn references(id: &str) -> Result<Vec<String>> {
             );
         }
     }
-    Ok(names)
+    Ok(references)
 }
 
 pub fn list() -> Result<Vec<ExtensionEntry>> {
     let _guard = crate::process::lock_profile_resources()?;
     profile::recover_interrupted_operations_locked()?;
-    cleanup_staging_locked()?;
-    let trash = crate::trash::list_locked()?;
+    let (references, mut usage_error) = match profile_references() {
+        Ok(references) => (references, None),
+        Err(error) => (
+            HashMap::new(),
+            Some(format!("Unable to check profile references: {error:#}")),
+        ),
+    };
+    let trash = match crate::trash::list_locked() {
+        Ok(trash) => trash,
+        Err(error) => {
+            usage_error = Some(format!("Unable to check recycle-bin references: {error:#}"));
+            Vec::new()
+        }
+    };
     let mut entries = Vec::new();
     for item in fs::read_dir(store::extensions_dir()?)? {
         let item = item?;
@@ -433,8 +468,18 @@ pub fn list() -> Result<Vec<ExtensionEntry>> {
         if id.starts_with('.') {
             continue;
         }
-        let mut entry = read_entry(&id, &item.path())?;
-        entry.profile_names = references(&id)?;
+        let mut entry = read_entry(&id, &item.path()).unwrap_or_else(|error| ExtensionEntry {
+            id: id.clone(),
+            name: id.clone(),
+            version: String::new(),
+            description: String::new(),
+            profile_names: Vec::new(),
+            trash_count: 0,
+            error: Some(format!("{error:#}")),
+            usage_error: None,
+        });
+        entry.profile_names = references.get(&id).cloned().unwrap_or_default();
+        entry.usage_error = usage_error.clone();
         entry.trash_count = trash
             .iter()
             .filter(|item| item.extensions.contains(&id))
@@ -446,15 +491,15 @@ pub fn list() -> Result<Vec<ExtensionEntry>> {
 }
 
 pub fn delete(id: &str) -> Result<()> {
+    let _activity = crate::operations::activity();
     let _guard = crate::process::lock_profile_resources()?;
     profile::recover_interrupted_operations_locked()?;
-    cleanup_staging_locked()?;
     ensure!(
         references(id)?.is_empty()
             && !crate::trash::list_locked()?
                 .iter()
                 .any(|e| e.extensions.iter().any(|v| v == id)),
-        "Extension is referenced by a profile or the recycle bin; remove those references first"
+        crate::errors::conflict("Extension is referenced by a profile or the recycle bin; remove those references first")
     );
     let path = path_for(id)?;
     if path.exists() {
@@ -577,6 +622,39 @@ pub(crate) mod tests {
         put(value.len() as u64, &mut out);
         out.extend_from_slice(value);
         out
+    }
+
+    #[test]
+    fn damaged_extension_does_not_hide_healthy_entries_and_mv2_is_rejected() {
+        let test = store::TestStore::new();
+        let healthy = fixture(&test.root.join("healthy"));
+        let damaged = fixture(&test.root.join("damaged"));
+        fs::write(path_for(&damaged.id).unwrap().join("manifest.json"), b"{").unwrap();
+        let entries = list().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries
+            .iter()
+            .find(|e| e.id == healthy.id)
+            .unwrap()
+            .error
+            .is_none());
+        assert!(entries
+            .iter()
+            .find(|e| e.id == damaged.id)
+            .unwrap()
+            .error
+            .is_some());
+        let source = test.root.join("mv2");
+        fs::create_dir(&source).unwrap();
+        fs::write(
+            source.join("manifest.json"),
+            br#"{"manifest_version":2,"name":"Legacy","version":"1.0"}"#,
+        )
+        .unwrap();
+        assert!(import(&source)
+            .unwrap_err()
+            .to_string()
+            .contains("Manifest V3"));
     }
 
     #[test]

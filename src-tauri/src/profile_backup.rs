@@ -538,8 +538,8 @@ pub(crate) fn export(
     profile_ids: Vec<String>,
 ) -> std::result::Result<ProfileBackupSummary, String> {
     let _backup_guard = BACKUP_OPERATION_LOCK
-        .lock()
-        .map_err(|_| "profile backup operation lock is poisoned".to_string())?;
+        .try_lock()
+        .map_err(|_| "Another profile backup operation is in progress".to_string())?;
     if profile_ids.is_empty() {
         return Err("select at least one profile to export".into());
     }
@@ -554,10 +554,8 @@ pub(crate) fn export(
         }
     }
 
-    let _resource_guard = process::lock_profile_resources().map_err(|error| error.to_string())?;
-    for id in &profile_ids {
-        profile::ensure_stopped(id).map_err(|error| error.to_string())?;
-    }
+    let _reservation =
+        crate::operations::reserve_profiles(&profile_ids).map_err(|error| error.to_string())?;
     let (stamp, exported_at) = unix_timestamp().map_err(|error| error.to_string())?;
     let mut pending = Vec::with_capacity(profile_ids.len());
     for id in &profile_ids {
@@ -998,6 +996,11 @@ fn remove_import_artifacts(artifacts: &ImportArtifacts) -> Result<()> {
     if profile_path.exists() {
         fs::remove_file(profile_path)?;
     }
+    let profile_backup =
+        store::backup_path(&store::profiles_dir()?.join(format!("{}.json", artifacts.profile_id)))?;
+    if profile_backup.exists() {
+        fs::remove_file(profile_backup)?;
+    }
     let user_data = store::user_data_root()?.join(&artifacts.profile_id);
     if user_data.exists() {
         fs::remove_dir_all(user_data)?;
@@ -1045,9 +1048,10 @@ fn import_failure(
 }
 
 pub(crate) fn import(paths: Vec<String>) -> std::result::Result<ProfileBackupSummary, String> {
+    let _activity = crate::operations::activity();
     let _backup_guard = BACKUP_OPERATION_LOCK
-        .lock()
-        .map_err(|_| "profile backup operation lock is poisoned".to_string())?;
+        .try_lock()
+        .map_err(|_| "Another profile backup operation is in progress".to_string())?;
     if paths.is_empty() {
         return Err("select at least one .shardx-backup file".into());
     }
@@ -1104,6 +1108,12 @@ pub(crate) fn import(paths: Vec<String>) -> std::result::Result<ProfileBackupSum
             return Err(error.to_string());
         }
     };
+    if let Err(error) = crate::operations::ensure_runtime_available()
+        .and_then(|_| profile::recover_interrupted_operations_locked())
+    {
+        cleanup_staging(&prepared);
+        return Err(error.to_string());
+    }
 
     let mut imported = Vec::with_capacity(prepared.len());
     let mut installed_extensions = Vec::new();
@@ -1226,6 +1236,177 @@ pub(crate) fn cleanup_stale_artifacts() -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires SHARDX_TEST_BROWSER pointing to the actual Chromium executable"]
+    async fn real_chromium_cookie_and_backup_roundtrip() {
+        use futures_util::{SinkExt, StreamExt};
+        use serde_json::{json, Value};
+        use std::time::Duration;
+        async fn command(endpoint: &crate::process::CdpInfo, method: &str, params: Value) -> Value {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let (mut socket, _) =
+                    tokio_tungstenite::connect_async(&endpoint.web_socket_debugger_url)
+                        .await
+                        .unwrap();
+                socket
+                    .send(tokio_tungstenite::tungstenite::Message::text(
+                        json!({"id":1,"method":method,"params":params}).to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                while let Some(message) = socket.next().await {
+                    let message = message.unwrap();
+                    if !message.is_text() {
+                        continue;
+                    }
+                    let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                    if value["id"] == 1 {
+                        assert!(value.get("error").is_none(), "{value}");
+                        return value["result"].clone();
+                    }
+                }
+                panic!("CDP disconnected before response");
+            })
+            .await
+            .unwrap()
+        }
+        async fn start(directory: &Path) -> (tokio::process::Child, crate::process::CdpInfo) {
+            let child = tokio::process::Command::new(std::env::var("SHARDX_TEST_BROWSER").unwrap())
+                .args([
+                    "--headless=new",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--remote-debugging-port=0",
+                    "--disable-background-networking",
+                ])
+                .arg(format!("--user-data-dir={}", directory.display()))
+                .arg("about:blank")
+                .creation_flags(0x08000000)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let endpoint = tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    if let Ok(Some(endpoint)) = crate::browser_cdp::discover(directory).await {
+                        break endpoint;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .unwrap();
+            (child, endpoint)
+        }
+        let _test = store::TestStore::new();
+        let mut source: profile::StoredProfile = serde_json::from_value(json!({"_meta":{"id":"real-cookie-source"},"name":"RealCookie","navigator":{"platform_version":"17.0.0"},"noise":{"canvas":{"enabled":true,"seed":314159}}})).unwrap();
+        profile::save_raw(&mut source).unwrap();
+        let directory = profile::user_data_dir(&source.meta.id).unwrap();
+        cookies::install_os_crypt_key(&directory, &[19; 32]).unwrap();
+        let (mut child, endpoint) = start(&directory).await;
+        let cookie = |site: &str| json!({"name":"session","value":site,"url":"https://cookie.test:8443/","domain":"cookie.test","path":"/","secure":true,"httpOnly":true,"sameSite":"None","priority":"High","sourceScheme":"Secure","sourcePort":8443,"expires":1900000000,"partitionKey":{"topLevelSite":site,"hasCrossSiteAncestor":true}});
+        command(
+            &endpoint,
+            "Storage.setCookies",
+            json!({"cookies":[cookie("https://first.test"),cookie("https://second.test")]}),
+        )
+        .await;
+        assert_eq!(
+            command(&endpoint, "Storage.getCookies", json!({})).await["cookies"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        crate::browser_cdp::close(&endpoint).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(20), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        let exported = cookies::export(&source.meta.id).unwrap();
+        assert_eq!(exported.len(), 2);
+        assert!(exported.iter().all(|c| !c.top_frame_site_key.is_empty()
+            && c.source_port == Some(8443)
+            && c.priority == 2));
+        assert_eq!(cookies::import(&source.meta.id, &exported).unwrap(), 2);
+        assert_eq!(
+            serde_json::to_value(cookies::export(&source.meta.id).unwrap()).unwrap(),
+            serde_json::to_value(&exported).unwrap()
+        );
+        export(vec![source.meta.id.clone()]).unwrap();
+        let backup = fs::read_dir(store::exports_dir().unwrap())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        import(vec![backup.to_string_lossy().into()]).unwrap();
+        let restored = profile::list_all()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id != source.meta.id)
+            .unwrap();
+        let restored_config = profile::load_raw(&restored.id).unwrap();
+        assert_eq!(restored_config.config["noise"], source.config["noise"]);
+        let (mut child, endpoint) = start(&profile::user_data_dir(&restored.id).unwrap()).await;
+        let reopened = command(&endpoint, "Storage.getCookies", json!({})).await;
+        let cookies = reopened["cookies"].as_array().unwrap();
+        assert_eq!(cookies.len(), 2);
+        for site in ["https://first.test", "https://second.test"] {
+            assert!(cookies.iter().any(|c| c["value"] == site
+                && c["partitionKey"]["topLevelSite"] == site
+                && c["sourcePort"] == 8443));
+        }
+        crate::browser_cdp::close(&endpoint).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(20), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn late_restore_failure_removes_profile_and_atomic_backup() {
+        let _test = store::TestStore::new();
+        let mut source: profile::StoredProfile = serde_json::from_value(serde_json::json!({"_meta":{"id":"rollback-source"},"name":"Rollback","navigator":{"platform_version":"17.0.0"}})).unwrap();
+        profile::save_raw(&mut source).unwrap();
+        cookies::install_os_crypt_key(&profile::user_data_dir(&source.meta.id).unwrap(), &[3; 32])
+            .unwrap();
+        export(vec![source.meta.id.clone()]).unwrap();
+        let backup = fs::read_dir(store::exports_dir().unwrap())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        profile::delete(&source.meta.id).unwrap();
+        fs::write(store::display_order_path().unwrap(), b"invalid").unwrap();
+        assert!(import(vec![backup.to_string_lossy().into()]).is_err());
+        assert_eq!(
+            fs::read_dir(store::profiles_dir().unwrap())
+                .unwrap()
+                .count(),
+            0
+        );
+        let path = store::profiles_dir()
+            .unwrap()
+            .join("rollback-artifact.json");
+        fs::write(&path, b"{}").unwrap();
+        store::atomic_write(&path, b"{\"updated\":true}").unwrap();
+        assert!(store::backup_path(&path).unwrap().exists());
+        remove_import_artifacts(&ImportArtifacts {
+            profile_id: "rollback-artifact".into(),
+            created_fingerprint_id: None,
+        })
+        .unwrap();
+        assert_eq!(
+            fs::read_dir(store::profiles_dir().unwrap())
+                .unwrap()
+                .count(),
+            0
+        );
+    }
 
     #[test]
     fn existing_v2_v3_and_v4_backups_restore_their_archived_caches() {

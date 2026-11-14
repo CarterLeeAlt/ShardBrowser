@@ -39,6 +39,7 @@ pub async fn launch_profile(
     // several seconds, so a plain running-process check would leave a window
     // where a second caller could start the same profile or mutate its proxy.
     let launch_reservation = Tracker::shared().reserve_launch(profile_id)?;
+    crate::runtime::ensure_migration_complete()?;
     let bin = resolve_binary()?;
     let mut stored = profile::load_raw(profile_id)?;
     let extension_paths = crate::extensions::load_paths(&stored.meta.extensions)?;
@@ -352,7 +353,7 @@ pub async fn launch_profile(
                     "[launcher] CDP ready for {profile_id}: {}",
                     c.web_socket_debugger_url
                 );
-                Tracker::shared().set_cdp(profile_id, c.clone());
+                Tracker::shared().set_cdp(profile_id, pid, c.clone());
                 Some(c)
             }
             None => {

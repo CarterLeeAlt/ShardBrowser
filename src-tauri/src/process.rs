@@ -15,11 +15,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::Child;
 
 const LEASE_FORMAT_VERSION: u32 = 1;
-/// Consecutive failed recovery attempts after which unresolved leases are
-/// archived out of the active set, so a persistently failing process check
-/// (endpoint-security product, protected-process PID reuse) cannot keep the
-/// launcher locked forever.
-const LEASE_SELF_HEAL_THRESHOLD: u32 = 3;
+/// Record a diagnostic snapshot after repeated failures; unresolved live
+/// processes remain protected until a later inspection proves they exited.
+const LEASE_DIAGNOSTIC_THRESHOLD: u32 = 3;
 const RECOVERY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 static LEASE_RECOVERY_INCOMPLETE: AtomicBool = AtomicBool::new(false);
 
@@ -33,9 +31,7 @@ fn set_lease_recovery_incomplete(value: bool) {
 
 pub fn ensure_lease_recovery_complete() -> Result<()> {
     if lease_recovery_is_incomplete() {
-        anyhow::bail!(
-            "browser process lease recovery is incomplete; restart the launcher — if the process check keeps failing, unresolved leases are archived automatically after {LEASE_SELF_HEAL_THRESHOLD} consecutive attempts"
-        );
+        anyhow::bail!(crate::errors::conflict("Browser process recovery is incomplete. Close the affected browsers or resolve process access, then retry recovery."));
     }
     Ok(())
 }
@@ -49,8 +45,10 @@ pub struct Tracker {
     /// Serializes read/modify/write lease-file operations with tracker changes.
     lease_file: Mutex<()>,
     /// Consecutive incomplete recoveries, mirrored into the lease file so the
-    /// count survives restarts (see LEASE_SELF_HEAL_THRESHOLD).
+    /// count survives restarts.
     lease_incomplete_count: Mutex<u32>,
+    finish_lock: Mutex<()>,
+    recovery_error: Mutex<Option<String>>,
 }
 
 /// Keeps a profile reserved while launch preflight is in progress. Dropping
@@ -117,6 +115,7 @@ struct ChildEntry {
     closer: ProcessCloser,
     /// Set once DevToolsActivePort is read; None for UI launches or recovered runs.
     cdp: Option<CdpInfo>,
+    cdp_error: Option<String>,
     /// Monotonic launch time used for the current-session uptime display.
     started_at: Instant,
     lease: ProcessLease,
@@ -147,8 +146,7 @@ struct LeaseFile {
     #[serde(default)]
     format_version: u32,
     /// Consecutive recovery attempts that ended with unverifiable leases.
-    /// Tracked across restarts so the fail-closed lock can self-heal after
-    /// `LEASE_SELF_HEAL_THRESHOLD` failed attempts.
+    /// Tracked across restarts for recovery diagnostics.
     #[serde(default)]
     consecutive_incomplete_recoveries: u32,
     #[serde(default)]
@@ -172,6 +170,8 @@ impl Tracker {
             unverified: Mutex::new(Vec::new()),
             lease_file: Mutex::new(()),
             lease_incomplete_count: Mutex::new(0),
+            finish_lock: Mutex::new(()),
+            recovery_error: Mutex::new(None),
         }
     }
 
@@ -180,6 +180,31 @@ impl Tracker {
     /// and process creation time; when Windows exposes the command line, its
     /// --user-data-dir must also match the persisted directory.
     pub fn recover(&'static self) -> Result<usize> {
+        let _resources = resource_lock()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("profile resource lock poisoned"))?;
+        let _finish = self
+            .finish_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("process finish lock poisoned"))?;
+        let result = self.recover_locked();
+        *self
+            .recovery_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = result.as_ref().err().map(|e| format!("{e:#}"));
+        crate::notify_store_changed("recovery");
+        result
+    }
+
+    pub fn recovery_status(&self) -> serde_json::Value {
+        serde_json::json!({
+            "incomplete": lease_recovery_is_incomplete(),
+            "attempts": *self.lease_incomplete_count.lock().unwrap_or_else(|e| e.into_inner()),
+            "error": *self.recovery_error.lock().unwrap_or_else(|e| e.into_inner()),
+        })
+    }
+
+    fn recover_locked(&'static self) -> Result<usize> {
         // Remain fail-closed until the complete recovery path proves that no
         // persisted browser lease needs protection.
         set_lease_recovery_incomplete(true);
@@ -223,6 +248,11 @@ impl Tracker {
             if !lease_has_required_fields(&lease)
                 || !lease_user_data_dir_is_expected(&lease, &expected_user_data_root)
             {
+                // An incomplete creation-time snapshot cannot identify a live
+                // process, but a confirmed absent PID proves this lease ended.
+                if lease.pid != 0 && matches!(inspect_process(lease.pid), Ok(None)) {
+                    continue;
+                }
                 // A partial/corrupt lease cannot prove its browser stopped.
                 // Leave every temporary profile intact for this startup.
                 inspection_failed = true;
@@ -266,11 +296,18 @@ impl Tracker {
             }
         }
 
+        let failures = if inspection_failed {
+            self.bump_incomplete_recoveries()
+        } else {
+            self.reset_incomplete_recoveries();
+            0
+        };
+        let mut new_monitors = Vec::new();
         // Persist and expose every verified live lease before reporting an
         // incomplete inspection. This preserves the mutation/launch lock for
         // browsers whose identity was proven even if another lease needs a
         // later recovery attempt.
-        {
+        let persisted_result = {
             let _lease_guard = self
                 .lease_file
                 .lock()
@@ -284,12 +321,17 @@ impl Tracker {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("process unverified lease lock poisoned"))?;
             for lease in &recovered {
+                if entries.contains_key(&lease.profile_id) {
+                    continue;
+                }
+                new_monitors.push((lease.profile_id.clone(), lease.run_id.clone()));
                 entries.insert(
                     lease.profile_id.clone(),
                     ChildEntry {
                         pid: lease.pid,
                         closer: ProcessCloser::Recovered,
                         cdp: None,
+                        cdp_error: None,
                         started_at: instant_from_lease(lease),
                         lease: lease.clone(),
                         closing: false,
@@ -298,70 +340,32 @@ impl Tracker {
             }
             *unverified = unresolved;
             drop(unverified);
-            if let Err(error) = self.persist_leases_locked(&entries) {
-                eprintln!("[launcher] persist recovered process leases failed: {error:#}");
-            }
-        }
+            self.persist_leases_locked(&entries)
+        };
 
-        for lease in &recovered {
-            self.spawn_recovery_monitor(lease.profile_id.clone(), lease.run_id.clone());
+        for (profile_id, run_id) in new_monitors {
+            self.spawn_recovery_monitor(profile_id, run_id);
         }
+        persisted_result.context("persist process recovery state")?;
 
         if inspection_failed {
-            let failures = self.bump_incomplete_recoveries();
-            if failures < LEASE_SELF_HEAL_THRESHOLD {
-                set_lease_recovery_incomplete(true);
-                anyhow::bail!("one or more persisted process leases could not be verified");
-            }
-            // Self-heal: the process check has now failed on this many
-            // consecutive starts, so the fail-closed lock would otherwise be
-            // permanent. Archive the unverifiable leases out of the active
-            // set (audit trail survives in a sibling file); a genuinely live
-            // browser remains guarded by the engine's own user-data
-            // singleton lock.
-            eprintln!(
-                "[launcher] {failures} consecutive incomplete lease recoveries; archiving unresolved leases"
-            );
-            let unresolved: Vec<ProcessLease> = {
-                let mut unverified = self
+            if failures == LEASE_DIAGNOSTIC_THRESHOLD {
+                let unverified = self
                     .unverified
                     .lock()
                     .map_err(|_| anyhow::anyhow!("process unverified lease lock poisoned"))?;
-                std::mem::take(&mut *unverified)
-            };
-            let archived_at_unix_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            let payload = serde_json::to_vec_pretty(&serde_json::json!({
-                "format_version": LEASE_FORMAT_VERSION,
-                "archived_at_unix_ms": archived_at_unix_ms,
-                "leases": unresolved,
-            }))?;
-            let archive_path = crate::store::process_leases_path()?
-                .with_file_name("process-leases.unresolved.json");
-            crate::store::atomic_write(&archive_path, &payload)?;
-            self.reset_incomplete_recoveries();
-            {
-                let _lease_guard = self
-                    .lease_file
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("process lease lock poisoned"))?;
-                let entries = self
-                    .inner
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("process tracker lock poisoned"))?;
-                if let Err(error) = self.persist_leases_locked(&entries) {
-                    eprintln!(
-                        "[launcher] persist process leases after self-heal failed: {error:#}"
-                    );
-                }
+                let payload = serde_json::to_vec_pretty(&serde_json::json!({
+                    "format_version": LEASE_FORMAT_VERSION, "recorded_at_unix_ms": unix_now_ms(), "leases": &*unverified,
+                }))?;
+                crate::store::atomic_write(
+                    &crate::store::process_leases_path()?
+                        .with_file_name("process-leases.unresolved.json"),
+                    &payload,
+                )?;
             }
-            set_lease_recovery_incomplete(false);
-            return Ok(recovered.len());
+            anyhow::bail!("Process recovery attempt {failures} could not verify all browsers. Close the affected browsers or resolve process access, then retry recovery.");
         }
 
-        self.reset_incomplete_recoveries();
         set_lease_recovery_incomplete(false);
         Ok(recovered.len())
     }
@@ -372,13 +376,16 @@ impl Tracker {
         // Serialize launch reservation against proxy edits/deletes. Whichever
         // operation starts first completes its atomic state transition first.
         let _resource_guard = lock_profile_resources()?;
+        crate::operations::ensure_profile_available(profile_id)?;
         if self
             .inner
             .lock()
             .map_err(|_| anyhow::anyhow!("process tracker lock poisoned"))?
             .contains_key(profile_id)
         {
-            anyhow::bail!("This browser profile is already running");
+            anyhow::bail!(crate::errors::conflict(
+                "This browser profile is already running"
+            ));
         }
 
         let mut launching = self
@@ -386,7 +393,9 @@ impl Tracker {
             .lock()
             .map_err(|_| anyhow::anyhow!("launch reservation lock poisoned"))?;
         if launching.contains_key(profile_id) {
-            anyhow::bail!("This browser profile is already starting");
+            anyhow::bail!(crate::errors::conflict(
+                "This browser profile is already starting"
+            ));
         }
         let control = Arc::new(LaunchControl {
             cancelled: tokio::sync::watch::channel(false).0,
@@ -466,11 +475,13 @@ impl Tracker {
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let run_id = lease.run_id.clone();
+        let close_lease = lease.clone();
 
         self.insert_entry(ChildEntry {
             pid,
             closer: ProcessCloser::Child(tx),
             cdp: None,
+            cdp_error: None,
             started_at: Instant::now(),
             lease,
             closing: false,
@@ -479,60 +490,31 @@ impl Tracker {
             launching.remove(&profile_id);
         }
 
-        // A launcher stop request posts WM_CLOSE and then waits without a
-        // deadline. Chromium alone decides when shutdown is complete, so its
-        // Cookie, OAuth and Local State writes are never cut off by this app.
+        // Keep monitoring after a failed or slow close. A timed-out request
+        // reports the live process honestly and allows another graceful attempt.
         tokio::spawn(async move {
-            let close_completion = tokio::select! {
-                wait_result = child.wait() => {
-                    if let Err(error) = wait_result {
-                        eprintln!("[launcher] wait for browser profile {profile_id} failed: {error}");
+            let mut pending: Option<tokio::sync::oneshot::Sender<Result<()>>> = None;
+            let mut deadline = tokio::time::Instant::now();
+            let mut accepting = true;
+            loop {
+                tokio::select! {
+                    result = child.wait() => {
+                        Self::shared().finish_run(&profile_id, &run_id, true, true);
+                        if let Some(reply) = pending.take() { let _ = reply.send(result.map(|_| ()).map_err(Into::into)); }
+                        break;
                     }
-                    None
-                }
-                request = rx.recv() => {
-                    rx.close();
-                    match request {
-                        Some(reply) => {
-                            let close_result = child
-                                .id()
-                                .map(request_graceful_browser_close)
-                                .unwrap_or(Ok(()));
-                            if let Err(error) = close_result {
-                                if matches!(child.try_wait(), Ok(Some(_))) {
-                                    // The process exited between select() and
-                                    // taskkill. It already closed cleanly.
-                                    Some((reply, Ok(())))
-                                } else {
-                                    let _ = reply.send(Err(error));
-                                    if let Err(wait_error) = child.wait().await {
-                                        eprintln!("[launcher] wait for browser profile {profile_id} after close failure failed: {wait_error}");
-                                    }
-                                    None
-                                }
-                            } else {
-                                let wait_result = child
-                                    .wait()
-                                    .await
-                                    .map(|_| ())
-                                    .with_context(|| format!("wait for browser profile {profile_id} to close"));
-                                Some((reply, wait_result))
+                    request = rx.recv(), if accepting && pending.is_none() => {
+                        if let Some(reply) = request {
+                            match Self::shared().request_close(&close_lease).await {
+                                Ok(()) => { pending = Some(reply); deadline = tokio::time::Instant::now() + Duration::from_secs(20); }
+                                Err(error) => { let _ = reply.send(Err(error)); }
                             }
-                        }
-                        None => {
-                            if let Err(error) = child.wait().await {
-                                eprintln!("[launcher] wait for browser profile {profile_id} failed: {error}");
-                            }
-                            None
-                        }
+                        } else { accepting = false; }
+                    }
+                    _ = tokio::time::sleep_until(deadline), if pending.is_some() => {
+                        if let Some(reply) = pending.take() { let _ = reply.send(Err(anyhow::anyhow!("Browser is still running after the close request. Check its dialogs and try stopping again."))); }
                     }
                 }
-            };
-            // Removing the tracker entry also removes the persisted lease. A
-            // stale lease can never outlive a normally observed child exit.
-            Self::shared().finish_run(&profile_id, &run_id, true, true);
-            if let Some((reply, result)) = close_completion {
-                let _ = reply.send(result);
             }
         });
 
@@ -540,10 +522,13 @@ impl Tracker {
     }
 
     /// Attach CDP to a tracked profile; no-op if the profile already exited.
-    pub fn set_cdp(&self, profile_id: &str, cdp: CdpInfo) {
+    pub fn set_cdp(&self, profile_id: &str, pid: u32, cdp: CdpInfo) {
         if let Ok(mut g) = self.inner.lock() {
             if let Some(e) = g.get_mut(profile_id) {
-                e.cdp = Some(cdp);
+                if e.pid == pid {
+                    e.cdp = Some(cdp);
+                    e.cdp_error = None;
+                }
             }
         }
     }
@@ -560,6 +545,7 @@ impl Tracker {
                 profile_id: id.clone(),
                 pid: e.pid,
                 cdp: e.cdp.clone(),
+                cdp_error: e.cdp_error.clone(),
                 uptime_ms: e.started_at.elapsed().as_millis() as u64,
             })
             .collect()
@@ -602,6 +588,86 @@ impl Tracker {
         active.into_iter().collect()
     }
 
+    pub async fn refresh_cdp(&self, profile_id: &str) -> Result<()> {
+        let lease = {
+            let entries = self
+                .inner
+                .lock()
+                .map_err(|_| anyhow::anyhow!("process tracker lock poisoned"))?;
+            let Some(entry) = entries.get(profile_id) else {
+                return Ok(());
+            };
+            if entry.cdp.is_some() {
+                return Ok(());
+            }
+            entry.lease.clone()
+        };
+        let process = inspect_process(lease.pid)
+            .map_err(anyhow::Error::msg)?
+            .context("Browser exited during debugging recovery")?;
+        anyhow::ensure!(
+            lease_matches_process(&lease, &process),
+            "Browser identity changed during debugging recovery"
+        );
+        let enabled = process.command_line.as_deref().is_some_and(|line| {
+            windows_command_line_arguments(line).iter().any(|arg| {
+                arg == "--remote-debugging-port" || arg.starts_with("--remote-debugging-port=")
+            })
+        });
+        if !enabled {
+            return Ok(());
+        }
+        let endpoint = crate::browser_cdp::discover(Path::new(&lease.user_data_dir))
+            .await
+            .and_then(|endpoint| endpoint.context("Browser debugging endpoint is not ready"));
+        let mut entries = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("process tracker lock poisoned"))?;
+        if let Some(entry) = entries
+            .get_mut(profile_id)
+            .filter(|entry| entry.lease.run_id == lease.run_id)
+        {
+            match endpoint {
+                Ok(endpoint) => {
+                    entry.cdp = Some(endpoint);
+                    entry.cdp_error = None;
+                }
+                Err(error) => {
+                    entry.cdp_error = Some(format!("{error:#}"));
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn running_with_cdp(&self) -> Vec<RunningProfile> {
+        use futures_util::StreamExt;
+        let ids: Vec<_> = self
+            .running()
+            .into_iter()
+            .map(|entry| entry.profile_id)
+            .collect();
+        futures_util::stream::iter(ids)
+            .map(|id| async move {
+                let _ = self.refresh_cdp(&id).await;
+            })
+            .buffer_unordered(8)
+            .collect::<Vec<_>>()
+            .await;
+        self.running()
+    }
+
+    async fn request_close(&self, lease: &ProcessLease) -> Result<()> {
+        self.refresh_cdp(&lease.profile_id).await?;
+        if let Some(endpoint) = self.cdp(&lease.profile_id) {
+            crate::browser_cdp::close(&endpoint).await
+        } else {
+            request_graceful_browser_close(lease.pid)
+        }
+    }
+
     pub async fn close(&'static self, profile_id: &str) -> Result<bool> {
         enum CloseAction {
             Child(tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<()>>>),
@@ -617,7 +683,9 @@ impl Tracker {
                 return Ok(false);
             };
             if entry.closing {
-                anyhow::bail!("browser profile is already closing");
+                anyhow::bail!(crate::errors::conflict(
+                    "browser profile is already closing"
+                ));
             }
             entry.closing = true;
             match &entry.closer {
@@ -725,7 +793,7 @@ impl Tracker {
             .lease_incomplete_count
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *count += 1;
+        *count = count.saturating_add(1);
         *count
     }
 
@@ -762,6 +830,7 @@ impl Tracker {
         account_runtime: bool,
         delete_temporary: bool,
     ) {
+        let _finish_guard = self.finish_lock.lock().unwrap_or_else(|e| e.into_inner());
         // Keep a persistent profile active while its final runtime update is
         // written. This preserves the existing guarantee that a newly opened
         // editor cannot race a stale post-exit profile snapshot.
@@ -782,6 +851,8 @@ impl Tracker {
         let Some(entry) = self.remove_run(profile_id, run_id) else {
             return;
         };
+        drop(_finish_guard);
+        crate::notify_store_changed("profiles");
         if entry.lease.temporary && delete_temporary {
             match crate::profile::delete(profile_id) {
                 Ok(()) => eprintln!("[launcher] temporary profile {profile_id} deleted on close"),
@@ -794,9 +865,12 @@ impl Tracker {
 
     fn spawn_recovery_monitor(&'static self, profile_id: String, run_id: String) {
         tokio::spawn(async move {
+            if let Err(error) = self.refresh_cdp(&profile_id).await {
+                eprintln!("[launcher] CDP recovery for {profile_id}: {error:#}");
+            }
             loop {
                 let lease = {
-                    let Ok(entries) = Self::shared().inner.lock() else {
+                    let Ok(entries) = self.inner.lock() else {
                         return;
                     };
                     let Some(entry) = entries.get(&profile_id) else {
@@ -813,7 +887,7 @@ impl Tracker {
                         tokio::time::sleep(RECOVERY_POLL_INTERVAL).await;
                     }
                     Ok(None) => {
-                        Self::shared().finish_run(&profile_id, &run_id, true, true);
+                        self.finish_run(&profile_id, &run_id, true, true);
                         return;
                     }
                     Ok(Some(_)) => {
@@ -822,7 +896,7 @@ impl Tracker {
                         eprintln!(
                             "[launcher] recovered process identity changed for {profile_id}; releasing lease without cleanup"
                         );
-                        Self::shared().finish_run(&profile_id, &run_id, false, false);
+                        self.finish_run(&profile_id, &run_id, false, false);
                         return;
                     }
                     Err(error) => {
@@ -858,8 +932,8 @@ impl Tracker {
             }
         }
 
-        request_graceful_browser_close(lease.pid)?;
-        loop {
+        self.request_close(&lease).await?;
+        tokio::time::timeout(Duration::from_secs(20), async { loop {
             match inspect_process(lease.pid) {
                 Ok(None) => {
                     self.finish_run(profile_id, &lease.run_id, true, true);
@@ -876,7 +950,7 @@ impl Tracker {
                     anyhow::bail!("cannot verify browser process while waiting for stop: {error}")
                 }
             }
-        }
+        } }).await.context("Browser is still running after the close request. Check its dialogs and try stopping again.")?
     }
 }
 
@@ -905,11 +979,16 @@ fn request_graceful_browser_close(pid: u32) -> Result<()> {
 }
 
 pub fn lock_profile_resources() -> Result<MutexGuard<'static, ()>> {
+    let guard = resource_lock()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("profile resource lock poisoned"))?;
     ensure_lease_recovery_complete()?;
+    Ok(guard)
+}
+
+fn resource_lock() -> &'static Mutex<()> {
     static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .map_err(|_| anyhow::anyhow!("profile resource lock poisoned"))
 }
 
 #[derive(Debug)]
@@ -1163,20 +1242,30 @@ mod windows_process {
             }
             return Err(format!("open PID {pid}: {error}"));
         }
-        let result = unsafe {
-            let executable_path = full_image_name(process)?;
-            let started_at_100ns = process_creation_time(process)?;
+        let result = (|| unsafe {
+            let Some(started_at_100ns) = live_process_creation_time(process)? else {
+                return Ok(None);
+            };
+            let executable_path = match full_image_name(process) {
+                Ok(path) => path,
+                Err(error) => {
+                    if live_process_creation_time(process)?.is_none() {
+                        return Ok(None);
+                    }
+                    return Err(error);
+                }
+            };
             let command_line = read_command_line(pid);
-            Ok(LiveProcess {
+            Ok(Some(LiveProcess {
                 executable_path,
                 started_at_100ns,
                 command_line,
-            })
-        };
+            }))
+        })();
         unsafe {
             CloseHandle(process);
         }
-        result.map(Some)
+        result
     }
 
     unsafe fn full_image_name(process: isize) -> std::result::Result<String, String> {
@@ -1192,7 +1281,9 @@ mod windows_process {
         Ok(OsString::from_wide(&buffer).to_string_lossy().into_owned())
     }
 
-    unsafe fn process_creation_time(process: isize) -> std::result::Result<u64, String> {
+    unsafe fn live_process_creation_time(
+        process: isize,
+    ) -> std::result::Result<Option<u64>, String> {
         let mut creation = FileTime {
             low_date_time: 0,
             high_date_time: 0,
@@ -1206,7 +1297,12 @@ mod windows_process {
                 std::io::Error::last_os_error()
             ));
         }
-        Ok((u64::from(creation.high_date_time) << 32) | u64::from(creation.low_date_time))
+        if exit.high_date_time != 0 || exit.low_date_time != 0 {
+            return Ok(None);
+        }
+        Ok(Some(
+            (u64::from(creation.high_date_time) << 32) | u64::from(creation.low_date_time),
+        ))
     }
 
     /// Direct PEB inspection avoids a WMI/PowerShell subprocess during startup.
@@ -1312,8 +1408,155 @@ mod tests {
         LeaseFile, ProcessLease, LEASE_FORMAT_VERSION,
     };
 
+    #[test]
+    fn failed_recovery_count_survives_restarts_without_discarding_unverified_leases() {
+        let _test = crate::store::TestStore::new();
+        let path = crate::store::process_leases_path().unwrap();
+        let lease = ProcessLease {
+            profile_id: "unverified".into(),
+            pid: 0,
+            executable_path: "unknown".into(),
+            user_data_dir: "unknown".into(),
+            run_id: "unknown".into(),
+            temporary: false,
+            process_started_at_100ns: 0,
+            launched_at_unix_ms: 0,
+        };
+        crate::store::atomic_write(
+            &path,
+            &serde_json::to_vec(&LeaseFile {
+                format_version: LEASE_FORMAT_VERSION,
+                consecutive_incomplete_recoveries: 0,
+                leases: vec![lease],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        for expected in 1..=4 {
+            let tracker = Box::leak(Box::new(super::Tracker::new()));
+            assert!(tracker.recover().is_err());
+            let saved: LeaseFile = crate::store::load_json_with_backup(&path).unwrap();
+            assert_eq!(saved.consecutive_incomplete_recoveries, expected);
+            assert_eq!(saved.leases.len(), 1);
+            assert!(super::lease_recovery_is_incomplete());
+        }
+        assert!(path
+            .with_file_name("process-leases.unresolved.json")
+            .exists());
+        let mut stopped: LeaseFile = crate::store::load_json_with_backup(&path).unwrap();
+        assert!(super::inspect_process(u32::MAX).unwrap().is_none());
+        stopped.leases[0].pid = u32::MAX;
+        crate::store::atomic_write(&path, &serde_json::to_vec(&stopped).unwrap()).unwrap();
+        Box::leak(Box::new(super::Tracker::new()))
+            .recover()
+            .unwrap();
+        assert!(!super::lease_recovery_is_incomplete());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires SHARDX_TEST_BROWSER pointing to the actual Chromium executable"]
+    async fn real_chromium_cdp_survives_recovery_and_closes_headless() {
+        use super::*;
+        let _test = crate::store::TestStore::new();
+        let executable = std::path::PathBuf::from(
+            std::env::var("SHARDX_TEST_BROWSER").expect("SHARDX_TEST_BROWSER"),
+        );
+        for recovered in [false, true] {
+            let id = if recovered {
+                "recovered-browser"
+            } else {
+                "tracked-browser"
+            };
+            let mut profile: crate::profile::StoredProfile =
+                serde_json::from_value(serde_json::json!({"_meta":{"id":id},"name":"BrowserTest"}))
+                    .unwrap();
+            crate::profile::save_raw(&mut profile).unwrap();
+            let directory = crate::profile::user_data_dir(id).unwrap();
+            let child = tokio::process::Command::new(&executable)
+                .args([
+                    "--headless=new",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--remote-debugging-port=0",
+                    "--disable-background-networking",
+                ])
+                .arg(format!("--user-data-dir={}", directory.display()))
+                .arg("about:blank")
+                .creation_flags(0x08000000)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let pid = child.id().unwrap();
+            let endpoint = tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    if let Ok(Some(endpoint)) = crate::browser_cdp::discover(&directory).await {
+                        break endpoint;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let mut child_after_recovery = None;
+            if recovered {
+                let process = inspect_process(pid).unwrap().unwrap();
+                let lease = ProcessLease {
+                    profile_id: id.into(),
+                    pid,
+                    executable_path: stable_path_string(&executable),
+                    user_data_dir: stable_path_string(&directory),
+                    run_id: uuid::Uuid::new_v4().to_string(),
+                    temporary: false,
+                    process_started_at_100ns: process.started_at_100ns,
+                    launched_at_unix_ms: unix_now_ms(),
+                };
+                crate::store::atomic_write(
+                    &crate::store::process_leases_path().unwrap(),
+                    &serde_json::to_vec(&LeaseFile {
+                        format_version: LEASE_FORMAT_VERSION,
+                        consecutive_incomplete_recoveries: 0,
+                        leases: vec![lease],
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(Tracker::shared().recover().unwrap(), 1);
+                child_after_recovery = Some(child);
+            } else {
+                Tracker::shared().track(id.into(), child, &executable, &directory, false);
+            }
+            let running = Tracker::shared().running_with_cdp().await;
+            assert_eq!(
+                running
+                    .iter()
+                    .find(|r| r.profile_id == id)
+                    .unwrap()
+                    .cdp
+                    .as_ref()
+                    .unwrap()
+                    .port,
+                endpoint.port
+            );
+            assert!(Tracker::shared().close(id).await.unwrap());
+            if let Some(child) = child_after_recovery.as_mut() {
+                child.wait().await.unwrap();
+            }
+            assert!(inspect_process(pid).unwrap().is_none());
+            assert!(!Tracker::shared().is_running_profile(id));
+            let saved: LeaseFile =
+                crate::store::load_json_with_backup(&crate::store::process_leases_path().unwrap())
+                    .unwrap();
+            assert!(saved.leases.is_empty());
+            assert!(directory.join("Local State").exists());
+        }
+    }
+
     #[tokio::test]
     async fn launch_reservation_blocks_duplicate_starts_until_released() {
+        let _test = crate::store::TestStore::new();
         let tracker = super::Tracker::new();
         let reservation = tracker.reserve_launch("profile-1").unwrap();
 
@@ -1472,6 +1715,7 @@ pub struct RunningProfile {
     pub pid: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cdp: Option<CdpInfo>,
+    pub cdp_error: Option<String>,
     /// Milliseconds since the engine was spawned; frontend formats as
     /// "1h 23m" / "12m 30s" / "45s".
     pub uptime_ms: u64,

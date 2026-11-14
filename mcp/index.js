@@ -42,7 +42,7 @@ async function api(path, { method = "GET", body } = {}) {
     try { data = responseText ? JSON.parse(responseText) : null; } catch { data = responseText; }
     if (!res.ok) {
       const msg = data && data.error ? data.error : `HTTP ${res.status}`;
-      throw new Error(`${method} ${path} → ${msg}`);
+      throw new Error(`${method} ${path} → HTTP ${res.status}: ${msg}`);
     }
     return data;
   } finally {
@@ -80,7 +80,7 @@ async function cleanupProfileState(profileId) {
 async function cdpEndpoint(profileId, { autostart = true, headless = false } = {}) {
   const running = await api("/running");
   let entry = running.find((r) => r.profile_id === profileId);
-  if (!entry?.cdp && autostart) {
+  if (!entry && autostart) {
     const started = await api(`/profiles/${profileId}/start`, {
       method: "POST",
       body: { headless },
@@ -89,7 +89,9 @@ async function cdpEndpoint(profileId, { autostart = true, headless = false } = {
   }
   const cdp = entry?.cdp;
   if (!cdp?.http_url) {
-    throw new Error(`profile ${profileId} is not running with CDP (start it first)`);
+    throw new Error(entry
+      ? `profile ${profileId} is running without an available CDP endpoint: ${entry.cdp_error || "stop it, then start it through the API or MCP to enable CDP"}`
+      : `profile ${profileId} is not running (start it first)`);
   }
   return cdp;
 }
@@ -168,14 +170,15 @@ server.tool(
     proxy_id: z.string().optional(),
     platform: z.enum(["Windows", "macOS", "Linux"]).optional(),
     fingerprint: z.any().optional(),
+    extensions: z.array(z.string()).optional(),
   },
-  async ({ name, notes, folder, proxy, proxy_id, platform, fingerprint }) => {
+  async ({ name, notes, folder, proxy, proxy_id, platform, fingerprint, extensions }) => {
     if (!fingerprint) {
       const fp = await api(platform ? `/fingerprint/new/${platform}` : "/fingerprint/new");
       fingerprint = fp.fingerprint;
     }
     const path = folder ? `/folders/${encodeURIComponent(folder)}/profiles` : "/profiles";
-    const body = { name, notes, proxy, proxy_id, fingerprint };
+    const body = { name, notes, proxy, proxy_id, fingerprint, extensions };
     if (folder) delete body.folder; // folder comes from the path
     return text(await api(path, { method: "POST", body }));
   },
@@ -190,6 +193,7 @@ server.tool(
     proxy: z.string().optional(),
     name: z.string().optional(),
     folder: z.string().optional(),
+    extensions: z.array(z.string()).optional(),
   },
   async (args) => text(await api("/profiles/temporary", { method: "POST", body: args })),
 );
@@ -205,13 +209,14 @@ server.tool(
     proxy_id: z.string().optional(),
     proxy: z.string().optional(),
     fingerprint: z.any().optional(),
+    extensions: z.array(z.string()).optional(),
   },
   async ({ id, ...body }) => text(await api(`/profiles/${id}`, { method: "PATCH", body })),
 );
 
 server.tool(
   "delete_profile",
-  "Delete a profile (config + user-data-dir).",
+  "Move a stopped persistent profile and its complete browser data to the 7-day recycle bin. Temporary profiles are permanently deleted.",
   { id: z.string() },
   async ({ id }) => text(await api(`/profiles/${id}`, { method: "DELETE" })),
 );
@@ -259,7 +264,7 @@ server.tool(
 
 server.tool(
   "delete_folder",
-  "Delete a folder. delete_profiles=true removes its profiles; false unfiles them.",
+  "Delete a folder. delete_profiles=true moves persistent profiles to the 7-day recycle bin and deletes temporary profiles; false unfiles them.",
   { folder: z.string(), delete_profiles: z.boolean().optional() },
   async ({ folder, delete_profiles }) =>
     text(
@@ -312,6 +317,14 @@ server.tool(
   async ({ id, cookies }) =>
     text(await api(`/profiles/${id}/cookies`, { method: "POST", body: { cookies } })),
 );
+
+server.tool("list_extensions", "List library extensions, reference counts, and per-item errors.", {}, async () => text(await api("/extensions")));
+server.tool("import_extension", "Import a Manifest V3 folder, CRX, or ZIP from a local path on the launcher host.", { path: z.string() }, async body => text(await api("/extensions", { method: "POST", body })));
+server.tool("delete_extension", "Delete an extension only when no profile or recycle-bin item references it.", { id: z.string() }, async ({ id }) => text(await api(`/extensions/${encodeURIComponent(id)}`, { method: "DELETE" })));
+server.tool("list_trash", "List recycled profiles and their 7-day expiry dates.", {}, async () => text(await api("/trash")));
+server.tool("restore_trash", "Restore a recycled profile with its original identity and complete browser data.", { id: z.string() }, async ({ id }) => text(await api(`/trash/${encodeURIComponent(id)}/restore`, { method: "POST" })));
+server.tool("purge_trash", "Permanently delete one recycle-bin item and its browser data. This cannot be undone.", { id: z.string() }, async ({ id }) => text(await api(`/trash/${encodeURIComponent(id)}`, { method: "DELETE" })));
+server.tool("empty_trash", "Permanently delete all recycle-bin items and their browser data. This cannot be undone.", {}, async () => text(await api("/trash", { method: "DELETE" })));
 
 // ================= CDP browser tools (patchright) =================
 

@@ -203,6 +203,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 
 .app {
   display: grid;
+  grid-template-rows: minmax(0, 1fr);
   grid-template-columns: 240px minmax(0, 1fr);
   height: 100vh;
   padding-top: var(--titlebar-h);
@@ -213,6 +214,8 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 }
 
 .sidebar {
+  min-height: 0;
+  overflow-y: auto;
   background: linear-gradient(180deg, #11141c, #0c0f15);
   border-right: 1px solid var(--bd-1);
   display: flex; flex-direction: column;
@@ -347,6 +350,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 /* ===== main ===== */
 
 .main {
+  min-height: 0;
   min-width: 0;
   padding: 14px 24px 24px 24px;
   overflow-y: auto;
@@ -761,12 +765,14 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 /* ===== rows ===== */
 
 .rows {
+  container-type: inline-size;
   background: var(--bg-1);
   border: 1px solid var(--bd-1);
   border-radius: var(--radius-lg);
-  overflow: hidden;
+  overflow-x: auto;
 }
 .t-cols {
+  min-width: 1070px;
   /* Keep the utility and action tracks fixed, then distribute only the
      remaining room between data columns. minmax() preserves every existing
      column floor without letting percentage tracks overrun the container. */
@@ -782,9 +788,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
     minmax(130px, 1fr)      /* last run */
     160px;                  /* row actions */
   gap: 8px;
-  /* The configured 1400px Windows minimum yields a 1384px webview after the
-     native frame. Eight pixels here let all column floors fit at that exact
-     client width while retaining a visible action-edge inset. */
+  /* Keep the action edge visible when the table is horizontally scrolled. */
   padding: 10px 8px 10px 0;
   align-items: center;
 }
@@ -794,6 +798,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .t-cols > *,
 .p-cols > * { min-width: 0; }
 .p-cols {
+  min-width: 1110px;
   /* Match the browser table: percentages based on the full table ignore the
      fixed controls, gaps, and padding. Flexible tracks share only the room
      that is actually left, so the action column stays inside the card. */
@@ -1137,7 +1142,12 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .row-new { background: var(--bg-2); border-top: 1px solid var(--bd-1); }
 
 .inline-editor {
-  position: relative;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  position: sticky;
+  left: 0;
+  width: 100cqw;
   padding: 14px 18px 14px 22px;
   border-top: 1px solid var(--bd-1);
   background: linear-gradient(180deg, #181c26 0%, #14171f 100%);
@@ -1151,10 +1161,11 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 
 .ie-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
 }
 .ie-section {
+  min-width: 0;
   display: flex; flex-direction: column; gap: 10px;
 }
 .ie-section-title {
@@ -2368,3 +2379,26 @@ button.status-pill.status-link:active { transform: translateY(1px); }
 .storage-table td { vertical-align: middle; overflow-wrap: anywhere; }
 .storage-table td:nth-child(2) { min-width: 160px; max-width: 250px; }
 .storage-table tr:last-child td { border-bottom: 0; }
+.operation-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; margin-bottom: 14px; border: 1px solid var(--bd-2); border-radius: var(--radius-lg); background: var(--bg-2); overflow-wrap: anywhere; }
+.row-wrap:has(> .t-cols) { min-width: 1070px; }
+.row-wrap:has(> .p-cols) { min-width: 1110px; }
+.operation-banner p { margin: 6px 0 0; }
+.operation-banner button { flex-shrink: 0; }
+@media (max-width: 1250px) {
+  .app { grid-template-columns: 200px minmax(0, 1fr); }
+  .main { padding-inline: 16px; }
+  .page-title { flex-wrap: wrap; align-items: flex-start; }
+  .title-with-tabs { flex-basis: 100%; }
+  .ie-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .runtime-update-row { grid-template-columns: minmax(0, 1fr); }
+  .runtime-update-actions { justify-content: flex-start; flex-wrap: wrap; }
+}
+@media (max-width: 1000px) {
+  .app { grid-template-columns: 180px minmax(0, 1fr); }
+  .ie-grid { grid-template-columns: minmax(0, 1fr); }
+  .metric-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .topbar { gap: 12px; flex-wrap: wrap; }
+  .search { width: min(100%, 320px); }
+  .page-actions, .bulk-bar { flex-wrap: wrap; }
+  .extension-grid { grid-template-columns: minmax(0, 1fr); }
+}

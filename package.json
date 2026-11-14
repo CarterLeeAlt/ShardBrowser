@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:build:windows-x64": "tauri build --no-bundle --target x86_64-pc-windows-msvc",
-    "check:versions": "node scripts/check-version-consistency.mjs"
+    "check:versions": "node scripts/check-version-consistency.mjs",
+    "check:editor": "node scripts/check-profile-edit.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

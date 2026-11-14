@@ -16,8 +16,9 @@
         "title": "ShardX Launcher",
         "width": 1440,
         "height": 800,
-        "minWidth": 1400,
-        "minHeight": 800,
+        "minWidth": 900,
+        "minHeight": 560,
+        "preventOverflow": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "dragDropEnabled": false
