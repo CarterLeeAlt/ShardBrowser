@@ -1,13 +1,15 @@
-//! Complete, versioned ShardX profile backups.
+//! Versioned ShardX profile backups retaining persistent browser data.
 //!
 //! A v4 `.shardx-backup` is a binary ZIP container holding the exact launcher
-//! profile, its bound proxy, the complete Chromium user-data tree, and the raw
+//! profile, its bound proxy, persistent Chromium user-data, and the raw
 //! OSCrypt key. Proxy credentials are encrypted with the exporting Windows
 //! user's DPAPI; v2 plaintext proxy payloads remain import-compatible. The key
 //! is re-wrapped with the destination Windows user's DPAPI credentials during
 //! restore. Selected library extensions are included with their stable IDs,
 //! so Chromium keeps the same encrypted database key even though the
 //! launcher assigns a fresh profile UUID.
+//! Export omits only known rebuildable browser caches and transient root files;
+//! restore reads every archived entry, including caches from existing backups.
 
 use crate::{cookies, display_order, extensions, fingerprints, process, profile, proxy, store};
 use anyhow::{anyhow, bail, Context, Result};
@@ -154,32 +156,56 @@ fn unix_timestamp() -> Result<(u128, String)> {
     Ok((millis, format!("@{}", millis / 1000)))
 }
 
-fn should_skip_user_data(relative: &Path) -> bool {
-    let mut components = relative
+fn should_skip_user_data(relative: &Path, profile_directories: &HashSet<String>) -> bool {
+    let Some(values) = relative
         .components()
-        .filter_map(|component| match component {
+        .map(|component| match component {
             Component::Normal(value) => value.to_str(),
             _ => None,
-        });
-    let values: Vec<&str> = components.by_ref().collect();
-    if values
-        .iter()
-        .any(|value| value.eq_ignore_ascii_case("Crashpad"))
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    let Some(root_name) = values.first() else {
+        return false;
+    };
+    // These paths are relative to user-data, not arbitrary matching basenames.
+    // Site storage (including CacheStorage and Service Worker/ScriptCache) and
+    // database journals remain intact even when they contain similar names.
+    if [
+        "Crashpad",
+        "DevToolsActivePort",
+        "ShaderCache",
+        "GrShaderCache",
+        "GPUPersistentCache",
+    ]
+    .iter()
+    .any(|name| root_name.eq_ignore_ascii_case(name))
+        || root_name.starts_with("Singleton")
+        || root_name.starts_with("BrowserMetrics")
     {
         return true;
     }
-    let Some(name) = values.last() else {
-        return false;
-    };
-    name.eq_ignore_ascii_case("DevToolsActivePort")
-        || name.starts_with("Singleton")
-        || name.starts_with("BrowserMetrics")
+    values.get(1).is_some_and(|name| {
+        profile_directories.contains(&root_name.to_ascii_lowercase())
+            && [
+                "Cache",
+                "Code Cache",
+                "GPUCache",
+                "DawnGraphiteCache",
+                "DawnWebGPUCache",
+            ]
+            .iter()
+            .any(|cache| name.eq_ignore_ascii_case(cache))
+    })
 }
 
 fn collect_user_data_entries(
     root: &Path,
     directory: &Path,
     entries: &mut Vec<SourceEntry>,
+    profile_directories: &HashSet<String>,
     depth: usize,
 ) -> Result<()> {
     if depth > MAX_USER_DATA_DEPTH {
@@ -199,7 +225,7 @@ fn collect_user_data_entries(
         if relative.components().count() > MAX_USER_DATA_DEPTH {
             bail!("profile user-data directory nesting exceeds the safety limit");
         }
-        if should_skip_user_data(&relative) {
+        if should_skip_user_data(&relative, profile_directories) {
             continue;
         }
         let metadata = fs::symlink_metadata(&source)?;
@@ -215,7 +241,7 @@ fn collect_user_data_entries(
                 relative: relative.clone(),
                 kind: BackupEntryKind::Directory,
             });
-            collect_user_data_entries(root, &source, entries, depth + 1)?;
+            collect_user_data_entries(root, &source, entries, profile_directories, depth + 1)?;
         } else if metadata.is_file() {
             entries.push(SourceEntry {
                 source,
@@ -291,8 +317,27 @@ fn write_user_data_entries(
         sha256: String::new(),
     });
 
+    // Chromium registers additional profile directory names in Local State.
+    // Keep unregistered directories rather than guessing from their names.
+    let local_state: serde_json::Value = serde_json::from_reader(
+        File::open(source_root.join("Local State")).context("read backup Local State")?,
+    )
+    .context("parse backup Local State")?;
+    let mut profile_directories = HashSet::from(["default".to_string()]);
+    if let Some(profiles) = local_state
+        .pointer("/profile/info_cache")
+        .and_then(serde_json::Value::as_object)
+    {
+        profile_directories.extend(profiles.keys().map(|name| name.to_ascii_lowercase()));
+    }
     let mut sources = Vec::new();
-    collect_user_data_entries(source_root, source_root, &mut sources, 0)?;
+    collect_user_data_entries(
+        source_root,
+        source_root,
+        &mut sources,
+        &profile_directories,
+        0,
+    )?;
     let mut file_count = 0usize;
     let mut total_bytes = 0u64;
     let mut buffer = vec![0u8; 1024 * 1024];
@@ -993,7 +1038,7 @@ fn import_failure(
         error.to_string()
     } else {
         format!(
-            "{error}; complete backup import rollback was incomplete: {}",
+            "{error}; profile backup import rollback was incomplete: {}",
             rollback_errors.join(", ")
         )
     }
@@ -1183,7 +1228,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v2_and_v3_backups_without_library_extensions_remain_readable() {
+    fn existing_v2_v3_and_v4_backups_restore_their_archived_caches() {
         let test = store::TestStore::new();
         let mut stored: profile::StoredProfile = serde_json::from_value(serde_json::json!({
             "_meta": {"id": "legacy-backup"}, "name": "LegacyBackup", "navigator": {"platform_version": "17.0.0"}
@@ -1198,7 +1243,9 @@ mod tests {
             .unwrap()
             .unwrap()
             .path();
-        for version in [2, 3] {
+        let cache_path = "user-data/Default/Cache/legacy-entry";
+        let cache_bytes = b"cache retained by an existing full backup";
+        for version in [2, 3, 4] {
             let path = test.root.join(format!("version-{version}.shardx-backup"));
             let mut input = zip::ZipArchive::new(File::open(&source).unwrap()).unwrap();
             let mut output = zip::ZipWriter::new(File::create(&path).unwrap());
@@ -1211,21 +1258,43 @@ mod tests {
                 let mut bytes = Vec::new();
                 entry.read_to_end(&mut bytes).unwrap();
                 if entry.name() == MANIFEST_ENTRY {
-                    let mut manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                    manifest["version"] = version.into();
+                    let mut manifest: BackupManifest = serde_json::from_slice(&bytes).unwrap();
+                    manifest.version = version;
+                    manifest.user_data_file_count += 1;
+                    manifest.user_data_bytes += cache_bytes.len() as u64;
+                    manifest.entries.push(BackupEntry {
+                        path: cache_path.into(),
+                        kind: BackupEntryKind::File,
+                        size: cache_bytes.len() as u64,
+                        sha256: sha256_hex(cache_bytes),
+                    });
                     bytes = serde_json::to_vec(&manifest).unwrap();
                 }
                 output.start_file(entry.name(), zip_options()).unwrap();
                 output.write_all(&bytes).unwrap();
             }
+            output.start_file(cache_path, zip_options()).unwrap();
+            output.write_all(cache_bytes).unwrap();
             output.finish().unwrap();
             import(vec![path.to_string_lossy().into()]).unwrap();
         }
-        assert_eq!(profile::list_all().unwrap().len(), 3);
+        let profiles = profile::list_all().unwrap();
+        assert_eq!(profiles.len(), 4);
+        for restored in profiles.iter().filter(|item| item.id != stored.meta.id) {
+            assert_eq!(
+                fs::read(
+                    profile::user_data_dir(&restored.id)
+                        .unwrap()
+                        .join("Default/Cache/legacy-entry")
+                )
+                .unwrap(),
+                cache_bytes
+            );
+        }
     }
 
     #[test]
-    fn complete_backup_restores_extension_files_and_rejects_version_conflicts() {
+    fn profile_backup_restores_extension_files_and_rejects_version_conflicts() {
         let test = store::TestStore::new();
         let extension = extensions::tests::fixture(&test.root.join("source"));
         let mut stored: profile::StoredProfile = serde_json::from_value(serde_json::json!({
@@ -1295,18 +1364,158 @@ mod tests {
     }
 
     #[test]
-    fn excludes_only_transient_browser_files() {
-        assert!(should_skip_user_data(Path::new("DevToolsActivePort")));
-        assert!(should_skip_user_data(Path::new("SingletonLock")));
-        assert!(should_skip_user_data(Path::new(
-            "Crashpad/reports/report.dmp"
-        )));
-        assert!(!should_skip_user_data(Path::new("Default/Network/Cookies")));
-        assert!(!should_skip_user_data(Path::new(
-            "Default/Service Worker/CacheStorage/data"
-        )));
-        assert!(!should_skip_user_data(Path::new(
-            "Default/IndexedDB/site.leveldb"
-        )));
+    fn lightweight_backup_preserves_persistent_data_and_source_files() {
+        let _test = store::TestStore::new();
+        let mut stored: profile::StoredProfile = serde_json::from_value(serde_json::json!({
+            "_meta": {"id": "persistent-data"}, "name": "PersistentData",
+            "navigator": {"platform_version": "17.0.0"}, "noise": {"seed": 42}
+        }))
+        .unwrap();
+        profile::save_raw(&mut stored).unwrap();
+        let data = profile::user_data_dir(&stored.meta.id).unwrap();
+        cookies::install_os_crypt_key(&data, &[8; 32]).unwrap();
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&fs::read(data.join("Local State")).unwrap()).unwrap();
+        state["profile"] = serde_json::json!({"info_cache": {"Work Profile": {}}});
+        fs::write(
+            data.join("Local State"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        let excluded = [
+            "ShaderCache/data",
+            "GrShaderCache/data",
+            "GPUPersistentCache/data",
+            "Default/Cache/Cache_Data/data_0",
+            "Default/Code Cache/js/data",
+            "Default/GPUCache/data",
+            "Default/DawnGraphiteCache/data",
+            "Default/DawnWebGPUCache/data",
+            "Work Profile/Cache/data",
+            "Work Profile/Code Cache/data",
+            "Crashpad/reports/report.dmp",
+            "SingletonLock",
+            "DevToolsActivePort",
+            "BrowserMetrics/data",
+        ];
+        let retained = [
+            "Default/Network/Cookies",
+            "Default/Network/Cookies-wal",
+            "Default/Network/Cookies-shm",
+            "Default/Network/Cookies-journal",
+            "Default/Network/Device Bound Sessions",
+            "Default/Login Data",
+            "Default/Account Web Data",
+            "Default/Web Data",
+            "Default/Local Storage/leveldb/000001.log",
+            "Default/IndexedDB/site.leveldb/000001.ldb",
+            "Default/IndexedDB/site.blob/blob",
+            "Default/Session Storage/000001.log",
+            "Default/File System/data",
+            "Default/WebStorage/QuotaManager",
+            "Default/Storage/bucket/data",
+            "Default/Service Worker/Database/data",
+            "Default/Service Worker/ScriptCache/data",
+            "Default/Service Worker/CacheStorage/data",
+            "Default/Extensions/id/Cache/data",
+            "Default/Local Extension Settings/id/000001.log",
+            "Default/DNR Extension Rules/data",
+            "Default/Preferences",
+            "Default/Secure Preferences",
+            "Default/Bookmarks",
+            "Default/History",
+            "Default/Sessions/Session_1",
+            "Default/Sessions_Encrypted/Session_1",
+            "Default/IndexedDB/Crashpad/data",
+            "Default/File System/SingletonLock",
+            "Default/Storage/BrowserMetrics/business-data",
+            "Default/Storage/GPUCache/data",
+            "Default/Storage/Code Cache/data",
+            "Default/Storage/DevToolsActivePort",
+            "Profile 9/Cache/data",
+            "Unknown/Cache/data",
+            "component_crx_cache/data",
+        ];
+        for relative in excluded.iter().chain(retained.iter()) {
+            let file = data.join(relative);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, relative.as_bytes()).unwrap();
+        }
+        let local_state_before = fs::read(data.join("Local State")).unwrap();
+        let summary = export(vec![stored.meta.id.clone()]).unwrap();
+        let backup = fs::read_dir(store::exports_dir().unwrap())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mut archive = zip::ZipArchive::new(File::open(&backup).unwrap()).unwrap();
+        let names: HashSet<_> = archive.file_names().map(str::to_string).collect();
+        for relative in &excluded {
+            assert!(
+                !names.contains(&format!("user-data/{relative}")),
+                "excluded cache archived: {relative}"
+            );
+        }
+        for relative in &retained {
+            assert!(
+                names.contains(&format!("user-data/{relative}")),
+                "persistent data missing: {relative}"
+            );
+        }
+        let manifest: BackupManifest =
+            serde_json::from_reader(archive.by_name(MANIFEST_ENTRY).unwrap()).unwrap();
+        let actual_bytes: u64 = manifest
+            .entries
+            .iter()
+            .filter(|e| e.path.starts_with(USER_DATA_PREFIX))
+            .map(|e| e.size)
+            .sum();
+        assert_eq!(summary.data_bytes, actual_bytes);
+        assert_eq!(summary.file_count, retained.len() + 1);
+        assert_eq!(manifest.user_data_bytes, actual_bytes);
+        assert_eq!(manifest.user_data_file_count, summary.file_count);
+        drop(archive);
+        assert_eq!(
+            fs::read(data.join("Local State")).unwrap(),
+            local_state_before
+        );
+        for relative in excluded.iter().chain(retained.iter()) {
+            assert_eq!(
+                fs::read(data.join(relative)).unwrap(),
+                relative.as_bytes(),
+                "source changed: {relative}"
+            );
+        }
+        import(vec![backup.to_string_lossy().into()]).unwrap();
+        let restored = profile::list_all()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id != stored.meta.id)
+            .unwrap();
+        let restored_data = profile::user_data_dir(&restored.id).unwrap();
+        assert_eq!(
+            cookies::export_os_crypt_key(&restored_data).unwrap(),
+            [8; 32]
+        );
+        assert_eq!(
+            profile::load_raw(&restored.id).unwrap().config,
+            stored.config
+        );
+        for relative in &retained {
+            assert_eq!(
+                fs::read(restored_data.join(relative)).unwrap(),
+                relative.as_bytes()
+            );
+        }
+        for relative in &excluded {
+            assert!(!restored_data.join(relative).exists());
+        }
+        assert_eq!(
+            fs::read_dir(store::user_data_root().unwrap())
+                .unwrap()
+                .count(),
+            2
+        );
     }
 }

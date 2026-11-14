@@ -100,7 +100,7 @@ fn os_crypt_key(udd: &Path) -> Result<Vec<u8>> {
     win::os_crypt_key(udd)
 }
 
-/// Export the profile's raw 32-byte OSCrypt key. Complete profile backups
+/// Export the profile's raw 32-byte OSCrypt key. Profile backups
 /// carry this key so the unchanged Chromium databases can be restored under a
 /// different Windows user and re-wrapped with that user's DPAPI credentials.
 pub fn export_os_crypt_key(udd: &Path) -> Result<Vec<u8>> {

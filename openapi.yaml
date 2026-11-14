@@ -39,7 +39,7 @@ info:
        object as `fingerprint` → hardware picks are preserved. New identities
        normalize platform-version consistency and synchronize Chrome, GREASE,
        TLS and applicable Apple WebGPU features with the installed engine.
-       Ordinary edits and complete backup restores retain their fingerprint;
+       Ordinary edits and profile backup restores retain their fingerprint;
        explicit engine updates still synchronize Chrome and GREASE descriptors.
     4. `POST /profiles/{id}/start` → returns the CDP endpoint; connect with
        `browserWSEndpoint = cdp.web_socket_debugger_url`.

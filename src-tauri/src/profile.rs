@@ -1219,7 +1219,7 @@ pub fn delete(id: &str) -> Result<()> {
 
 /// Persist a fully restored profile under its already-assigned fresh id.
 /// Unlike `save_raw`, this deliberately does not derive or fill fingerprint
-/// noise seeds: a complete backup must retain the source browser's exact
+/// noise seeds: a profile backup must retain the source browser's exact
 /// canvas/audio/WebGL identity.
 pub fn save_restored(stored: &mut StoredProfile) -> Result<()> {
     if stored.meta.id.is_empty() {
