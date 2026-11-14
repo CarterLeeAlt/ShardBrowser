@@ -10,6 +10,7 @@
 
 ## 发布与版本
 
+- 启动构建前，自动清理本仓库 GitHub Actions 中已结束且 `conclusion` 为 `failure` 的历史运行记录；删除前核对 workflow 名称、run ID 和关联 artifact，保留本次诊断所需的失败日志到项目 `.tmp/`，删除后核对运行记录及关联 artifact 的清理结果。范围仅限失败运行记录，成功、取消、排队或运行中的记录以及工作流定义文件均保留；权限不足按下述权限规则处理。
 - 一次 Release 只有在所有 job 都成功时才算发布成功，必须包含：版本解析、质量门禁、portable EXE 构建、runtime archive 快照下载（硬依赖 `sync-runtime-archive.yml` 工作流预先播种的 `runtime-archive` Release，缺任一必需资产即失败）、自包含包 `ShardX-Launcher-selfcontained-win-x64.zip` 构建、artifact 上传、GitHub Release 创建/上传（portable EXE 与自包含 zip 两份资产，`fail_on_unmatched_files: true`）。
 - 按用户明确要求，发布版本由源码声明确定，构建和发布流程保持源码版本不变；版本调整由用户指定，避免自动递增产生无对应发布的版本号。
 - GitHub Release 或部分资产已创建但仍有 job 失败时，整次 Release 仍是失败状态。禁止因此直接推进到下一个版本。
