@@ -2349,3 +2349,22 @@ button.status-pill.status-link:active { transform: translateY(1px); }
 .assign-preview table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .assign-preview th, .assign-preview td { text-align: left; padding: 10px; border-bottom: 1px solid var(--bd-1); overflow-wrap: anywhere; }
 .assign-dialog .error { color: var(--err); overflow-wrap: anywhere; }
+.storage-actions { flex-wrap: wrap; }
+.storage-error { color: var(--err); overflow-wrap: anywhere; }
+.extension-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-top: 20px; }
+.extension-card { min-width: 0; display: flex; flex-direction: column; gap: 10px; padding: 18px; }
+.extension-card header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.extension-card h3, .extension-card p { margin: 0; overflow-wrap: anywhere; }
+.extension-card .btn-sm { align-self: flex-start; margin-top: auto; }
+.extension-id { overflow-wrap: anywhere; font-size: 11px; color: var(--tx-3); }
+.extension-picker { border-top: 1px solid var(--bd-1); padding: 14px 20px; display: grid; gap: 10px; }
+.extension-picker label.extension-choice { display: flex; flex-direction: row; align-items: center; gap: 10px; color: var(--tx-1); }
+.extension-choice input { flex: 0 0 auto; }
+.extension-choice span { min-width: 0; overflow-wrap: anywhere; }
+.storage-table-wrap { overflow: auto; border: 1px solid var(--bd-1); border-radius: var(--radius-lg); background: var(--bg-1); }
+.storage-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.storage-table th, .storage-table td { padding: 12px; text-align: left; border-bottom: 1px solid var(--bd-1); }
+.storage-table th { white-space: nowrap; color: var(--tx-3); font-weight: var(--font-weight-medium); }
+.storage-table td { vertical-align: middle; overflow-wrap: anywhere; }
+.storage-table td:nth-child(2) { min-width: 160px; max-width: 250px; }
+.storage-table tr:last-child td { border-bottom: 0; }

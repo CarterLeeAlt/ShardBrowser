@@ -105,8 +105,110 @@ tags:
   - name: Profiles
   - name: Folders
   - name: Proxies
+  - name: Extensions
+  - name: Trash
 
 paths:
+  /extensions:
+    get:
+      tags: [Extensions]
+      summary: List the local extension library and its references
+      responses:
+        "200":
+          description: Installed library entries.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ExtensionEntry" } }
+        "400": { $ref: "#/components/responses/StorageError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [Extensions]
+      summary: Import a local CRX, ZIP or unpacked directory
+      description: Copies into the portable library. The source is preserved. Existing same-ID entries are not overwritten. Maximum package/unpacked size is 256 MiB and 20000 files.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path: { type: string, description: Absolute local file or directory path. }
+      responses:
+        "200":
+          description: Imported extension.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExtensionEntry" }
+        "400": { $ref: "#/components/responses/StorageError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /extensions/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, pattern: '^[a-p]{32}$' } }
+    delete:
+      tags: [Extensions]
+      summary: Delete an unreferenced library extension
+      description: Profiles and recycle-bin items must first release all references to this ID.
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema: { type: object, properties: { deleted: { type: string } } }
+        "400": { $ref: "#/components/responses/StorageError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /trash:
+    get:
+      tags: [Trash]
+      summary: List recycled profiles
+      responses:
+        "200":
+          description: Newest deletion first. Timestamps are Unix seconds.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/TrashEntry" } }
+        "400": { $ref: "#/components/responses/StorageError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      tags: [Trash]
+      summary: Permanently empty the recycle bin
+      responses:
+        "200":
+          description: Number of permanently removed items.
+          content:
+            application/json:
+              schema: { type: object, properties: { purged: { type: integer } } }
+        "400": { $ref: "#/components/responses/StorageError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /trash/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid }, description: "Recycle-bin item ID, not profile ID." }
+    delete:
+      tags: [Trash]
+      summary: Permanently delete one recycled profile and its browser data
+      responses:
+        "200":
+          description: Permanently removed.
+          content:
+            application/json:
+              schema: { type: object, properties: { purged: { type: integer } } }
+        "400": { $ref: "#/components/responses/StorageError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /trash/{id}/restore:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid }, description: Recycle-bin item ID. }
+    post:
+      tags: [Trash]
+      summary: Restore a recycled profile under its original ID
+      description: Restores the entire user-data directory and retains the fingerprint. Existing destination data and missing extension resources block restoration. Expired items cannot be restored.
+      responses:
+        "200":
+          description: Restored original profile ID.
+          content:
+            application/json:
+              schema: { type: object, properties: { restored_id: { type: string } } }
+        "400": { $ref: "#/components/responses/StorageError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /health:
     get:
       tags: [System]
@@ -291,7 +393,7 @@ paths:
     delete:
       tags: [Profiles]
       summary: Delete a profile
-      description: Removes the profile config and its user-data-dir.
+      description: Moves persistent profiles and complete browser data to the recycle bin for 7 days. Temporary profiles are removed immediately. Running or starting profiles cannot be deleted.
       parameters:
         - $ref: "#/components/parameters/ProfileId"
       responses:
@@ -304,6 +406,10 @@ paths:
                 properties:
                   deleted: { type: boolean, example: true }
                   id: { type: string, format: uuid }
+                  recycled: { type: boolean, description: True for persistent profiles; false for temporary profiles. }
+        "400": { $ref: "#/components/responses/StorageError" }
+        "409":
+          description: The profile is running or starting.
         "401": { $ref: "#/components/responses/Unauthorized" }
         "500":
           description: Deletion failed.
@@ -539,7 +645,7 @@ paths:
       summary: Delete a folder
       description: |
         Deletes the folder tag. With `delete_profiles=true` the profiles in
-        it are deleted too; otherwise they're unfiled (moved to "All").
+        it are moved to the recycle bin for 7 days; otherwise they're unfiled (moved to "All").
       parameters:
         - name: folder
           in: path
@@ -548,7 +654,7 @@ paths:
         - name: delete_profiles
           in: query
           required: false
-          description: Delete the profiles in the folder (default false = unfile).
+          description: Recycle the profiles in the folder (default false = unfile).
           schema: { type: boolean, default: false }
       responses:
         "200":
@@ -699,10 +805,40 @@ components:
       schema: { type: string, format: uuid }
 
   responses:
+    StorageError:
+      description: Invalid local storage operation, unavailable resource, active profile or restore conflict. The error field explains the cause.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     Unauthorized:
       description: Missing or invalid Bearer token.
 
   schemas:
+    ExtensionIds:
+      type: array
+      uniqueItems: true
+      items: { type: string, pattern: '^[a-p]{32}$' }
+      description: Selected local-library IDs. An empty list deselects all library extensions; profile-installed extensions are retained.
+    ExtensionEntry:
+      type: object
+      properties:
+        id: { type: string, pattern: '^[a-p]{32}$' }
+        name: { type: string }
+        version: { type: string }
+        description: { type: string }
+        profile_names: { type: array, items: { type: string } }
+        trash_count: { type: integer }
+    TrashEntry:
+      type: object
+      properties:
+        id: { type: string, format: uuid, description: Recycle-bin item ID. }
+        profile_id: { type: string, description: Original profile ID retained on restore. }
+        name: { type: string }
+        folder: { type: string }
+        deleted_at: { type: integer, format: int64, description: Unix seconds. }
+        expires_at: { type: integer, format: int64, description: Unix seconds; deletion time plus 604800 seconds. }
+        size_bytes: { type: integer, format: int64 }
+        extensions: { $ref: "#/components/schemas/ExtensionIds" }
     Error:
       type: object
       properties:
@@ -719,8 +855,8 @@ components:
       type: object
       description: |
         Native FingerprintConfig. Documented sub-objects are the common
-        ones; the object is open and stored verbatim by the create
-        endpoints, so any field present here is round-tripped.
+        ones; the object is open. Create endpoints apply new-identity consistency
+        rules to platform and engine fields while preserving unrelated fields.
       additionalProperties: true
       properties:
         name: { type: string }
@@ -823,6 +959,7 @@ components:
       type: object
       required: [fingerprint]
       properties:
+        extensions: { $ref: "#/components/schemas/ExtensionIds" }
         name: { type: string }
         notes: { type: string }
         proxy_id:
@@ -844,12 +981,13 @@ components:
           description: Folder tag (ignored on /folders/{folder}/profiles, which wins).
         fingerprint:
           allOf: [{ $ref: "#/components/schemas/Fingerprint" }]
-          description: Stored verbatim. Get one from /fingerprint/new and edit as needed.
+          description: Get one from /fingerprint/new and edit as needed. Creation applies new-identity consistency rules.
 
     EditProfileRequest:
       type: object
       description: All fields optional — only what's present is changed.
       properties:
+        extensions: { $ref: "#/components/schemas/ExtensionIds" }
         name: { type: string }
         notes: { type: string }
         folder: { type: string, description: '"" unfiles (moves to All).' }
@@ -864,6 +1002,7 @@ components:
     TempProfileRequest:
       type: object
       properties:
+        extensions: { $ref: "#/components/schemas/ExtensionIds" }
         fingerprint_id:
           type: string
           description: Library entry to base off; random match for `platform` when omitted.
@@ -912,6 +1051,7 @@ components:
         _meta:
           type: object
           properties:
+            extensions: { $ref: "#/components/schemas/ExtensionIds" }
             id: { type: string, format: uuid }
             proxy_id: { type: string, nullable: true }
             inline_proxy:

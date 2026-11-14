@@ -12,6 +12,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub fn config_root() -> Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(root) = TEST_ROOT.with(|root| root.borrow().clone()) {
+        return Ok(root);
+    }
     let executable = std::env::current_exe().context("launcher executable path unavailable")?;
     let base = executable
         .parent()
@@ -37,6 +41,53 @@ pub fn exports_dir() -> Result<PathBuf> {
     let p = config_root()?.join("exports");
     std::fs::create_dir_all(&p)?;
     Ok(p)
+}
+
+#[cfg(test)]
+thread_local! { static TEST_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) }; }
+
+#[cfg(test)]
+pub(crate) struct TestStore {
+    pub root: PathBuf,
+    previous: Option<PathBuf>,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+impl TestStore {
+    pub fn new() -> Self {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join(".tmp/storage-tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&root).unwrap();
+        let previous = TEST_ROOT.with(|value| value.replace(Some(root.clone())));
+        Self {
+            root,
+            previous,
+            _thread_bound: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestStore {
+    fn drop(&mut self) {
+        TEST_ROOT.with(|root| root.replace(self.previous.take()));
+    }
+}
+
+pub fn extensions_dir() -> Result<PathBuf> {
+    let path = config_root()?.join("extensions");
+    std::fs::create_dir_all(&path)?;
+    Ok(path)
+}
+
+pub fn trash_dir() -> Result<PathBuf> {
+    let path = config_root()?.join("trash");
+    std::fs::create_dir_all(&path)?;
+    Ok(path)
 }
 
 /// Cached Widevine CDM, seeded from a host Chrome install (or

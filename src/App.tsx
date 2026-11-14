@@ -41,6 +41,8 @@ import "./fonts.css";
 import "./App.css";
 import { planAssignment } from "./proxy-assignment";
 import { tr, useLanguage, setLanguage, type Language } from "./i18n";
+import { ExtensionsView, ExtensionPicker } from "./Extensions";
+import { TrashView } from "./Trash";
 
 // Host OS of the launcher window (never spoofed) — drives default OS tab + titlebar.
 function detectHostOs(): "macOS" | "Windows" | "Linux" {
@@ -445,7 +447,7 @@ type ApiInfo = {
   base_url: string;
   token: string;
 };
-type Section = "browsers" | "proxies" | "fingerprints" | "settings";
+type Section = "browsers" | "proxies" | "fingerprints" | "extensions" | "trash" | "settings";
 
 /// Library fingerprint backing the editor GPU select; payload supplies the coherent base.
 type FingerprintEntry = {
@@ -475,6 +477,7 @@ type WebRtcMode = "auto" | "tcp_only" | "block";
 type GeoMode = "auto" | "manual";
 
 type ProfileForm = {
+  extensions: string[];
   id: string;
   name: string;
   notes: string;
@@ -613,6 +616,7 @@ function deriveLanguagesArray(loc: string): string[] {
 }
 
 const defaultForm = (): ProfileForm => ({
+  extensions: [],
   id: "",
   name: "",
   notes: "",
@@ -655,6 +659,7 @@ function fromStored(stored: any): ProfileForm {
   const f = defaultForm();
   if (!stored) return f;
   f.id = stored?._meta?.id ?? "";
+  f.extensions = stored?._meta?.extensions ?? [];
   f.proxy_id = stored?._meta?.proxy_id ?? null;
   f.name = stored?.name ?? "";
   f.notes = stored?.notes ?? "";
@@ -716,6 +721,7 @@ function toStored(f: ProfileForm, lib: FingerprintEntry | null, existing: any | 
   const base: any = source ? JSON.parse(JSON.stringify(source)) : {};
 
   base._meta = {
+    extensions: f.extensions,
     id: f.id,
     proxy_id: f.proxy_id,
     last_launched_at: null,
@@ -816,6 +822,11 @@ function prepareTitlebarWindowHide(button: HTMLButtonElement) {
 
 export default function App() {
   useLanguage();
+  const storageViewProps = {
+    confirm: async (title: string, message: string) => (await confirmModal({ title, message, danger: true })) === true,
+    onSuccess: toast.ok,
+    onError: toast.err,
+  };
   const [section, setSection] = useState<Section>("browsers");
   const [theme, setTheme] = useState<Theme>(
     () => (localStorage.getItem("shardx-theme") as Theme) || "dark",
@@ -901,6 +912,8 @@ export default function App() {
             {section === "browsers" && <BrowsersView />}
             {section === "proxies" && <ProxiesView />}
             {section === "fingerprints" && <FingerprintsView />}
+            {section === "extensions" && <ExtensionsView {...storageViewProps} />}
+            {section === "trash" && <TrashView {...storageViewProps} />}
             {section === "settings" && <SettingsView />}
           </main>
           <ToastHost />
@@ -924,6 +937,7 @@ function Sidebar({
       label: tr("Workspace"),
       items: [
         { id: "browsers", label: tr("Browsers"), svg: <IconShard /> },
+        { id: "trash", label: tr("Recycle bin"), svg: <Icon.Trash /> },
       ],
     },
     {
@@ -932,7 +946,10 @@ function Sidebar({
     },
     {
       label: tr("Library"),
-      items: [{ id: "fingerprints", label: tr("Fingerprints"), svg: <IconHex /> }],
+      items: [
+        { id: "fingerprints", label: tr("Fingerprints"), svg: <IconHex /> },
+        { id: "extensions", label: tr("Extensions"), svg: <IconHex /> },
+      ],
     },
     {
       label: tr("System"),
@@ -1420,7 +1437,7 @@ function BrowsersView() {
   // Values captured when the inline editor opened. If the notes/proxy dialog
   // saves while the editor is open, an untouched field keeps the dialog's
   // change instead of the editor's stale snapshot overwriting it.
-  const [draftBaseline, setDraftBaseline] = useState<{ notes: string; proxy_id: string } | null>(null);
+  const [draftBaseline, setDraftBaseline] = useState<{ notes: string; proxy_id: string; extensions: string[] } | null>(null);
   // Value = epoch ms at which the engine was first observed running. Used
   // both as a truthy flag (any number = running) and as the anchor for the
   // ticking uptime display in the Status column.
@@ -1705,7 +1722,7 @@ function BrowsersView() {
       toast.err(tr("Stop the browser before deleting this profile"));
       return;
     }
-    if ((await confirmModal({ title: tr("Delete profile"), message: tr("Delete this profile? Its user-data dir is wiped too."), danger: true })) !== true) return;
+    if ((await confirmModal({ title: tr("Move to recycle bin"), message: tr("Move this profile and its browser data to the recycle bin? You can restore it within 7 days."), danger: true })) !== true) return;
     try {
       await invoke("profile_delete", { id });
       setSelected((prev) => {
@@ -1832,20 +1849,20 @@ function BrowsersView() {
       toast.err(tr("Stop the {0} running browser{1} in this folder first", runningCount, runningCount === 1 ? "" : "s"));
       return;
     }
-    // Three outcomes: delete profiles, unfile, cancel.
+    // Three outcomes: recycle profiles, unfile, cancel.
     const choice = await confirmModal({
       title: tr("Delete folder “{0}”", f),
       message:
         count > 0
           ? tr("This folder has {0} profile{1}. ", count, count === 1 ? "" : "s") +
-            tr("Delete them too, or keep them (they move to “All”)?")
+            tr("Move them to the recycle bin for 7 days, or keep them in All?")
           : tr("Delete the empty folder “{0}”?", f),
       buttons:
         count > 0
           ? [
               { label: tr("Cancel"), value: "cancel" },
               { label: tr("Keep profiles"), value: "keep" },
-              { label: tr("Delete profiles"), value: "delete", danger: true },
+              { label: tr("Move to recycle bin"), value: "delete", danger: true },
             ]
           : [
               { label: tr("Cancel"), value: "cancel" },
@@ -1870,7 +1887,7 @@ function BrowsersView() {
       reload();
       toast.ok(
         alsoDelete
-          ? tr("Deleted folder “{0}” + {1} profile{2}", f, n, n === 1 ? "" : "s")
+          ? tr("Deleted folder “{0}”; moved {1} profiles to the recycle bin", f, n)
           : tr("Removed folder “{0}” ({1} profile{2} kept)", f, n, n === 1 ? "" : "s"),
       );
     } catch (e) { toast.err(String(e)); }
@@ -1937,13 +1954,13 @@ function BrowsersView() {
       toast.err(tr("Stop the {0} selected active browser{1} first", activeIds.length, activeIds.length === 1 ? "" : "s"));
       return;
     }
-    if ((await confirmModal({ title: tr("Delete profiles"), message: tr("Delete {0} profile{1}? This wipes their user-data dirs too.", ids.length, ids.length === 1 ? "" : "s"), danger: true })) !== true) return;
-    for (const id of ids) {
-      try { await invoke("profile_delete", { id }); } catch (e) { toast.err(String(e)); }
-    }
-    setSelected(new Set());
-    reload();
-    toast.ok(tr("Deleted {0}", ids.length));
+    if ((await confirmModal({ title: tr("Move to recycle bin"), message: tr("Move {0} profiles and their browser data to the recycle bin for 7 days?", ids.length), danger: true })) !== true) return;
+    try {
+      const count = await invoke<number>("profile_trash_many", { ids });
+      setSelected(new Set());
+      await reload();
+      toast.ok(tr("Moved {0} profiles to the recycle bin", count));
+    } catch (e) { toast.err(String(e)); }
   };
 
   const bulkExport = async () => {
@@ -1975,7 +1992,7 @@ function BrowsersView() {
     if (expanded === id) { setExpanded(null); setDraft(null); setDraftBaseline(null); return; }
     const stored = await invoke<any>("profile_get", { id });
     setDraft(fromStored(stored));
-    setDraftBaseline({ notes: String(stored.notes ?? ""), proxy_id: String(stored._meta?.proxy_id ?? "") });
+    setDraftBaseline({ notes: String(stored.notes ?? ""), proxy_id: String(stored._meta?.proxy_id ?? ""), extensions: stored._meta?.extensions ?? [] });
     setExpanded(id);
   };
 
@@ -2002,10 +2019,8 @@ function BrowsersView() {
       const existing = draft.id
         ? await invoke<any>("profile_get", { id: draft.id })
         : null;
-      // Three-way merge against the editor-open baseline: when the notes or
-      // proxy dialog saved while this editor was open, an untouched field
-      // keeps the dialog's change instead of being clobbered by the editor's
-      // stale snapshot.
+      // Merge unchanged editor fields from the latest stored profile, including
+      // extension choices changed through the API while this editor was open.
       const notes = draftBaseline && draft.notes === draftBaseline.notes
         ? String(existing?.notes ?? draft.notes)
         : draft.notes;
@@ -2013,7 +2028,10 @@ function BrowsersView() {
       const mergedProxyId = proxyChanged
         ? draft.proxy_id
         : String(existing?._meta?.proxy_id ?? draft.proxy_id);
-      const payload = toStored({ ...draft, notes }, fp, existing);
+      const extensions = draftBaseline && JSON.stringify(draft.extensions) === JSON.stringify(draftBaseline.extensions)
+        ? existing?._meta?.extensions ?? draft.extensions
+        : draft.extensions;
+      const payload = toStored({ ...draft, notes, extensions }, fp, existing);
       payload._meta.proxy_id = mergedProxyId;
       const saved = await invoke<ProfileMeta>("profile_save", { payload });
       if (proxyChanged) {
@@ -3015,6 +3033,7 @@ function InlineEditor({
           </label>
         </div>
       </div>
+      <ExtensionPicker value={f.extensions} onChange={(ids) => u("extensions", ids)} />
       <div className="ie-foot">
         <button className="btn-ghost" onClick={onCancel}>{tr("Cancel")}</button>
         <button className="btn-primary" onClick={onSave} disabled={nameError != null} title={nameError ?? undefined}>

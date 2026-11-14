@@ -56,6 +56,8 @@ pub struct StoredMeta {
     /// Source library fingerprint id; MUST round-trip — drives the editor GPU select.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_preset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<String>,
     /// Inline proxy from temporary profile API; not in proxy store.
     #[serde(
         default,
@@ -147,6 +149,14 @@ fn path_for(id: &str) -> Result<PathBuf> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ProfileOperation {
+    Transfer {
+        moves: Vec<FileMove>,
+        profile_ids: Vec<String>,
+        cleanup_after: Vec<PathBuf>,
+        cleanup_rollback: Vec<PathBuf>,
+        phase: TransferPhase,
+        completed: usize,
+    },
     Retag {
         changes: Vec<ProfileRetag>,
         #[serde(default = "default_apply_after")]
@@ -157,6 +167,127 @@ enum ProfileOperation {
         #[serde(default = "default_delete_commit")]
         commit: bool,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct FileMove {
+    pub from: PathBuf,
+    pub to: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+enum TransferPhase {
+    Applying,
+    RollingBack,
+    CommitCleanup,
+    RollbackCleanup,
+}
+
+fn rollback_moves(moves: &[FileMove], completed: usize) -> Result<()> {
+    anyhow::ensure!(
+        completed <= moves.len(),
+        "Invalid profile transfer progress"
+    );
+    for index in (0..moves.len().min(completed + 1)).rev() {
+        let item = &moves[index];
+        // The next rename can have completed just before a crash, without its
+        // progress record. If its source still exists, it did not happen.
+        if index == completed && item.from.exists() {
+            continue;
+        }
+        match (item.from.exists(), item.to.exists()) {
+            (false, true) => fs::rename(&item.to, &item.from)?,
+            (true, false) => {}
+            _ => anyhow::bail!(
+                "profile transfer rollback conflict: {}",
+                item.from.display()
+            ),
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_transfer_paths(paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        if path.is_dir() {
+            fs::remove_dir_all(path)?;
+        } else if path.exists() {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Caller holds the profile resource lock. The journal records both the file
+/// transfer and its cleanup phase, so recovery never replays cleaned-up moves.
+pub(crate) fn transfer_files(
+    moves: Vec<FileMove>,
+    profile_ids: Vec<String>,
+    cleanup_after: Vec<PathBuf>,
+    cleanup_rollback: Vec<PathBuf>,
+) -> Result<()> {
+    for item in &moves {
+        anyhow::ensure!(
+            item.from.exists() && !item.to.exists(),
+            "profile transfer destination conflict: {}",
+            item.to.display()
+        );
+        if let Some(parent) = item.to.parent() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let mut operation = ProfileOperation::Transfer {
+        moves,
+        profile_ids,
+        cleanup_after,
+        cleanup_rollback,
+        phase: TransferPhase::Applying,
+        completed: 0,
+    };
+    persist_operation(&operation)?;
+    let result = (|| -> Result<()> {
+        loop {
+            let ProfileOperation::Transfer {
+                moves, completed, ..
+            } = &mut operation
+            else {
+                unreachable!()
+            };
+            if *completed == moves.len() {
+                break;
+            }
+            let item = &moves[*completed];
+            anyhow::ensure!(
+                !item.to.exists(),
+                "profile transfer destination appeared: {}",
+                item.to.display()
+            );
+            fs::rename(&item.from, &item.to).with_context(|| {
+                format!("move {} to {}", item.from.display(), item.to.display())
+            })?;
+            *completed += 1;
+            persist_operation(&operation)?;
+        }
+        if let ProfileOperation::Transfer { phase, .. } = &mut operation {
+            *phase = TransferPhase::CommitCleanup;
+        }
+        persist_operation(&operation)
+    })();
+    if let Err(error) = result {
+        if let ProfileOperation::Transfer { phase, .. } = &mut operation {
+            *phase = TransferPhase::RollingBack;
+        }
+        persist_operation(&operation)?;
+        recover_interrupted_operations_locked()
+            .with_context(|| format!("{error}; transfer rollback incomplete"))?;
+        return Err(error);
+    }
+    // The new live state is committed. Cleanup can be resumed from the journal;
+    // reporting a failed transaction here would incorrectly roll back proxies.
+    if let Err(error) = recover_interrupted_operations_locked() {
+        eprintln!("[profiles] transfer committed; cleanup remains pending: {error:#}");
+    }
+    Ok(())
 }
 
 fn default_apply_after() -> bool {
@@ -347,11 +478,43 @@ fn commit_quarantined_delete(targets: &[ProfileDeleteTarget]) -> Result<()> {
     Ok(())
 }
 
-fn recover_interrupted_operations_locked() -> Result<()> {
-    let Some(operation) = load_operation()? else {
+pub(crate) fn recover_interrupted_operations_locked() -> Result<()> {
+    let Some(mut operation) = load_operation()? else {
         return Ok(());
     };
+    if let ProfileOperation::Transfer {
+        moves,
+        profile_ids,
+        phase,
+        completed,
+        ..
+    } = &mut operation
+    {
+        for id in profile_ids {
+            ensure_stopped(id)?;
+        }
+        match phase {
+            TransferPhase::Applying | TransferPhase::RollingBack => {
+                rollback_moves(moves, *completed)?;
+                *phase = TransferPhase::RollbackCleanup;
+            }
+            _ => {}
+        }
+        persist_operation(&operation)?;
+    }
     match &operation {
+        ProfileOperation::Transfer {
+            cleanup_after,
+            cleanup_rollback,
+            phase,
+            ..
+        } => {
+            cleanup_transfer_paths(match phase {
+                TransferPhase::CommitCleanup => cleanup_after,
+                TransferPhase::RollbackCleanup => cleanup_rollback,
+                _ => unreachable!(),
+            })?;
+        }
         ProfileOperation::Retag {
             changes,
             apply_after,
@@ -1344,30 +1507,12 @@ pub fn delete_folder(name: &str, delete_profiles: bool) -> Result<usize> {
         return Ok(changes.len());
     }
 
-    let targets = profiles
-        .into_iter()
-        .map(|(profile_path, stored)| {
-            let profile_id = stored.meta.id;
-            let profile_backup_path = store::backup_path(&profile_path)?;
-            let user_data_path = store::user_data_root()?.join(&profile_id);
-            Ok(ProfileDeleteTarget {
-                profile_quarantine: quarantine_path(&profile_path, &profile_id, "profile")?,
-                profile_backup_quarantine: quarantine_path(
-                    &profile_backup_path,
-                    &profile_id,
-                    "profile-backup",
-                )?,
-                user_data_quarantine: quarantine_path(&user_data_path, &profile_id, "user-data")?,
-                profile_id,
-                profile_path,
-                profile_backup_path,
-                user_data_path,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let count = targets.len();
-    delete_targets_transactionally(targets)?;
-    Ok(count)
+    crate::trash::move_profiles_locked(
+        &profiles
+            .into_iter()
+            .map(|(_, stored)| stored.meta.id)
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// Per-profile user-data-dir; created on first call.
@@ -1396,6 +1541,58 @@ mod tests {
     };
     use serde_json::json;
     use std::path::PathBuf;
+
+    #[test]
+    fn transfer_recovery_rolls_back_uncommitted_moves_and_keeps_committed_data() {
+        use super::{FileMove, ProfileOperation, TransferPhase};
+        let test = crate::store::TestStore::new();
+        let source = test.root.join("source");
+        let destination = test.root.join("destination");
+        std::fs::write(&source, b"original").unwrap();
+        std::fs::write(&destination, b"existing").unwrap();
+        let moves = vec![FileMove {
+            from: source.clone(),
+            to: destination.clone(),
+        }];
+        assert!(super::transfer_files(moves.clone(), Vec::new(), Vec::new(), Vec::new()).is_err());
+        assert_eq!(std::fs::read(&source).unwrap(), b"original");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing");
+        std::fs::remove_file(&destination).unwrap();
+        // Crash just after rename, before the completed counter is written.
+        std::fs::rename(&source, &destination).unwrap();
+        super::persist_operation(&ProfileOperation::Transfer {
+            moves: moves.clone(),
+            profile_ids: Vec::new(),
+            cleanup_after: Vec::new(),
+            cleanup_rollback: Vec::new(),
+            phase: TransferPhase::Applying,
+            completed: 0,
+        })
+        .unwrap();
+        super::recover_interrupted_operations().unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), b"original");
+        assert!(!destination.exists());
+        // Committed data survives even when cleanup was interrupted.
+        std::fs::rename(&source, &destination).unwrap();
+        let cleanup = test.root.join("cleanup");
+        std::fs::create_dir(&cleanup).unwrap();
+        super::persist_operation(&ProfileOperation::Transfer {
+            moves,
+            profile_ids: Vec::new(),
+            cleanup_after: vec![cleanup.clone()],
+            cleanup_rollback: Vec::new(),
+            phase: TransferPhase::CommitCleanup,
+            completed: 1,
+        })
+        .unwrap();
+        super::recover_interrupted_operations().unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"original");
+        assert!(!source.exists());
+        assert!(!cleanup.exists());
+        assert!(!crate::store::profile_operation_journal_path()
+            .unwrap()
+            .exists());
+    }
 
     fn identity(country_code: &str, timezone: &str) -> SessionNetworkIdentity {
         SessionNetworkIdentity {
