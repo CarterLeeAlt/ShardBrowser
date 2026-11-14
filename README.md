@@ -293,6 +293,8 @@ browserscan.net、fp.haru.gay、antcpt 的 reCAPTCHA 得分检测器 — 通常�
 
 ### 方式 A — 下载预构建发行版
 
+发行版通过 GitHub Actions 的 `Release` 工作流手动发布，运行分支为 `main`。
+
 从 [GitHub Releases](../../releases) 获取 Windows x64 构建。每个 Release
 提供两种产物，按需选择：
 

@@ -1,4 +1,4 @@
-# Build and publish the Windows x64 Tauri launcher. ShardX Launcher is a
+# Manually build and publish the Windows x64 Tauri launcher. ShardX Launcher is a
 # Windows-only portable application; no macOS, Linux, ARM64 or x86 jobs should
 # be added to this workflow.
 #
@@ -9,9 +9,6 @@
 name: Release
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       tag:
@@ -91,8 +88,8 @@ jobs:
           node scripts/check-version-consistency.mjs --tag $tag
           Assert-NativeExit "check-version-consistency"
 
-          # Publishing a pre-existing tag would mutate its Release assets. Both
-          # automatic and manual runs therefore fail before the build begins.
+          # Publishing a pre-existing tag would mutate its Release assets, so
+          # validation fails before the build begins.
           git ls-remote --exit-code --refs origin "refs/tags/$tag" | Out-Null
           if ($LASTEXITCODE -eq 0) {
             throw "Release tag $tag already exists on origin."
