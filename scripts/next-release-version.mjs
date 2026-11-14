@@ -4,7 +4,7 @@
 //   * explicit  — `--explicit v2.0.5` publishes exactly that tag (manual runs)
 //   * auto      — `--base 2.0.5` publishes exactly the source-tree version
 // After a successful publish the workflow writes bump(base) back into the
-// version files, so the next push publishes the next number: 2.0.2 → 2.0.3.
+// version files, so the next manual run publishes the next number: 2.0.2 → 2.0.3.
 //
 // Increment rules: patch and minor roll over at 9 (2.0.9 → 2.1.0,
 // 2.9.9 → 3.0.0); major is unbounded.
