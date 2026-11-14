@@ -1426,6 +1426,7 @@ function BrowsersView() {
   // ticking uptime display in the Status column.
   const [running, setRunning] = useState<Record<string, number>>({});
   const [backendActiveIds, setBackendActiveIds] = useState<Set<string>>(new Set());
+  const processPollRevision = useRef(0);
   // Re-render trigger so the uptime label ticks every second without
   // re-fetching the process list (which polls every 2s).
   const [, setUptimeTick] = useState(0);
@@ -1514,12 +1515,13 @@ function BrowsersView() {
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
+      const revision = processPollRevision.current;
       try {
         const [list, activeIds] = await Promise.all([
           invoke<{ profile_id: string; pid: number; uptime_ms: number }[]>("process_list"),
           invoke<string[]>("profile_active_ids"),
         ]);
-        if (cancelled) return;
+        if (cancelled || revision !== processPollRevision.current) return;
         setBackendActiveIds(new Set(activeIds));
         const now = Date.now();
         setRunning((prev) => {
@@ -1639,11 +1641,18 @@ function BrowsersView() {
   const selectedHasStarting = [...selected].some((id) => startBusy.has(id) || (backendActiveIds.has(id) && !running[id]));
   const selectedHasActive = selectedHasRunning || selectedHasStarting;
 
-  // Block the Start button until `invoke("launch")` returns (success or
-  // failure).  The launch includes pre-flight steps that can take real time
-  // — UDP probe, geo lookup, Widevine pre-warm — and surfacing the busy
-  // state for the whole window is what the user sees as "did it work?".
-  // On failure we unlock immediately and toast the error.
+  const clearFailedLaunch = (id: string) => {
+    // Discard polls started before the failure, which can still report the
+    // released backend reservation as active.
+    processPollRevision.current += 1;
+    setBackendActiveIds((current) => {
+      const next = new Set(current);
+      next.delete(id);
+      return next;
+    });
+  };
+
+  // Keep the launch busy until the backend returns; failures unlock immediately.
   const startStop = async (p: ProfileMeta) => {
     if (running[p.id]) {
       try {
@@ -1664,6 +1673,7 @@ function BrowsersView() {
       // Don't optimistically flip `running` here; the 2s poll above picks
       // up the new child immediately and anchors the uptime clock.
     } catch (e) {
+      clearFailedLaunch(p.id);
       toast.err(String(e));
     } finally {
       setStartBusy((s) => {
@@ -1865,23 +1875,22 @@ function BrowsersView() {
     }
 
     setStartBusy((state) => new Set([...state, ...ids]));
-    try {
-      for (const id of ids) {
-        try {
-          const res = await invoke<{ pid: number; warnings: string[] }>("launch", { profileId: id });
-          for (const warning of res.warnings ?? []) toast.warn(warning);
-        } catch (e) {
-          toast.err(`Failed to launch ${id.slice(0, 8)}: ${e}`);
-        }
+    for (const id of ids) {
+      try {
+        const res = await invoke<{ pid: number; warnings: string[] }>("launch", { profileId: id });
+        for (const warning of res.warnings ?? []) toast.warn(warning);
+      } catch (e) {
+        clearFailedLaunch(id);
+        toast.err(`Failed to launch ${id.slice(0, 8)}: ${e}`);
+      } finally {
+        setStartBusy((state) => {
+          const next = new Set(state);
+          next.delete(id);
+          return next;
+        });
       }
-      setSelected(new Set());
-    } finally {
-      setStartBusy((state) => {
-        const next = new Set(state);
-        for (const id of ids) next.delete(id);
-        return next;
-      });
     }
+    setSelected(new Set());
   };
 
   const bulkStop = async () => {
@@ -2363,7 +2372,7 @@ function BrowsersView() {
                       isRunning
                         ? "Stop browser"
                         : isStarting
-                          ? "Starting browser (UDP probe + geo + spawn)…"
+                          ? "Starting browser (proxy checks: up to 5 seconds)…"
                           : "Start browser"
                     }
                     aria-label={isRunning ? "Stop browser" : isStarting ? "Starting browser" : "Start browser"}
@@ -3717,13 +3726,14 @@ function ProxiesView() {
                     {p.host}:{p.port}
                   </span>
                 </div>
-                <div>
+                <div className="proxy-location">
                   {cc ? (
                     <span className="proxy-country">
                       <CountryFlag cc={cc} />
                       <span className="flag">{cc}</span>
                     </span>
                   ) : <span className="muted small">—</span>}
+                  <span className="proxy-city muted small">{r?.city.trim() || "—"}</span>
                 </div>
                 <div>
                   <span className="profile-count" title={`${profileCountByProxy[p.id] ?? 0} profile(s) bound to this proxy`}>

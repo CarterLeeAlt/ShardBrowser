@@ -1759,13 +1759,55 @@ fn geo_provider_order(preferred: &str) -> Vec<&'static str> {
         .collect()
 }
 
-/// Probe geo through `entry` if Some, else direct. The configured provider is
-/// preferred; any provider failure (timeout, HTTP 429, decode error, HTTP 5xx,
-/// connection refused, DNS failure, ...) advances to the next provider in
-/// Settings order, so a single provider outage cannot fail the whole lookup.
+// Keep country and timezone usable before preferring city-level detail. Region
+// is optional: city-states and some providers legitimately omit it.
+fn geo_detail_level(country_code: &str, timezone: &str, city: &str) -> (bool, bool, bool) {
+    (
+        !country_code.trim().is_empty(),
+        !timezone.trim().is_empty(),
+        !city.trim().is_empty(),
+    )
+}
+
+fn consider_geo_result(best: &mut Option<GeoInfo>, info: GeoInfo) -> Result<bool> {
+    let ip = info
+        .ip
+        .parse::<std::net::IpAddr>()
+        .context("geo response has no valid IP")?;
+    if let Some(current) = best.as_ref() {
+        if current.ip.parse::<std::net::IpAddr>()? != ip {
+            anyhow::bail!(
+                "geo response exit IP changed from {} to {}",
+                current.ip,
+                info.ip
+            );
+        }
+    }
+    let detail = geo_detail_level(&info.country_code, &info.timezone, &info.city);
+    if best.as_ref().is_none_or(|current| {
+        detail > geo_detail_level(&current.country_code, &current.timezone, &current.city)
+    }) {
+        *best = Some(info);
+    }
+    Ok(detail == (true, true, true))
+}
+
+/// Probe through the selected route within five seconds. Try the preferred
+/// provider first; on failure or incomplete geo, race the remaining providers.
+/// Keep one provider's whole result for the same exit IP, including timezone
+/// and coordinates. At the deadline retain the best valid partial result.
 pub async fn geo_check_via(
     entry: Option<&ProxyEntry>,
     provider_override: Option<String>,
+) -> Result<GeoInfo> {
+    let deadline = tokio::time::Instant::now() + PROXY_TEST_TIMEOUT;
+    geo_check_via_until(entry, provider_override, deadline).await
+}
+
+async fn geo_check_via_until(
+    entry: Option<&ProxyEntry>,
+    provider_override: Option<String>,
+    deadline: tokio::time::Instant,
 ) -> Result<GeoInfo> {
     let requested_provider = provider_override
         .filter(|s| !s.is_empty())
@@ -1777,26 +1819,62 @@ pub async fn geo_check_via(
         });
     let preferred = normalize_geo_provider(&requested_provider);
     let mut fallback_errors = Vec::new();
+    let mut best = None;
+    let preferred_result =
+        tokio::time::timeout_at(deadline, geo_check_provider(entry, preferred.to_string()))
+            .await
+            .context(PROXY_TEST_TIMEOUT_ERROR)
+            .and_then(|result| result)
+            .and_then(|info| consider_geo_result(&mut best, info));
+    match preferred_result {
+        Ok(true) => return Ok(best.expect("complete geo result")),
+        Ok(false) => {}
+        Err(error) => fallback_errors.push(format!("{preferred}: {error}")),
+    }
 
-    for provider in geo_provider_order(preferred) {
-        match geo_check_provider(entry, provider.to_string()).await {
-            Ok(info) => {
-                if provider != preferred {
-                    eprintln!(
-                        "[launcher] geo provider fallback succeeded: preferred={preferred}, actual={provider}"
-                    );
+    let mut tasks = tokio::task::JoinSet::new();
+    if tokio::time::Instant::now() < deadline {
+        for provider in geo_provider_order(preferred).into_iter().skip(1) {
+            let entry = entry.cloned();
+            tasks.spawn(async move {
+                (
+                    provider,
+                    geo_check_provider(entry.as_ref(), provider.to_string()).await,
+                )
+            });
+        }
+    }
+    while !tasks.is_empty() {
+        match tokio::time::timeout_at(deadline, tasks.join_next()).await {
+            Ok(Some(Ok((provider, result)))) => {
+                match result.and_then(|info| consider_geo_result(&mut best, info)) {
+                    Ok(true) => break,
+                    Ok(false) => {}
+                    Err(error) => fallback_errors.push(format!("{provider}: {error}")),
                 }
-                return Ok(info);
             }
-            Err(error) => {
-                eprintln!("[launcher] geo provider {provider} failed; trying next: {error}");
-                fallback_errors.push(format!("{provider}: {error}"));
+            Ok(Some(Err(error))) => return Err(error.into()),
+            Ok(None) => break,
+            Err(_) => {
+                fallback_errors.push(PROXY_TEST_TIMEOUT_ERROR.to_string());
+                break;
             }
         }
     }
+    // Dropping the set cancels outstanding lookups, including on proxy edits.
+    drop(tasks);
+    if let Some(info) = best {
+        if info.provider != preferred {
+            eprintln!(
+                "[launcher] geo provider fallback succeeded: preferred={preferred}, actual={}",
+                info.provider
+            );
+        }
+        return Ok(info);
+    }
 
     anyhow::bail!(
-        "all geo providers failed after starting with {preferred}: {}",
+        "geo lookup failed after starting with {preferred}: {}",
         fallback_errors.join("; ")
     )
 }
@@ -1842,12 +1920,15 @@ pub async fn exit_liveness(entry: &ProxyEntry) -> Result<()> {
         "http://www.msftconnecttest.com/connecttest.txt",
     ];
     let client = http_client_via(Some(entry))?;
-    // Race both targets concurrently: launch preflight latency is bounded by
-    // one probe timeout, not two.
-    let (first, second) =
-        tokio::join!(client.get(TARGETS[0]).send(), client.get(TARGETS[1]).send());
+    // One successful target is sufficient; cancel the other request immediately.
+    let mut tasks = tokio::task::JoinSet::new();
+    for target in TARGETS {
+        let client = client.clone();
+        tasks.spawn(async move { (target, client.get(target).send().await) });
+    }
     let mut errors = Vec::new();
-    for (target, response) in [(TARGETS[0], first), (TARGETS[1], second)] {
+    while let Some(result) = tasks.join_next().await {
+        let (target, response) = result?;
         match response {
             Ok(response) => {
                 if response.status().is_success() {
@@ -1859,6 +1940,60 @@ pub async fn exit_liveness(entry: &ProxyEntry) -> Result<()> {
         }
     }
     anyhow::bail!("exit liveness probes failed: {}", errors.join("; "))
+}
+
+#[derive(Debug)]
+pub struct LaunchProxyCheck {
+    pub geo: Result<GeoInfo>,
+    pub udp_ok: bool,
+}
+
+/// All network checks for one launch share a single five-second deadline.
+/// Geo success proves exit liveness; otherwise a neutral target must succeed.
+/// UDP is optional and cannot delay reporting a failed exit.
+pub async fn check_for_launch(entry: &ProxyEntry, need_udp: bool) -> Result<LaunchProxyCheck> {
+    credentials_available(entry)?;
+    let deadline = tokio::time::Instant::now() + PROXY_TEST_TIMEOUT;
+    let endpoint = format!("{}:{}", entry.host, entry.port);
+    let connection = tokio::time::timeout_at(deadline, tokio::net::TcpStream::connect(&endpoint))
+        .await
+        .context(PROXY_TEST_TIMEOUT_ERROR)
+        .and_then(|result| result.map_err(anyhow::Error::from))
+        .with_context(|| format!("Cannot connect to proxy {endpoint}; browser launch cancelled. Check the proxy and try again."))?;
+    drop(connection);
+
+    let geo = geo_check_via_until(Some(entry), None, deadline);
+    let exit = exit_liveness(entry);
+    let udp = probe_udp(entry);
+    tokio::pin!(geo, exit, udp);
+    let mut geo_result = None;
+    let mut exit_result = None;
+    let mut udp_ok = (!(need_udp && matches!(entry.kind, ProxyKind::Socks5))).then_some(false);
+    loop {
+        if let (Some(Err(_)), Some(Err(error))) = (&geo_result, &exit_result) {
+            anyhow::bail!(
+                "Proxy {endpoint} exit check failed; browser launch cancelled. Check the proxy/upstream and try again. ({error:#})"
+            );
+        }
+        let exit_verified =
+            matches!(&geo_result, Some(Ok(_))) || matches!(&exit_result, Some(Ok(())));
+        if let (true, Some(udp_ok)) = (exit_verified, udp_ok) {
+            if let Some(geo) = geo_result.take() {
+                return Ok(LaunchProxyCheck { geo, udp_ok });
+            }
+        }
+        tokio::select! {
+            biased;
+            result = &mut geo, if geo_result.is_none() => geo_result = Some(result),
+            result = &mut exit, if exit_result.is_none() && !matches!(&geo_result, Some(Ok(_))) => exit_result = Some(result),
+            result = &mut udp, if udp_ok.is_none() => udp_ok = Some(result.is_ok()),
+            _ = tokio::time::sleep_until(deadline) => {
+                geo_result.get_or_insert_with(|| Err(anyhow::anyhow!(PROXY_TEST_TIMEOUT_ERROR)));
+                exit_result.get_or_insert_with(|| Err(anyhow::anyhow!(PROXY_TEST_TIMEOUT_ERROR)));
+                udp_ok.get_or_insert(false);
+            }
+        }
+    }
 }
 
 async fn geo_check_provider(entry: Option<&ProxyEntry>, provider: String) -> Result<GeoInfo> {
@@ -2205,15 +2340,27 @@ fn record_test(proxy_id: &str, mut snap: TestSnapshot) -> Result<TestSnapshot> {
     }
     let mut hs = load_history_unlocked()?;
     let entries = hs.by_proxy.entry(proxy_id.into()).or_default();
+    let recorded = update_test_history(entries, snap);
+    save_history(&hs)?;
+    Ok(recorded)
+}
+
+fn update_test_history(entries: &mut Vec<TestSnapshot>, mut snap: TestSnapshot) -> TestSnapshot {
     if let Some(last) = entries.last_mut() {
         if !snap.ip.is_empty() && last.ip == snap.ip {
-            last.last_seen = snap.last_seen.clone();
-            last.tcp_ms = snap.tcp_ms;
-            last.udp_ms = snap.udp_ms;
-            last.udp_error = snap.udp_error.clone();
-            let out = last.clone();
-            save_history(&hs)?;
-            return Ok(out);
+            if geo_detail_level(&snap.country_code, &snap.timezone, &snap.city)
+                >= geo_detail_level(&last.country_code, &last.timezone, &last.city)
+            {
+                snap.first_seen = last.first_seen.clone();
+                *last = snap;
+            } else {
+                // A partial response must not erase known geo for this same IP.
+                last.last_seen = snap.last_seen;
+                last.tcp_ms = snap.tcp_ms;
+                last.udp_ms = snap.udp_ms;
+                last.udp_error = snap.udp_error;
+            }
+            return last.clone();
         }
     }
     if snap.first_seen.is_empty() {
@@ -2224,8 +2371,7 @@ fn record_test(proxy_id: &str, mut snap: TestSnapshot) -> Result<TestSnapshot> {
         let drop = entries.len() - 50;
         entries.drain(..drop);
     }
-    save_history(&hs)?;
-    Ok(snap)
+    snap
 }
 
 pub fn history(proxy_id: &str) -> Result<Vec<TestSnapshot>> {
@@ -2322,93 +2468,69 @@ async fn collect_test_snapshot(entry: &ProxyEntry, lane: TestLane) -> Result<Tes
         .map_err(|_| anyhow::anyhow!("proxy test queue closed"))?;
 
     let now = unix_now();
-    // Queueing does not count against the proxy. Once a worker starts, the
-    // complete TCP + UDP + geo operation has one shared five-second deadline.
-    let test = async {
-        let udp_probe = async {
-            if matches!(entry.kind, ProxyKind::Socks5) {
-                Some(probe_udp(entry).await)
-            } else {
-                None
-            }
-        };
-        let geo_probe = geo_check(entry, None);
-        let (tcp_res, udp_res, geo_res) = tokio::join!(probe(entry), udp_probe, geo_probe);
-
-        // TCP failure → zero geo so snapshot reads "Failed, no IP".
-        let tcp_failed = tcp_res.is_err();
-        let (ip, country_code, country, region, city, isp, tz, lat, lng, provider) =
-            match (&geo_res, tcp_failed) {
-                (Ok(g), false) => (
-                    g.ip.clone(),
-                    g.country_code.clone(),
-                    g.country.clone(),
-                    g.region.clone(),
-                    g.city.clone(),
-                    g.isp.clone(),
-                    g.timezone.clone(),
-                    g.latitude,
-                    g.longitude,
-                    g.provider.clone(),
-                ),
-                _ => (
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    0.0,
-                    0.0,
-                    String::new(),
-                ),
-            };
-
-        TestSnapshot {
-            first_seen: String::new(),
-            last_seen: now.clone(),
-            ip,
-            country_code,
-            country,
-            region,
-            city,
-            isp,
-            timezone: tz,
-            latitude: lat,
-            longitude: lng,
-            tcp_ms: tcp_res.ok(),
-            udp_ms: udp_res
-                .as_ref()
-                .and_then(|result| result.as_ref().ok().copied()),
-            udp_error: udp_res
-                .as_ref()
-                .and_then(|result| result.as_ref().err().map(|error| error.to_string())),
-            provider,
+    // Each concurrent probe has a five-second budget. Assemble completed
+    // results after those deadlines so a slow optional probe cannot erase geo.
+    let udp_probe = async {
+        if matches!(entry.kind, ProxyKind::Socks5) {
+            Some(probe_udp(entry).await)
+        } else {
+            None
         }
     };
+    let geo_probe = geo_check(entry, None);
+    let (tcp_res, udp_res, geo_res) = tokio::join!(probe(entry), udp_probe, geo_probe);
 
-    match tokio::time::timeout(PROXY_TEST_TIMEOUT, test).await {
-        Ok(snapshot) => Ok(snapshot),
-        Err(_) => Ok(TestSnapshot {
-            first_seen: String::new(),
-            last_seen: now,
-            ip: String::new(),
-            country_code: String::new(),
-            country: String::new(),
-            region: String::new(),
-            city: String::new(),
-            isp: String::new(),
-            timezone: String::new(),
-            latitude: 0.0,
-            longitude: 0.0,
-            tcp_ms: None,
-            udp_ms: None,
-            udp_error: matches!(entry.kind, ProxyKind::Socks5)
-                .then(|| PROXY_TEST_TIMEOUT_ERROR.to_string()),
-            provider: String::new(),
-        }),
-    }
+    // TCP failure → zero geo so snapshot reads "Failed, no IP".
+    let tcp_failed = tcp_res.is_err();
+    let (ip, country_code, country, region, city, isp, tz, lat, lng, provider) =
+        match (&geo_res, tcp_failed) {
+            (Ok(g), false) => (
+                g.ip.clone(),
+                g.country_code.clone(),
+                g.country.clone(),
+                g.region.clone(),
+                g.city.clone(),
+                g.isp.clone(),
+                g.timezone.clone(),
+                g.latitude,
+                g.longitude,
+                g.provider.clone(),
+            ),
+            _ => (
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                0.0,
+                0.0,
+                String::new(),
+            ),
+        };
+
+    Ok(TestSnapshot {
+        first_seen: String::new(),
+        last_seen: now.clone(),
+        ip,
+        country_code,
+        country,
+        region,
+        city,
+        isp,
+        timezone: tz,
+        latitude: lat,
+        longitude: lng,
+        tcp_ms: tcp_res.ok(),
+        udp_ms: udp_res
+            .as_ref()
+            .and_then(|result| result.as_ref().ok().copied()),
+        udp_error: udp_res
+            .as_ref()
+            .and_then(|result| result.as_ref().err().map(|error| error.to_string())),
+        provider,
+    })
 }
 
 async fn collect_test_snapshot_or_cancel(
@@ -2699,7 +2821,9 @@ pub fn country_to_timezone(cc: &str) -> &'static str {
 
 #[cfg(test)]
 mod snapshot_tests {
-    use super::{latest_successful_in, TestSnapshot};
+    use super::{
+        consider_geo_result, latest_successful_in, update_test_history, GeoInfo, TestSnapshot,
+    };
 
     fn snap(ip: &str, timezone: &str) -> TestSnapshot {
         TestSnapshot {
@@ -2748,5 +2872,145 @@ mod snapshot_tests {
         let entries = vec![snap("", ""), snap("", "")];
         assert!(latest_successful_in(&entries).is_none());
         assert!(latest_successful_in(&[]).is_none());
+    }
+
+    #[test]
+    fn missing_city_is_enriched_and_same_ip_history_is_refreshed() {
+        let partial = GeoInfo {
+            ip: "203.0.113.10".into(),
+            country: "United States".into(),
+            country_code: "US".into(),
+            region: String::new(),
+            city: String::new(),
+            isp: "HostPapa".into(),
+            timezone: "America/Chicago".into(),
+            latitude: 37.751,
+            longitude: -97.822,
+            provider: "geojs.io".into(),
+        };
+        let complete = GeoInfo {
+            region: "California".into(),
+            city: "Los Angeles".into(),
+            timezone: "America/Los_Angeles".into(),
+            latitude: 34.0522293,
+            longitude: -118.2436823,
+            provider: "ipwho.is".into(),
+            ..partial.clone()
+        };
+        let mut best = None;
+        assert!(!consider_geo_result(&mut best, partial.clone()).unwrap());
+        assert!(consider_geo_result(
+            &mut best,
+            GeoInfo {
+                ip: "203.0.113.20".into(),
+                ..complete.clone()
+            }
+        )
+        .is_err());
+        assert!(consider_geo_result(
+            &mut best,
+            GeoInfo {
+                ip: String::new(),
+                ..complete.clone()
+            }
+        )
+        .is_err());
+        assert_eq!(best.as_ref().unwrap().provider, "geojs.io");
+        assert!(consider_geo_result(&mut best, complete).unwrap());
+        let selected = best.unwrap();
+
+        let mut old = snap(&partial.ip, &partial.timezone);
+        old.first_seen = "@100".into();
+        old.last_seen = "@100".into();
+        old.provider = partial.provider;
+        let mut entries = vec![old.clone()];
+        let mut fresh = snap(&selected.ip, &selected.timezone);
+        fresh.last_seen = "@200".into();
+        fresh.region = selected.region;
+        fresh.city = selected.city;
+        fresh.isp = selected.isp;
+        fresh.latitude = selected.latitude;
+        fresh.longitude = selected.longitude;
+        fresh.provider = selected.provider;
+        fresh.tcp_ms = Some(120);
+        let refreshed = update_test_history(&mut entries, fresh.clone());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(refreshed.first_seen, "@100");
+        assert_eq!(refreshed.last_seen, "@200");
+        assert_eq!(refreshed.city, "Los Angeles");
+        assert_eq!(refreshed.region, "California");
+        assert_eq!(refreshed.timezone, "America/Los_Angeles");
+        assert_eq!(refreshed.provider, "ipwho.is");
+        assert_eq!(refreshed.latitude, 34.0522293);
+        assert_eq!(refreshed.longitude, -118.2436823);
+
+        old.last_seen = "@300".into();
+        old.tcp_ms = Some(150);
+        let retained = update_test_history(&mut entries, old);
+        assert_eq!(retained.city, "Los Angeles");
+        assert_eq!(retained.timezone, "America/Los_Angeles");
+        assert_eq!(retained.provider, "ipwho.is");
+        assert_eq!(retained.first_seen, "@100");
+        assert_eq!(retained.last_seen, "@300");
+        assert_eq!(retained.tcp_ms, Some(150));
+
+        fresh.city = "San Diego".into();
+        fresh.last_seen = "@400".into();
+        assert_eq!(update_test_history(&mut entries, fresh).city, "San Diego");
+        assert_eq!(entries.len(), 1);
+        let mut other_ip = snap("203.0.113.7", "America/Chicago");
+        other_ip.last_seen = "@500".into();
+        assert!(update_test_history(&mut entries, other_ip).city.is_empty());
+        assert_eq!(entries.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unresponsive_launch_has_one_deadline_and_releases_reservation() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut connections = Vec::new();
+            loop {
+                connections.push(listener.accept().await.unwrap().0);
+            }
+        });
+        let entry = ProxyEntry {
+            id: String::new(),
+            name: "unresponsive proxy".into(),
+            kind: ProxyKind::Socks5,
+            host: "127.0.0.1".into(),
+            port,
+            username: String::new(),
+            password: String::new(),
+            credentials_unavailable: false,
+            protected_credentials: None,
+            country: String::new(),
+            notes: String::new(),
+        };
+        let tracker = crate::process::Tracker::new();
+        let started = std::time::Instant::now();
+        let result = async {
+            let _reservation = tracker.reserve_launch("timeout-regression")?;
+            check_for_launch(&entry, true).await
+        }
+        .await;
+        let elapsed = started.elapsed();
+        server.abort();
+        let _ = server.await;
+        assert!(result.unwrap_err().to_string().contains("launch cancelled"));
+        assert!(elapsed >= PROXY_TEST_TIMEOUT);
+        assert!(elapsed < PROXY_TEST_TIMEOUT + std::time::Duration::from_secs(1));
+        assert!(!tracker.is_profile_active("timeout-regression"));
+
+        // The same port is now closed: do not spend the geo/UDP budgets on it.
+        let started = std::time::Instant::now();
+        let error = check_for_launch(&entry, true).await.unwrap_err();
+        assert!(error.to_string().contains("Cannot connect to proxy"));
+        assert!(started.elapsed() < PROXY_TEST_TIMEOUT);
     }
 }

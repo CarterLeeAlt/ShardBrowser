@@ -68,31 +68,6 @@ pub async fn launch_profile(
             }
         }
     }
-    let udd = profile::user_data_dir(profile_id)?;
-    let profile_name = stored
-        .config
-        .get("name")
-        .and_then(|value| value.as_str())
-        .unwrap_or("(unnamed)");
-    // Windows groups Chromium taskbar buttons by executable identity. Launch a
-    // portable per-profile copy whose icon contains the trailing NAME badge.
-    let launch_bin = if headless {
-        bin.clone()
-    } else {
-        match crate::taskbar_icon::prepare_profile_binary(&bin, profile_id, profile_name) {
-            Ok(profile_binary) => profile_binary,
-            Err(error) => {
-                // A blocked icon-resource update (for example over-eager AV)
-                // must never make the browser unusable.  Fall back to the
-                // untouched engine and lose only the optional taskbar badge.
-                eprintln!(
-                    "[launcher] taskbar badge unavailable for {profile_id}: {error:#}; using original browser binary"
-                );
-                bin.clone()
-            }
-        }
-    };
-
     // Stored proxy by id, else ephemeral inline (quick profiles, not in store).
     let bound_proxy: Option<proxy::ProxyEntry> = if let Some(proxy_id) =
         stored.meta.proxy_id.as_deref()
@@ -110,41 +85,22 @@ pub async fn launch_profile(
         stored.meta.inline_proxy.clone()
     };
 
-    // Live UDP probe; WebRTC gating uses current capability, while QUIC is
-    // disabled independently by launcher policy.
-    let proxy_udp_ok = if let Some(p) = bound_proxy.as_ref() {
-        if matches!(p.kind, proxy::ProxyKind::Socks5) {
-            match proxy::probe_udp(p).await {
-                Ok(ms) => {
-                    eprintln!("[launcher] UDP relay OK ({ms} ms) for proxy {}", p.host);
-                    true
-                }
-                Err(e) => {
-                    // Fail closed. The proxy test history survives endpoint
-                    // edits, so a stale successful snapshot must not let the
-                    // webrtc=auto branch skip its IP-handling policy while
-                    // the relay is actually dead.
-                    eprintln!(
-                        "[launcher] UDP probe failed for proxy {} ({e}); treating UDP relay as unavailable",
-                        p.host
-                    );
-                    false
-                }
-            }
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
     // Resolve one authoritative live network identity for the complete launch.
     // Reusing it for auto fields and WebRTC avoids contradictory provider
     // answers within the same browser start.
     let mut warnings = Vec::<String>::new();
     let mut preflight_geo_exhausted = false;
+    let mut proxy_udp_ok = false;
     let session_geo = if let Some(bound_proxy) = bound_proxy.as_ref() {
-        match proxy::geo_check(bound_proxy, None).await {
+        let webrtc = stored
+            .config
+            .get("webrtc")
+            .and_then(|value| value.as_str())
+            .unwrap_or("block");
+        let check =
+            proxy::check_for_launch(bound_proxy, !matches!(webrtc, "block" | "tcp_only")).await?;
+        proxy_udp_ok = check.udp_ok;
+        match check.geo {
             Ok(geo) => {
                 if let Some(warning) =
                     profile::enforce_session_network_identity(&mut stored, &bound_proxy.id, &geo)?
@@ -154,24 +110,14 @@ pub async fn launch_profile(
                 Some(geo)
             }
             Err(geo_error) => {
-                // Classify the failure before deciding: a geo-provider outage
-                // (rate limit, blocked site, provider down) must not block the
-                // launch, but a dead exit path must.
-                if proxy::exit_liveness(bound_proxy).await.is_ok() {
-                    let warning = format!(
-                        "geo lookup failed through the proxy exit, but the exit path is alive; launch allowed and the session identity was not re-checked this start (geo lookup error: {geo_error:#})"
-                    );
-                    eprintln!("[launcher] profile {profile_id}: {warning}");
-                    warnings.push(warning);
-                    preflight_geo_exhausted = true;
-                    None
-                } else {
-                    anyhow::bail!(
-                        "proxy exit unreachable via {}:{} (liveness probe failed); check the proxy/upstream — browser launch cancelled. geo lookup error: {geo_error:#}",
-                        bound_proxy.host,
-                        bound_proxy.port
-                    );
-                }
+                // The shared preflight already proved the exit is alive.
+                let warning = format!(
+                    "geo lookup failed through the proxy exit, but the exit path is alive; launch allowed and the session identity was not re-checked this start (geo lookup error: {geo_error:#})"
+                );
+                eprintln!("[launcher] profile {profile_id}: {warning}");
+                warnings.push(warning);
+                preflight_geo_exhausted = true;
+                None
             }
         }
     } else {
@@ -198,6 +144,27 @@ pub async fn launch_profile(
         serde_json::Value::String(BROWSER_CHROME_LABEL.into()),
     );
     let json = serde_json::to_string(&raw).context("serialize profile")?;
+
+    // Prepare files only after the bound proxy passes preflight.
+    let udd = profile::user_data_dir(profile_id)?;
+    let profile_name = stored
+        .config
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("(unnamed)");
+    let launch_bin = if headless {
+        bin.clone()
+    } else {
+        match crate::taskbar_icon::prepare_profile_binary(&bin, profile_id, profile_name) {
+            Ok(profile_binary) => profile_binary,
+            Err(error) => {
+                eprintln!(
+                    "[launcher] taskbar badge unavailable for {profile_id}: {error:#}; using original browser binary"
+                );
+                bin.clone()
+            }
+        }
+    };
 
     // Pass fingerprint by file path — inline JSON overflows Windows' 32767-char CreateProcess limit.
     let fp_file = udd.join("fingerprint.json");
@@ -428,8 +395,8 @@ async fn read_devtools_endpoint(udd: &Path) -> Option<process::CdpInfo> {
 }
 
 /// Resolve "auto" sentinels in profile JSON. Automatic timezone prefers a
-/// fresh Geo-IP lookup on the current launch path; when every live attempt
-/// fails (preflight + retry) it degrades to the proxy's last successful test
+/// fresh Geo-IP lookup on the current launch path; when that lookup
+/// fails it degrades to the proxy's last successful test
 /// snapshot with a warning instead of blocking the launch, and never falls
 /// back to country tags or host timezone data.
 async fn resolve_auto_fields(
@@ -477,20 +444,17 @@ async fn resolve_auto_fields(
             .unwrap_or_else(|| "the direct network connection".to_string());
         let live = match preflight_geo {
             Some(geo) => Ok(geo.clone()),
-            // After a failed preflight the whole provider chain has already
-            // been exhausted once through this route; retrying all six
-            // providers only doubles the worst-case wait before the snapshot
-            // fallback below kicks in.
+            // Preflight already used the live lookup budget on this route;
+            // use the cached snapshot without repeating that wait.
             None if preflight_geo_exhausted => Err(anyhow::anyhow!(
-                "geo providers already exhausted during launch preflight"
+                "geo lookup already failed during launch preflight"
             )),
             None => proxy::geo_check_via(proxy_opt, None).await,
         };
         let live = match live {
             Ok(live) => live,
             Err(live_error) => {
-                // Both the launch preflight and this retry failed to obtain a
-                // live geo. Degrade to the proxy's last successful test
+                // The live lookup failed. Degrade to the proxy's last successful test
                 // snapshot so a provider outage surfaces as a stale-timezone
                 // warning instead of blocking the launch; a dead exit path
                 // never gets this far (the preflight liveness probe cancels
@@ -552,7 +516,13 @@ async fn resolve_auto_fields(
                 source = "proxy-live-preflight".into();
                 preflight_geo.cloned()
             }
-            Some(p) => match proxy::geo_check_via(Some(p), None).await {
+            Some(p) => match if preflight_geo_exhausted {
+                Err(anyhow::anyhow!(
+                    "geo lookup already failed during launch preflight"
+                ))
+            } else {
+                proxy::geo_check_via(Some(p), None).await
+            } {
                 Ok(g) => {
                     source = "proxy-live".into();
                     Some(g)
