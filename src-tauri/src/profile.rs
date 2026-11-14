@@ -92,7 +92,9 @@ pub fn validate_profile_id(id: &str) -> Result<()> {
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
     {
-        anyhow::bail!("invalid profile id");
+        anyhow::bail!(crate::errors::Failure::InvalidInput(
+            "invalid profile id".into()
+        ));
     }
     Ok(())
 }
@@ -612,7 +614,8 @@ pub fn list_all() -> Result<Vec<ProfileMeta>> {
         if stored.meta.temporary {
             continue;
         }
-        // Backfill legacy profiles' created_at from file mtime, then persist.
+        // Derive legacy display timestamps without turning a list operation
+        // into a writer that could race an editor or runtime migration.
         if stored.meta.created_at.is_none() {
             let mtime = entry
                 .metadata()
@@ -622,19 +625,6 @@ pub fn list_all() -> Result<Vec<ProfileMeta>> {
                 .map(|d| format!("@{}", d.as_secs()));
             if let Some(ts) = mtime {
                 stored.meta.created_at = Some(ts);
-                // Listing profiles must remain read-only for an active browser.
-                // Persist the legacy backfill after it stops instead.
-                if !crate::is_profile_active(&stored.meta.id)
-                    && !crate::process::lease_recovery_is_incomplete()
-                {
-                    if let Ok(body) = serde_json::to_string_pretty(&stored) {
-                        if stored.meta.inline_proxy.is_some() {
-                            let _ = store::atomic_write_sensitive(&path, body.as_bytes());
-                        } else {
-                            let _ = store::atomic_write(&path, body.as_bytes());
-                        }
-                    }
-                }
             }
         }
         let name = stored
@@ -697,6 +687,10 @@ pub fn purge_temporary() -> Result<usize> {
 
 pub fn load_raw(id: &str) -> Result<StoredProfile> {
     let path = path_for(id)?;
+    anyhow::ensure!(
+        path.try_exists()?,
+        crate::errors::Failure::NotFound(format!("Profile {id} does not exist"))
+    );
     let stored: StoredProfile = store::load_json_with_backup(&path)
         .with_context(|| format!("load profile {}", path.display()))?;
     let has_legacy_inline_credentials = std::fs::read(&path)
@@ -710,6 +704,15 @@ pub fn load_raw(id: &str) -> Result<StoredProfile> {
         store::atomic_write_sensitive(&path, &body)?;
     }
     Ok(stored)
+}
+
+pub fn revision(stored: &StoredProfile) -> Result<String> {
+    // Hash durable bytes: serializing inline DPAPI credentials uses fresh
+    // encryption randomness and would make an unchanged profile conflict.
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(fs::read(path_for(&stored.meta.id)?)?)
+    ))
 }
 
 /// Count how many stored browser identities use each fingerprint-library
@@ -973,8 +976,11 @@ pub fn save_new_unique(stored: &mut StoredProfile) -> Result<()> {
 /// directly, and temporary cleanup calls `delete` only after the tracker entry
 /// is removed, so lifecycle persistence keeps working normally.
 pub fn ensure_stopped(id: &str) -> Result<()> {
+    crate::operations::ensure_profile_available(id)?;
     if crate::is_profile_active(id) {
-        anyhow::bail!("Stop the running or starting browser before modifying this profile");
+        anyhow::bail!(crate::errors::conflict(
+            "Stop the running or starting browser before modifying this profile"
+        ));
     }
     Ok(())
 }
@@ -986,6 +992,7 @@ fn active_proxy_bindings() -> Vec<(String, String)> {
     crate::process::Tracker::shared()
         .active_profile_ids()
         .into_iter()
+        .chain(crate::operations::busy_profiles())
         .filter_map(|profile_id| {
             load_raw(&profile_id)
                 .ok()
@@ -1458,6 +1465,7 @@ pub fn rename_folder(old: &str, new: &str) -> Result<usize> {
 
 /// Delete folder; `delete_profiles` true removes, false unfiles. Returns count.
 pub fn delete_folder(name: &str, delete_profiles: bool) -> Result<usize> {
+    let _activity = crate::operations::activity();
     let _resource_guard = crate::process::lock_profile_resources()?;
     recover_interrupted_operations_locked()?;
     let profiles = profiles_in_folder(name)?;
@@ -1541,6 +1549,36 @@ mod tests {
     };
     use serde_json::json;
     use std::path::PathBuf;
+
+    #[test]
+    fn editor_revision_rejects_stale_save_and_is_stable_with_inline_credentials() {
+        let _test = crate::store::TestStore::new();
+        let mut stored: StoredProfile = serde_json::from_value(
+            json!({"_meta":{"id":"revision-test"},"name":"Revision","notes":"original"}),
+        )
+        .unwrap();
+        stored.meta.inline_proxy =
+            crate::proxy::parse_single("http://user:password@127.0.0.1:8888");
+        super::save_raw(&mut stored).unwrap();
+        let first = super::load_raw(&stored.meta.id).unwrap();
+        let mut payload = serde_json::to_value(&first).unwrap();
+        payload["_revision"] = super::revision(&first).unwrap().into();
+        assert_eq!(
+            super::revision(&first).unwrap(),
+            super::revision(&super::load_raw(&stored.meta.id).unwrap()).unwrap()
+        );
+        payload["notes"] = "changed".into();
+        crate::save_profile_core(None, payload.clone(), false).unwrap();
+        let stale = crate::save_profile_core(None, payload, false).unwrap_err();
+        assert!(matches!(
+            stale.downcast_ref::<crate::errors::Failure>(),
+            Some(crate::errors::Failure::Conflict(_))
+        ));
+        assert_eq!(
+            super::load_raw(&stored.meta.id).unwrap().config["notes"],
+            "changed"
+        );
+    }
 
     #[test]
     fn transfer_recovery_rolls_back_uncommitted_moves_and_keeps_committed_data() {

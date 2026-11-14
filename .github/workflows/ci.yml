@@ -39,6 +39,9 @@ jobs:
       - name: Check release version declarations
         run: npm run check:versions
 
+      - name: Check profile editor regressions
+        run: npm run check:editor
+
       - name: Type-check and build frontend
         run: npm run build
 
@@ -86,6 +89,9 @@ jobs:
 
       - name: Check MCP syntax
         run: node --check mcp/index.js
+
+      - name: Check MCP contracts
+        run: node scripts/check-mcp.mjs
 
       - name: Install Node SDK dependencies
         working-directory: sdks/node

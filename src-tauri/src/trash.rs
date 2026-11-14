@@ -29,7 +29,8 @@ fn now() -> Result<u64> {
 }
 
 fn item_dir(id: &str) -> Result<PathBuf> {
-    uuid::Uuid::parse_str(id).context("Invalid recycle-bin item ID")?;
+    uuid::Uuid::parse_str(id)
+        .map_err(|_| crate::errors::Failure::InvalidInput("Invalid recycle-bin item ID".into()))?;
     Ok(store::trash_dir()?.join(id))
 }
 
@@ -89,6 +90,7 @@ pub fn list() -> Result<Vec<TrashEntry>> {
 }
 
 pub fn move_profiles(ids: &[String]) -> Result<usize> {
+    let _activity = crate::operations::activity();
     let _guard = process::lock_profile_resources()?;
     profile::recover_interrupted_operations_locked()?;
     move_profiles_locked(ids)
@@ -183,16 +185,25 @@ pub(crate) fn move_profiles_locked(ids: &[String]) -> Result<usize> {
     }
     profile::transfer_files(moves, ids.to_vec(), cleanup_after, prepared)?;
     crate::notify_store_changed("profiles");
+    crate::notify_store_changed("trash");
     Ok(ids.len())
 }
 
 pub fn restore(id: &str) -> Result<String> {
+    let _activity = crate::operations::activity();
     let _guard = process::lock_profile_resources()?;
     profile::recover_interrupted_operations_locked()?;
     let dir = item_dir(id)?;
+    ensure!(
+        dir.try_exists()?,
+        crate::errors::Failure::NotFound(format!("Recycle-bin item {id} does not exist"))
+    );
     let entry: TrashEntry = store::load_json_with_backup(&dir.join("entry.json"))?;
     ensure!(entry.id == id, "Recycle-bin metadata ID mismatch");
-    ensure!(now()? < entry.expires_at, "Recycle-bin item has expired");
+    ensure!(
+        now()? < entry.expires_at,
+        crate::errors::conflict("Recycle-bin item has expired")
+    );
     let mut stored: profile::StoredProfile =
         store::load_json_with_backup(&dir.join("profile.json"))?;
     ensure!(
@@ -206,7 +217,9 @@ pub fn restore(id: &str) -> Result<String> {
     let user_data = store::user_data_root()?.join(&stored.meta.id);
     ensure!(
         !destination.exists() && !store::backup_path(&destination)?.exists() && !user_data.exists(),
-        "Restore conflicts with an existing profile or user-data directory"
+        crate::errors::conflict(
+            "Restore conflicts with an existing profile or user-data directory"
+        )
     );
     let snapshot = entry
         .proxy_snapshot
@@ -245,6 +258,7 @@ pub fn restore(id: &str) -> Result<String> {
     })?;
     crate::notify_store_changed("profiles");
     crate::notify_store_changed("proxies");
+    crate::notify_store_changed("trash");
     Ok(stored.meta.id)
 }
 
@@ -281,12 +295,14 @@ fn purge_locked(ids: &[String]) -> Result<usize> {
 }
 
 pub fn purge(ids: &[String]) -> Result<usize> {
+    let _activity = crate::operations::activity();
     let _guard = process::lock_profile_resources()?;
     profile::recover_interrupted_operations_locked()?;
     purge_locked(ids)
 }
 
 pub fn empty() -> Result<usize> {
+    let _activity = crate::operations::activity();
     let _guard = process::lock_profile_resources()?;
     profile::recover_interrupted_operations_locked()?;
     purge_locked(

@@ -14,6 +14,15 @@ info:
     on the port configured in *Settings → Automation API* (default **40325**).
     It is **not** reachable from other hosts. Enabling/port changes take
     effect after the app restarts.
+    Settings and the sidebar show the actual listener state, including bind
+    failures; a saved enabled flag alone does not mean the API is listening.
+
+    Storage operations return `400` for invalid input, `404` for a missing
+    requested resource, `409` for active/reserved resources or restore conflicts,
+    and `500` for internal failures. Error objects include `error` and `code`.
+    PATCH applies only supplied fields to the latest config after proxy probes.
+    Runtime updates reserve browser resources; profile backups reserve only
+    their selected profiles. Conflicting mutations or starts return errors.
 
     ## Authentication
     Every endpoint except `GET /health` requires a **Bearer JWT** (HS256,
@@ -60,7 +69,9 @@ info:
     `POST /profiles/temporary` creates a profile flagged `temporary`: it is
     hidden from `GET /profiles` and from the launcher UI, and is deleted
     (config + user-data-dir) automatically when its browser closes. If the
-    app crashes while one is open, it is purged on the next app start.
+    app crashes while one is open, its verified live process is recovered with
+    its CDP endpoint. Cleanup runs only after the process has actually exited;
+    unverifiable leases stay protected and can be retried from the launcher UI.
 
     ## Fingerprint object
     The `fingerprint` returned by `GET /fingerprint/new*` and accepted by
@@ -81,7 +92,7 @@ info:
     `SHARDX_API` (this base URL) and `SHARDX_TOKEN` (the Bearer token from
     *Settings → Automation API*). It exposes:
     - **API tools** — thin wrappers over the endpoints below
-      (profiles, fingerprints, proxies, folders, cookies, start/stop).
+      (profiles, fingerprints, proxies, folders, cookies, extensions, recycle bin, start/stop).
     - **Browser tools** (patchright over CDP) — `browser_navigate`,
       `browser_evaluate`, `browser_screenshot`, `browser_click`,
       `browser_fill`, tabs, waits, etc., targeting a profile started via
@@ -120,11 +131,12 @@ paths:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/ExtensionEntry" } }
         "400": { $ref: "#/components/responses/StorageError" }
+        default: { $ref: "#/components/responses/StorageError" }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [Extensions]
       summary: Import a local CRX, ZIP or unpacked directory
-      description: Copies into the portable library. The source is preserved. Existing same-ID entries are not overwritten. Maximum package/unpacked size is 256 MiB and 20000 files.
+      description: Copies a Manifest V3 extension into the portable library. The source is preserved. Existing same-ID entries are not overwritten. Maximum package/unpacked size is 256 MiB and 20000 files. Damaged library entries expose per-item errors without hiding healthy entries.
       requestBody:
         required: true
         content:
@@ -141,6 +153,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ExtensionEntry" }
         "400": { $ref: "#/components/responses/StorageError" }
+        default: { $ref: "#/components/responses/StorageError" }
         "401": { $ref: "#/components/responses/Unauthorized" }
   /extensions/{id}:
     parameters:
@@ -156,6 +169,7 @@ paths:
             application/json:
               schema: { type: object, properties: { deleted: { type: string } } }
         "400": { $ref: "#/components/responses/StorageError" }
+        default: { $ref: "#/components/responses/StorageError" }
         "401": { $ref: "#/components/responses/Unauthorized" }
   /trash:
     get:
@@ -168,6 +182,7 @@ paths:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/TrashEntry" } }
         "400": { $ref: "#/components/responses/StorageError" }
+        default: { $ref: "#/components/responses/StorageError" }
         "401": { $ref: "#/components/responses/Unauthorized" }
     delete:
       tags: [Trash]
@@ -179,6 +194,7 @@ paths:
             application/json:
               schema: { type: object, properties: { purged: { type: integer } } }
         "400": { $ref: "#/components/responses/StorageError" }
+        default: { $ref: "#/components/responses/StorageError" }
         "401": { $ref: "#/components/responses/Unauthorized" }
   /trash/{id}:
     parameters:
@@ -193,6 +209,7 @@ paths:
             application/json:
               schema: { type: object, properties: { purged: { type: integer } } }
         "400": { $ref: "#/components/responses/StorageError" }
+        default: { $ref: "#/components/responses/StorageError" }
         "401": { $ref: "#/components/responses/Unauthorized" }
   /trash/{id}/restore:
     parameters:
@@ -208,6 +225,7 @@ paths:
             application/json:
               schema: { type: object, properties: { restored_id: { type: string } } }
         "400": { $ref: "#/components/responses/StorageError" }
+        default: { $ref: "#/components/responses/StorageError" }
         "401": { $ref: "#/components/responses/Unauthorized" }
   /health:
     get:
@@ -408,6 +426,7 @@ paths:
                   id: { type: string, format: uuid }
                   recycled: { type: boolean, description: True for persistent profiles; false for temporary profiles. }
         "400": { $ref: "#/components/responses/StorageError" }
+        default: { $ref: "#/components/responses/StorageError" }
         "409":
           description: The profile is running or starting.
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -502,14 +521,17 @@ paths:
       tags: [Profiles]
       summary: Stop a profile
       description: |
-        Sends the browser a graceful shutdown (SIGTERM on Unix; 5s grace
-        then SIGKILL). Temporary profiles are deleted as part of close.
+        Sends Browser.close over CDP (including headless browsers), or a normal
+        Windows close request for a headed browser without CDP. Success means
+        the browser actually exited. After a 20-second exit wait, a still-live
+        browser returns an error and remains tracked; the request can be retried.
+        Temporary profiles are deleted as part of close.
         `stopped` is `false` if the profile wasn't running.
       parameters:
         - $ref: "#/components/parameters/ProfileId"
       responses:
         "200":
-          description: Stop requested.
+          description: Browser exited, or was not running.
           content:
             application/json:
               schema:
@@ -581,7 +603,7 @@ paths:
               schema:
                 type: object
                 properties:
-                  imported: { type: integer, description: Number of cookies written. }
+                  imported: { type: integer, description: Actual row count after replacement; duplicate cookie identities are counted once. }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "409":
           description: Profile is running — stop it first.
@@ -806,7 +828,7 @@ components:
 
   responses:
     StorageError:
-      description: Invalid local storage operation, unavailable resource, active profile or restore conflict. The error field explains the cause.
+      description: Storage failure. HTTP 400 is invalid input, 404 is a missing requested resource, 409 is an operation conflict, and 500 is an internal failure. The error field explains the cause.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -828,6 +850,8 @@ components:
         description: { type: string }
         profile_names: { type: array, items: { type: string } }
         trash_count: { type: integer }
+        error: { type: string, nullable: true, description: Manifest or extension identity error; other entries remain usable. }
+        usage_error: { type: string, nullable: true, description: Reference scan failed; deletion is unavailable until references can be verified. }
     TrashEntry:
       type: object
       properties:
@@ -843,7 +867,8 @@ components:
       type: object
       properties:
         error: { type: string }
-      required: [error]
+        code: { type: string, enum: [invalid_input, not_found, conflict, internal_error] }
+      required: [error, code]
 
     FingerprintEnvelope:
       type: object
@@ -1087,6 +1112,8 @@ components:
       properties:
         profile_id: { type: string }
         pid: { type: integer, format: int64 }
+        uptime_ms: { type: integer, format: int64 }
+        cdp_error: { type: string, nullable: true, description: Most recent CDP recovery error. Null CDP without an error can indicate a UI launch without remote debugging. }
         cdp:
           nullable: true
           allOf: [{ $ref: "#/components/schemas/CdpInfo" }]
@@ -1155,6 +1182,12 @@ components:
           type: string
           enum: [Strict, Lax, None, unspecified]
           description: Case-insensitive on import.
+        top_frame_site_key: { type: string, default: "", description: Chromium partition site key; empty for an unpartitioned cookie. }
+        has_cross_site_ancestor: { type: boolean, default: true, description: Part of Chromium partition identity. }
+        source_scheme: { type: integer, nullable: true, description: Chromium source scheme (0 unset, 1 non-secure, 2 secure). Defaults from secure when omitted. }
+        source_port: { type: integer, nullable: true, description: Source port; defaults to 443 or 80 from secure when omitted. }
+        source_type: { type: integer, default: 0, description: Chromium source type. }
+        priority: { type: integer, default: 1, description: Chromium priority (0 low, 1 medium, 2 high). }
 
     ProxyEntry:
       type: object

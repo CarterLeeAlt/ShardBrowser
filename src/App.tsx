@@ -40,6 +40,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import "./fonts.css";
 import "./App.css";
 import { planAssignment } from "./proxy-assignment";
+import { useStoreChanged } from "./useStoreChanged";
+import { mergeProfileEdits } from "./profileEdit";
 import { tr, useLanguage, setLanguage, type Language } from "./i18n";
 import { ExtensionsView, ExtensionPicker } from "./Extensions";
 import { TrashView } from "./Trash";
@@ -446,6 +448,7 @@ type ApiInfo = {
   port: number;
   base_url: string;
   token: string;
+  listener: { state: string; port: number | null; error: string | null };
 };
 type Section = "browsers" | "proxies" | "fingerprints" | "extensions" | "trash" | "settings";
 
@@ -669,10 +672,11 @@ function fromStored(stored: any): ProfileForm {
   f.user_agent = stored?.navigator?.user_agent ?? f.user_agent;
   f.hardware_concurrency = stored?.navigator?.hardware_concurrency ?? 8;
   f.device_memory = stored?.navigator?.device_memory ?? 16;
+  f.platform_version = stored?.navigator?.platform_version ?? stored?.client_hints?.platform_version ?? "";
   f.timezone = stored?.timezone ?? AUTO_TZ;
   f.language = stored?.navigator?.language ?? AUTO_LANG;
   f.webrtc = (stored?.webrtc === "replace" ? "tcp_only" : stored?.webrtc) ?? "block";
-  f.do_not_track = !!stored?.navigator?.do_not_track;
+  f.do_not_track = stored?.navigator?.do_not_track === "1" || stored?.navigator?.do_not_track === true;
 
   const noise = stored?.noise ?? {};
   const noiseMode = (n: any): NoiseMode => (n?.enabled ? "auto" : "real");
@@ -713,53 +717,44 @@ const CLIENT_RECTS_MAX_OFFSET = 1;
 /// config fields the editor does not expose; rebuilding from the original
 /// library template would undo the display clamp applied at creation time.
 /// Switching the GPU preset is the one intentional full-template replacement.
-function toStored(f: ProfileForm, lib: FingerprintEntry | null, existing: any | null = null): any {
+function toStored(f: ProfileForm, lib: FingerprintEntry | null, existing: any | null = null, baseline: ProfileForm | null = null): any {
   const existingPresetId = existing?._meta?.gpu_preset_id ?? "";
   const source = f.id && existing && existingPresetId === f.gpu_preset_id
     ? existing
     : lib?.payload;
   const base: any = source ? JSON.parse(JSON.stringify(source)) : {};
-
-  base._meta = {
-    extensions: f.extensions,
-    id: f.id,
-    proxy_id: f.proxy_id,
-    last_launched_at: null,
-    gpu_preset_id: f.gpu_preset_id,
-  };
-  base.name = f.name;
-  base.notes = f.notes;
+  const changed = (...keys: (keyof ProfileForm)[]) => !baseline || source !== existing || keys.some(key => JSON.stringify(f[key]) !== JSON.stringify(baseline[key]));
+  base._meta = { ...(existing?._meta ?? {}), id: f.id };
+  if (changed("gpu_preset_id")) base._meta.gpu_preset_id = f.gpu_preset_id;
+  if (existing?._revision) base._revision = existing._revision;
+  if (changed("extensions")) base._meta.extensions = f.extensions;
+  if (changed("proxy_id")) base._meta.proxy_id = f.proxy_id;
+  if (changed("name")) base.name = f.name;
+  if (changed("notes")) base.notes = f.notes;
   // "auto" sentinel: resolver replaces at launch; persists across edits.
-  base.timezone = f.timezone;
-  base.icu_locale = f.language === AUTO_LANG ? null : f.language;
-  base.webrtc = f.webrtc;
-
-  base.navigator = {
-    ...(base.navigator || {}),
-    language: f.language,
-    accept_language: f.language === AUTO_LANG ? null : deriveAcceptLanguage(f.language),
-    languages: f.language === AUTO_LANG ? null : deriveLanguagesArray(f.language),
-    user_agent: f.user_agent,
-    hardware_concurrency: f.hardware_concurrency,
-    device_memory: f.device_memory,
-    // Empty → inherit donor; set → write to both navigator + client_hints.
-    ...(f.platform_version ? { platform_version: f.platform_version } : {}),
-    do_not_track: f.do_not_track ? "1" : null,
-  };
-  if (f.platform_version) {
+  if (changed("timezone")) base.timezone = f.timezone;
+  if (changed("webrtc")) base.webrtc = f.webrtc;
+  base.navigator = { ...(base.navigator || {}) };
+  if (changed("language")) {
+    base.icu_locale = f.language === AUTO_LANG ? null : f.language;
+    Object.assign(base.navigator, { language: f.language, accept_language: f.language === AUTO_LANG ? null : deriveAcceptLanguage(f.language), languages: f.language === AUTO_LANG ? null : deriveLanguagesArray(f.language) });
+  }
+  for (const key of ["user_agent", "hardware_concurrency", "device_memory"] as const) {
+    if (changed(key)) base.navigator[key] = f[key];
+  }
+  if (changed("do_not_track")) base.navigator.do_not_track = f.do_not_track ? "1" : null;
+  if (changed("platform_version") && f.platform_version) {
+    base.navigator.platform_version = f.platform_version;
     base.client_hints = {
       ...(base.client_hints || {}),
       platform_version: f.platform_version,
     };
   }
 
-  base.media_devices = {
-    audio_input_count: f.media_audio_in,
-    audio_output_count: f.media_audio_out,
-    video_input_count: f.media_video_in,
-  };
-
-  base.geolocation =
+  for (const [field, key] of [["media_audio_in", "audio_input_count"], ["media_audio_out", "audio_output_count"], ["media_video_in", "video_input_count"]] as const) {
+    if (changed(field)) base.media_devices = { ...base.media_devices, [key]: f[field] };
+  }
+  if (changed("geo_mode", "geo_lat", "geo_lng", "geo_accuracy")) base.geolocation =
     f.geo_mode === "manual"
       ? { mode: "manual", latitude: f.geo_lat, longitude: f.geo_lng, accuracy: f.geo_accuracy }
       : { mode: "auto" };
@@ -779,7 +774,7 @@ function toStored(f: ProfileForm, lib: FingerprintEntry | null, existing: any | 
       ? value
       : fallback;
   };
-  base.noise = {
+  const editedNoise = {
     canvas:       { enabled: f.noise_canvas === "auto",       seed: noiseSeed("canvas") },
     webgl:        { enabled: f.noise_webgl === "auto",        seed: noiseSeed("webgl"), intensity: f.noise_webgl === "auto" ? activeNumber("webgl", "intensity", WEBGL_NOISE_INTENSITY) : 0 },
     audio:        { enabled: f.noise_audio === "auto",        seed: noiseSeed("audio") },
@@ -787,7 +782,12 @@ function toStored(f: ProfileForm, lib: FingerprintEntry | null, existing: any | 
     sensors:      { enabled: f.noise_sensors === "auto",      seed: noiseSeed("sensors") },
     fonts:        { enabled: f.noise_fonts === "auto",        seed: noiseSeed("fonts") },
   };
-  base.blocked_ports = [...f.blocked_ports].sort((a, b) => a - b);
+  for (const slot of Object.keys(editedNoise) as (keyof typeof editedNoise)[]) {
+    if (changed(`noise_${slot}` as keyof ProfileForm)) {
+      base.noise = { ...base.noise, [slot]: { ...base.noise?.[slot], ...editedNoise[slot] } };
+    }
+  }
+  if (changed("blocked_ports")) base.blocked_ports = [...f.blocked_ports].sort((a, b) => a - b);
 
   return base;
 }
@@ -828,18 +828,19 @@ export default function App() {
     onError: toast.err,
   };
   const [section, setSection] = useState<Section>("browsers");
+  useEffect(() => { document.querySelector(".main")?.scrollTo({ top: 0, left: 0 }); }, [section]);
   const [theme, setTheme] = useState<Theme>(
     () => (localStorage.getItem("shardx-theme") as Theme) || "dark",
   );
   useEffect(() => {
     let disposed = false;
     let unlisten: undefined | (() => void);
-    listen<{ running_count: number }>("launcher:exit-blocked", ({ payload }) => {
+    listen<{ running_count: number; busy: boolean }>("launcher:exit-blocked", ({ payload }) => {
       const count = Math.max(1, payload.running_count);
       const plural = count === 1 ? "browser is" : "browsers are";
       void confirmModal({
-        title: tr("Close running browsers first"),
-        message: tr("ShardX cannot exit while {0} launched {1} still running. Close {2} first, then try again.", count, plural, count === 1 ? "it" : "them"),
+        title: payload.busy ? tr("Operation in progress") : tr("Close running browsers first"),
+        message: payload.busy ? tr("Wait for storage or runtime operations to finish, and resolve incomplete browser recovery before exiting.") : tr("ShardX cannot exit while {0} launched {1} still running. Close {2} first, then try again.", count, plural, count === 1 ? "it" : "them"),
         buttons: [{ label: tr("OK"), value: true, primary: true }],
       });
     }).then((fn) => {
@@ -960,11 +961,12 @@ function Sidebar({
   // Automation/MCP quick widget (fills the sidebar's lower space).
   const [autoUrl, setAutoUrl] = useState("");
   const [mcpBusy, setMcpBusy] = useState(false);
-  useEffect(() => {
-    invoke<{ base_url: string; enabled: boolean }>("api_info")
-      .then((i) => setAutoUrl(i.enabled ? i.base_url : ""))
-      .catch(() => {});
-  }, []);
+  const refreshListener = async () => {
+    try { const info = await invoke<ApiInfo>("api_info"); setAutoUrl(info.listener.state === "listening" ? `http://127.0.0.1:${info.listener.port}` : ""); }
+    catch (e) { toast.err(String(e)); }
+  };
+  useEffect(() => { void refreshListener(); }, []);
+  useStoreChanged(refreshListener, ["api"]);
   const downloadMcp = async () => {
     setMcpBusy(true);
     try {
@@ -1011,7 +1013,7 @@ function Sidebar({
               <Icon.Clone />
             </button>
           ) : (
-            <div className="side-auto-off">{tr("API off — enable in Settings")}</div>
+            <div className="side-auto-off">{tr("API is not listening")}</div>
           )}
           <button className="side-auto-btn" onClick={downloadMcp} disabled={mcpBusy}>
             <Icon.Download /> {mcpBusy ? tr("Downloading…") : tr("Download MCP")}
@@ -1396,34 +1398,6 @@ function PageDropButton({
   );
 }
 
-// Reload when the backend signals an out-of-band store change — a profile or
-// proxy created/edited/removed through the automation API or MCP writes
-// straight to disk, so the React state never hears about it on its own.  The
-// backend emits "store-changed"; without this listener the new items only show
-// up after an app restart.  Bursts (e.g. MCP adding many proxies in a loop)
-// are coalesced into a single reload.
-function useStoreChanged(onChange: () => void) {
-  const cb = useRef(onChange);
-  cb.current = onChange;
-  useEffect(() => {
-    let disposed = false;
-    let un: (() => void) | undefined;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    listen("store-changed", () => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => cb.current(), 200);
-    }).then((fn) => {
-      if (disposed) fn();
-      else un = fn;
-    });
-    return () => {
-      disposed = true;
-      if (timer) clearTimeout(timer);
-      un?.();
-    };
-  }, []);
-}
-
 // ---- Browsers view ----
 
 function BrowsersView() {
@@ -1437,7 +1411,24 @@ function BrowsersView() {
   // Values captured when the inline editor opened. If the notes/proxy dialog
   // saves while the editor is open, an untouched field keeps the dialog's
   // change instead of the editor's stale snapshot overwriting it.
-  const [draftBaseline, setDraftBaseline] = useState<{ notes: string; proxy_id: string; extensions: string[] } | null>(null);
+  const [draftBaseline, setDraftBaseline] = useState<ProfileForm | null>(null);
+  const draftStoredBaseline = useRef<any>(null);
+  const saveInFlight = useRef(false);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const backupInFlight = useRef(false);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [operations, setOperations] = useState<{ profiles: string[]; runtime: boolean; jobs: number }>({ profiles: [], runtime: false, jobs: 0 });
+  const [recovery, setRecovery] = useState<{ incomplete: boolean; error: string | null; attempts: number } | null>(null);
+  const [recovering, setRecovering] = useState(false);
+  const refreshRecovery = async () => { try { setRecovery(await invoke("process_recovery_status")); } catch (e) { toast.err(String(e)); } };
+  useEffect(() => { void refreshRecovery(); }, []);
+  useStoreChanged(refreshRecovery, ["recovery"]);
+  const retryRecovery = async () => {
+    setRecovering(true);
+    try { await invoke("process_recovery_retry"); await reload(); }
+    catch (e) { toast.err(String(e)); }
+    finally { await refreshRecovery(); setRecovering(false); }
+  };
   // Value = epoch ms at which the engine was first observed running. Used
   // both as a truthy flag (any number = running) and as the anchor for the
   // ticking uptime display in the Status column.
@@ -1509,7 +1500,7 @@ function BrowsersView() {
   };
   useEffect(() => { reload(); }, []);
   // Pick up profiles/proxies created via the automation API or MCP live.
-  useStoreChanged(reload);
+  useStoreChanged(reload, ["profiles", "proxies", "trash"]);
   useEffect(() => {
     invoke<FingerprintEntry[]>("fingerprint_list").then(setFingerprints).catch((e) => toast.err(String(e)));
   }, []);
@@ -1536,12 +1527,14 @@ function BrowsersView() {
     const tick = async () => {
       const revision = processPollRevision.current;
       try {
-        const [list, activeIds] = await Promise.all([
+        const [list, activeIds, operationState] = await Promise.all([
           invoke<{ profile_id: string; pid: number; uptime_ms: number }[]>("process_list"),
           invoke<string[]>("profile_active_ids"),
+          invoke<typeof operations>("operation_status"),
         ]);
         if (cancelled || revision !== processPollRevision.current) return;
         setBackendActiveIds(new Set(activeIds));
+        setOperations(operationState);
         const now = Date.now();
         setRunning((prev) => {
           const next: Record<string, number> = {};
@@ -1658,7 +1651,7 @@ function BrowsersView() {
   const runningCount = Object.values(running).filter(Boolean).length;
   const selectedHasRunning = [...selected].some((id) => !!running[id]);
   const selectedHasStarting = [...selected].some((id) => startBusy.has(id) || (backendActiveIds.has(id) && !running[id]));
-  const selectedHasActive = selectedHasRunning || selectedHasStarting;
+  const selectedHasActive = selectedHasRunning || selectedHasStarting || operations.runtime || !!recovery?.incomplete || [...selected].some(id => operations.profiles.includes(id));
 
   const clearFailedLaunch = (id: string) => {
     // Discard polls started before the failure, which can still report the
@@ -1746,12 +1739,15 @@ function BrowsersView() {
   };
 
   const exportProfiles = async (ids: string[]) => {
+    if (backupInFlight.current) return;
     if (ids.length === 0) return;
     const activeIds = ids.filter((id) => running[id] || startBusy.has(id) || backendActiveIds.has(id));
     if (activeIds.length > 0) {
       toast.err(tr("Stop the {0} active browser{1} before exporting", activeIds.length, activeIds.length === 1 ? "" : "s"));
       return;
     }
+    backupInFlight.current = true;
+    setBackupBusy(true);
     try {
       const summary = await invoke<ProfileBackupSummary>("profile_backup_export", { profileIds: ids });
       // The backup intentionally carries the Chromium os-crypt key so it can
@@ -1764,6 +1760,7 @@ function BrowsersView() {
       // directory; no arbitrary destination path crosses the trust boundary.
       await invoke("open_exports_dir");
     } catch (e) { toast.err(String(e)); }
+    finally { backupInFlight.current = false; setBackupBusy(false); }
   };
 
   // Per-profile action menu shared by right-click and ⋮ button.
@@ -1969,6 +1966,9 @@ function BrowsersView() {
   };
 
   const bulkImport = async () => {
+    if (backupInFlight.current) return;
+    backupInFlight.current = true;
+    setBackupBusy(true);
     try {
       const paths = await pickProfileBackupFiles();
       if (!paths) return;
@@ -1979,7 +1979,7 @@ function BrowsersView() {
       );
     } catch (e) {
       toast.err(tr("Import failed: ") + String(e));
-    }
+    } finally { backupInFlight.current = false; setBackupBusy(false); }
   };
 
   const expand = async (id: string) => {
@@ -1990,10 +1990,13 @@ function BrowsersView() {
     setRenaming(null);
     setQuickEdit(null);
     if (expanded === id) { setExpanded(null); setDraft(null); setDraftBaseline(null); return; }
-    const stored = await invoke<any>("profile_get", { id });
-    setDraft(fromStored(stored));
-    setDraftBaseline({ notes: String(stored.notes ?? ""), proxy_id: String(stored._meta?.proxy_id ?? ""), extensions: stored._meta?.extensions ?? [] });
-    setExpanded(id);
+    try {
+      const stored = await invoke<any>("profile_get", { id });
+      draftStoredBaseline.current = stored;
+      setDraft(fromStored(stored));
+      setDraftBaseline(fromStored(stored));
+      setExpanded(id);
+    } catch (e) { toast.err(String(e)); }
   };
 
   const newProfile = async () => {
@@ -2004,12 +2007,14 @@ function BrowsersView() {
   };
 
   const saveDraft = async () => {
-    if (!draft) return;
+    if (!draft || saveInFlight.current) return;
     const nameError = profileNameError(draft.name);
     if (nameError) {
       toast.err(nameError);
       return;
     }
+    saveInFlight.current = true;
+    setSaveBusy(true);
     try {
       const fp = fingerprints.find((g) => g.id === draft.gpu_preset_id) ?? null;
       // Preserve the durable config when editing an existing profile. In
@@ -2021,36 +2026,21 @@ function BrowsersView() {
         : null;
       // Merge unchanged editor fields from the latest stored profile, including
       // extension choices changed through the API while this editor was open.
-      const notes = draftBaseline && draft.notes === draftBaseline.notes
-        ? String(existing?.notes ?? draft.notes)
-        : draft.notes;
-      const proxyChanged = !draftBaseline || draft.proxy_id !== draftBaseline.proxy_id;
-      const mergedProxyId = proxyChanged
-        ? draft.proxy_id
-        : String(existing?._meta?.proxy_id ?? draft.proxy_id);
-      const extensions = draftBaseline && JSON.stringify(draft.extensions) === JSON.stringify(draftBaseline.extensions)
-        ? existing?._meta?.extensions ?? draft.extensions
-        : draft.extensions;
-      const payload = toStored({ ...draft, notes, extensions }, fp, existing);
-      payload._meta.proxy_id = mergedProxyId;
+      const edited = toStored(draft, fp, draft.id ? draftStoredBaseline.current : null, draftBaseline);
+      let payload = edited;
+      if (draft.id) {
+        try { payload = mergeProfileEdits(draftStoredBaseline.current, edited, existing); }
+        catch (e) { throw tr("These fields changed elsewhere: {0}. Reopen the editor to review the latest values.", e instanceof Error ? e.message : String(e)); }
+      }
+      if (!draft.id && folder !== "all") payload._meta.folder = folder;
       const saved = await invoke<ProfileMeta>("profile_save", { payload });
-      if (proxyChanged) {
-        await invoke("profile_bind_proxy", { profileId: saved.id, proxyId: draft.proxy_id });
-      }
-      // A profile created while a folder tab is active should land in that
-      // folder (otherwise it pops into "All" and the user has to drag it
-      // back themselves).  `__new__` test scopes this to creations only —
-      // edits preserve whatever folder the profile already had.
-      if (!draft.id && folder && folder !== "all") {
-        try { await invoke("profile_set_folder", { id: saved.id, folder }); }
-        catch (e) { console.warn("auto-assign folder failed:", e); }
-      }
       setExpanded(null);
       setDraft(null);
       setDraftBaseline(null);
       reload();
       toast.ok(draft.id ? tr("Profile saved") : tr("Created \"{0}\"", saved.name));
     } catch (e) { toast.err(String(e)); }
+    finally { saveInFlight.current = false; setSaveBusy(false); }
   };
 
   const toggleSel = (id: string) => {
@@ -2188,10 +2178,12 @@ function BrowsersView() {
           </div>
         </div>
         <div className="page-actions">
-          <button className="btn-ghost profile-page-action" onClick={bulkImport} title={tr("Import one or more .shardx-backup files")}><Icon.Download /> {tr("Import profile")}</button>
-          <button className="btn-primary profile-page-action" onClick={newProfile}>{tr("+ New profile")}</button>
+          <button className="btn-ghost profile-page-action" disabled={backupBusy || operations.runtime} onClick={bulkImport} title={tr("Import one or more .shardx-backup files")}><Icon.Download /> {tr("Import profile")}</button>
+          <button className="btn-primary profile-page-action" disabled={saveBusy || operations.runtime || !!recovery?.incomplete} onClick={newProfile}>{tr("+ New profile")}</button>
         </div>
       </div>
+      {recovery?.incomplete && <div className="operation-banner" role="alert"><div><strong>{tr("Browser recovery needs attention")}</strong><p>{recovery.error}</p></div><button className="btn-ghost" disabled={recovering} onClick={() => void retryRecovery()}>{recovering ? tr("Recovering…") : tr("Retry recovery")}</button></div>}
+      {(backupBusy || operations.runtime || operations.profiles.length > 0) && <div className="operation-banner" role="status">{operations.runtime ? tr("Runtime update in progress. Profile changes will be available when it finishes.") : tr("Profile backup in progress. Keep the launcher open until it finishes.")}</div>}
       {selected.size > 0 && (
         <div className="bulk-bar browser-bulk-bar">
           <span>{selected.size} {tr("selected")}</span>
@@ -2209,7 +2201,7 @@ function BrowsersView() {
           <button
             className="btn-ghost btn-sm"
             onClick={bulkExport}
-            disabled={selectedHasActive}
+            disabled={selectedHasActive || backupBusy}
             title={selectedHasActive ? tr("Stop selected active browsers before exporting") : tr("Back up selected profiles, excluding rebuildable caches")}
           ><Icon.Upload /> {tr("Export")}</button>
           <button
@@ -2287,6 +2279,7 @@ function BrowsersView() {
               proxies={proxies}
               fingerprints={fingerprints}
               onSave={saveDraft}
+              busy={saveBusy}
               onCancel={() => { setExpanded(null); setDraft(null); }}
             />
           </div>
@@ -2310,7 +2303,8 @@ function BrowsersView() {
           const proxyDetailText = [proxyDetailLocation, proxyIp].filter(Boolean).join(" · ");
           const isRunning = !!running[p.id];
           const isStarting = !isRunning && (startBusy.has(p.id) || backendActiveIds.has(p.id));
-          const isActive = isRunning || isStarting;
+          const isReserved = operations.runtime || !!recovery?.incomplete || operations.profiles.includes(p.id);
+          const isActive = isRunning || isStarting || isReserved;
           const isExpanded = expanded === p.id;
           const isSel = selected.has(p.id);
           return (
@@ -2336,6 +2330,7 @@ function BrowsersView() {
                   proxies={proxies}
                   fingerprints={fingerprints}
                   onSave={saveDraft}
+                  busy={saveBusy}
                   onCancel={() => { setExpanded(null); setDraft(null); }}
                 />
               ) : undefined}
@@ -2373,7 +2368,7 @@ function BrowsersView() {
                 <div className="cell-status">
                   <span className={`pill-status ${isRunning ? "ps-on" : "ps-off"}`}>
                     <i className="dot" />
-                    {isRunning ? tr("Running") : tr("Idle")}
+                    {isRunning ? tr("Running") : isReserved ? tr("Busy") : isStarting ? tr("Starting…") : tr("Idle")}
                   </span>
                 </div>
                 <div
@@ -2413,6 +2408,7 @@ function BrowsersView() {
                   <button
                     className={`btn-launch ${isRunning ? "btn-launch-stop" : ""}`}
                     onClick={() => startStop(p)}
+                    disabled={isReserved && !isRunning}
                     title={
                       isRunning
                         ? tr("Stop browser")
@@ -2691,7 +2687,7 @@ const OS_OPTIONS: { id: OsPlatform; label: string }[] = [
 ];
 
 function InlineEditor({
-  draft, setDraft, proxies, fingerprints, onSave, onCancel,
+  draft, setDraft, proxies, fingerprints, onSave, onCancel, busy,
 }: {
   draft: ProfileForm;
   setDraft: (f: ProfileForm) => void;
@@ -2699,6 +2695,7 @@ function InlineEditor({
   fingerprints: FingerprintEntry[];
   onSave: () => void;
   onCancel: () => void;
+  busy: boolean;
 }) {
   const f = draft;
   const nameError = profileNameError(f.name);
@@ -2858,7 +2855,7 @@ function InlineEditor({
   };
 
   return (
-    <div className="inline-editor">
+    <fieldset className="inline-editor" disabled={busy}>
       <div className="ie-stripe" />
       <div className="ie-grid">
         {/* ----- col 1: identity + hardware ----- */}
@@ -3037,10 +3034,10 @@ function InlineEditor({
       <div className="ie-foot">
         <button className="btn-ghost" onClick={onCancel}>{tr("Cancel")}</button>
         <button className="btn-primary" onClick={onSave} disabled={nameError != null} title={nameError ?? undefined}>
-          <ShardMini /> {f.id ? tr("Save changes") : tr("Create profile")}
+          <ShardMini /> {busy ? tr("Saving…") : f.id ? tr("Save changes") : tr("Create profile")}
         </button>
       </div>
-    </div>
+    </fieldset>
   );
 }
 
@@ -4721,6 +4718,7 @@ type RtStatus = {
   spec: RtSpec | null;
   fingerprints_installed: boolean;
   widevine_installed: boolean;
+  migration_pending: boolean;
 };
 type RtProgress = {
   label: string;
@@ -4796,9 +4794,11 @@ function FirstRunGate({ children }: { children: ReactNode }) {
       localStorage.removeItem("shardx-runtime-update-pending");
       let status: RtStatus;
       try {
+        const recovery = await invoke<{ incomplete: boolean }>("process_recovery_status");
+        if (recovery.incomplete) { if (!cancelled) setPhase("ready"); return; }
         status = await invoke<RtStatus>("runtime_local_status");
       } catch (e: any) {
-        if (!cancelled) setErr(String(e));
+        if (!cancelled) { setErr(String(e)); setPhase("repair-required"); }
         return;
       }
       if (cancelled) return;
@@ -4811,7 +4811,8 @@ function FirstRunGate({ children }: { children: ReactNode }) {
 
       const complete = status.installed
         && status.fingerprints_installed
-        && status.widevine_installed;
+        && status.widevine_installed
+        && !status.migration_pending;
       if (complete) {
         setPhase("ready");
         return;
@@ -5166,7 +5167,8 @@ function SettingsView() {
     api_port: 40325,
   });
   const [api, setApi] = useState<ApiInfo | null>(null);
-  const refreshApi = () => invoke<ApiInfo>("api_info").then(setApi).catch(() => {});
+  const refreshApi = () => invoke<ApiInfo>("api_info").then(setApi).catch(e => toast.err(String(e)));
+  useStoreChanged(refreshApi, ["api"]);
   // Snapshot of the last loaded/saved settings; Save stays disabled until the
   // form actually differs from it.
   const [saved, setSaved] = useState<Settings | null>(null);
@@ -5275,6 +5277,8 @@ function SettingsView() {
         </label>
         {api && (
           <>
+            <p role="status">{api.listener.state === "listening" ? tr("Listening on port {0}", api.listener.port ?? "") : api.listener.state === "failed" ? tr("API could not start: {0}", api.listener.error ?? "") : tr("API is not listening")}</p>
+            {(api.enabled !== (api.listener.state === "listening") || (api.enabled && api.port !== api.listener.port)) && <p className="muted small">{tr("Saved API settings take effect after restarting the launcher.")}</p>}
             <label>
               <span className="lbl">{tr("Base URL")}</span>
               <CopyField value={api.base_url} />

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { useStoreChanged } from "./useStoreChanged";
 import { tr, useLanguage } from "./i18n";
 import type { StorageViewProps } from "./Extensions";
 
@@ -25,13 +25,8 @@ export function TrashView({ confirm, onSuccess, onError }: StorageViewProps) {
     } catch (e) { setError(String(e)); }
     finally { setLoading(false); }
   };
-  useEffect(() => {
-    void reload();
-    let disposed = false;
-    let stop: (() => void) | undefined;
-    void listen("store-changed", () => { void reload(); }).then((fn) => { if (disposed) fn(); else stop = fn; });
-    return () => { disposed = true; stop?.(); };
-  }, []);
+  useEffect(() => { void reload(); }, []);
+  useStoreChanged(reload, ["trash"]);
   const restore = async (ids: string[]) => {
     setBusy(true);
     let count = 0;
@@ -41,7 +36,6 @@ export function TrashView({ confirm, onSuccess, onError }: StorageViewProps) {
         catch (e) { onError(tr("Could not restore {0}: {1}", entries.find((entry) => entry.id === id)?.name ?? id, tr(String(e)))); }
       }
       if (count) onSuccess(tr("Restored {0} profiles", count));
-      await reload();
     } finally { setBusy(false); }
   };
   const purge = async (all: boolean) => {
@@ -52,7 +46,7 @@ export function TrashView({ confirm, onSuccess, onError }: StorageViewProps) {
       const removed = await invoke<number>(all ? "trash_empty" : "trash_purge", all ? {} : { ids: [...selected] });
       onSuccess(tr("Permanently deleted {0} profiles", removed));
     } catch (e) { onError(tr(String(e))); }
-    finally { await reload(); setBusy(false); }
+    finally { setBusy(false); }
   };
   const date = (seconds: number) => new Date(seconds * 1000).toLocaleString(language === "zh" ? "zh-CN" : "en-US");
   return <section className="page workspace-page">

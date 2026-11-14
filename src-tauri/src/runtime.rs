@@ -225,6 +225,37 @@ fn is_chromium_replacement_needed(force: bool, browser_was_missing: bool) -> boo
     force || browser_was_missing
 }
 
+pub fn ensure_migration_complete() -> Result<()> {
+    let local = load_manifest();
+    anyhow::ensure!(
+        local.installed_metadata.is_none() || local.applied_signature.is_some(),
+        crate::errors::conflict(
+            "Runtime profile migration is incomplete. Use Repair before launching browsers."
+        )
+    );
+    Ok(())
+}
+
+fn record_pending_migration(
+    metadata: &RemoteManifest,
+    browser_etag: &str,
+    widevine_etag: Option<String>,
+    fingerprints_etag: Option<String>,
+) -> Result<()> {
+    save_manifest(&manifest_with_chromium_state(
+        ChromiumState {
+            browser_etag: Some(browser_etag.into()),
+            applied_chromium_version: None,
+            applied_signature: None,
+            installed_chromium_version: installed_engine_version()
+                .or_else(|| metadata.chromium_version.clone()),
+            installed_metadata: Some(metadata.clone()),
+        },
+        widevine_etag,
+        fingerprints_etag,
+    ))
+}
+
 fn version_is_newer(candidate: &str, installed: Option<&str>) -> bool {
     let Some(installed) = installed else {
         return true;
@@ -310,6 +341,7 @@ pub struct RuntimeStatus {
     pub spec: PlatformSpec,
     pub fingerprints_installed: bool,
     pub widevine_installed: bool,
+    pub migration_pending: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -369,6 +401,7 @@ fn local_status(local: &Manifest) -> RuntimeStatus {
         spec: host_spec(),
         fingerprints_installed: fingerprints_are_installed(local),
         widevine_installed: widevine_is_installed(local),
+        migration_pending: local.installed_metadata.is_some() && local.applied_signature.is_none(),
     }
 }
 
@@ -669,20 +702,37 @@ fn migrate_fingerprint_dir_to(
     grease_version: Option<&str>,
 ) -> Result<usize> {
     let mut migrated = 0usize;
-    for entry in fs::read_dir(dir)?.flatten() {
-        let path = entry.path();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("read fingerprint {}", path.display()))?;
+        let mut config: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&text)
+            .with_context(|| format!("parse fingerprint {}", path.display()))?;
+        let changed = if config.contains_key("payload") {
+            let payload = config
+                .get_mut("payload")
+                .and_then(serde_json::Value::as_object_mut)
+                .with_context(|| format!("invalid fingerprint payload: {}", path.display()))?;
+            let changed =
+                migrate_descriptor_to(payload, chromium_version, grease_brand, grease_version);
+            let chrome = payload
+                .get("client_hints")
+                .and_then(|hints| hints.get("brand_version"))
+                .cloned();
+            let label_changed = chrome
+                .as_ref()
+                .is_some_and(|chrome| config.get("chrome") != Some(chrome));
+            if let Some(chrome) = chrome {
+                config.insert("chrome".into(), chrome);
+            }
+            changed || label_changed
+        } else {
+            migrate_descriptor_to(&mut config, chromium_version, grease_brand, grease_version)
         };
-        let Ok(mut config) =
-            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text)
-        else {
-            continue;
-        };
-        if migrate_descriptor_to(&mut config, chromium_version, grease_brand, grease_version) {
+        if changed {
             crate::store::atomic_write(&path, serde_json::to_string_pretty(&config)?.as_bytes())?;
             migrated += 1;
         }
@@ -700,17 +750,15 @@ fn migrate_profile_dir_to(
     grease_version: Option<&str>,
 ) -> Result<usize> {
     let mut migrated = 0usize;
-    for entry in fs::read_dir(dir)?.flatten() {
-        let path = entry.path();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
         let Some(profile_id) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
-        let Ok(mut profile) = crate::profile::load_raw(profile_id) else {
-            continue;
-        };
+        let mut profile = crate::profile::load_raw(profile_id)?;
         if migrate_descriptor_to(
             &mut profile.config,
             chromium_version,
@@ -731,25 +779,21 @@ fn migrate_all_to(
     chromium_version: &str,
     grease_brand: Option<&str>,
     grease_version: Option<&str>,
-) -> usize {
-    let mut migrated = 0;
-    if !crate::process::lease_recovery_is_incomplete() {
-        if let Ok(dir) = crate::store::profiles_dir() {
-            migrated +=
-                migrate_profile_dir_to(&dir, chromium_version, grease_brand, grease_version)
-                    .unwrap_or(0);
-        }
-    } else {
-        eprintln!(
-            "[runtime] profile descriptor migration skipped until process lease recovery completes"
-        );
-    }
-    if let Ok(dir) = crate::store::fingerprints_dir() {
-        migrated +=
-            migrate_fingerprint_dir_to(&dir, chromium_version, grease_brand, grease_version)
-                .unwrap_or(0);
-    }
-    migrated
+) -> Result<usize> {
+    crate::process::ensure_lease_recovery_complete()?;
+    let profiles = migrate_profile_dir_to(
+        &crate::store::profiles_dir()?,
+        chromium_version,
+        grease_brand,
+        grease_version,
+    )?;
+    let fingerprints = migrate_fingerprint_dir_to(
+        &crate::store::fingerprints_dir()?,
+        chromium_version,
+        grease_brand,
+        grease_version,
+    )?;
+    Ok(profiles + fingerprints)
 }
 
 /// Fast startup integrity check. It only reads local files and never contacts
@@ -759,7 +803,10 @@ pub fn runtime_local_status() -> Result<RuntimeStatus, String> {
     let base = runtime_dir().map_err(|error| error.to_string())?;
     fs::create_dir_all(&base).map_err(|error| error.to_string())?;
     if let Ok(_guard) = runtime_state_lock().try_lock() {
-        recover_interrupted_runtime_swap(&base).map_err(|error| error.to_string())?;
+        if base.join(ENGINE_ROLLBACK_DIR).exists() || base.join(WIDEVINE_ROLLBACK_DIR).exists() {
+            let _reservation = crate::operations::reserve_runtime().map_err(|e| e.to_string())?;
+            recover_interrupted_runtime_swap(&base).map_err(|error| error.to_string())?;
+        }
     }
     let local = load_manifest();
     Ok(local_status(&local))
@@ -914,8 +961,10 @@ fn schedule_update_check() {
 
 #[tauri::command]
 pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatus, String> {
-    let _state_guard = runtime_state_lock().lock().await;
-    crate::process::ensure_lease_recovery_complete().map_err(|error| error.to_string())?;
+    let _state_guard = runtime_state_lock()
+        .try_lock()
+        .map_err(|_| "Runtime operation is in progress")?;
+    let _reservation = crate::operations::reserve_runtime().map_err(|e| e.to_string())?;
     let spec = host_spec();
     let base = runtime_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
@@ -950,6 +999,13 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
             install_complete_runtime_transactionally(&window, &spec, &base)
                 .await
                 .map_err(|error| error.to_string())?;
+        record_pending_migration(
+            &manifest,
+            &browser_etag,
+            Some(widevine_etag.clone()),
+            local.fingerprints_etag.clone(),
+        )
+        .map_err(|e| e.to_string())?;
         (browser_etag, Some(widevine_etag))
     } else {
         let widevine_etag = if repair_widevine {
@@ -997,12 +1053,15 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
         manifest.grease_version.as_deref().unwrap_or(""),
     );
     let chromium = if migrate_chromium_descriptor {
-        if local.applied_signature.as_deref() != Some(sig.as_str()) {
+        {
             let n = migrate_all_to(
                 &target_ver,
                 manifest.grease_brand.as_deref(),
                 manifest.grease_version.as_deref(),
-            );
+            )
+            .map_err(|error| {
+                format!("Runtime installed, but profile migration failed; retry Repair: {error:#}")
+            })?;
             if n > 0 {
                 eprintln!("[runtime] migrated {n} profile/fingerprint file(s) to {sig}");
             }
@@ -1038,12 +1097,22 @@ pub async fn runtime_apply_updates(
     window: Window,
     component: String,
 ) -> Result<RuntimeStatus, String> {
-    let _state_guard = runtime_state_lock().lock().await;
+    let _state_guard = runtime_state_lock()
+        .try_lock()
+        .map_err(|_| "Runtime operation is in progress")?;
     crate::process::ensure_lease_recovery_complete().map_err(|error| error.to_string())?;
+    let _activity = crate::operations::activity();
+    let _reservation = if component != "fingerprints" {
+        Some(crate::operations::reserve_runtime().map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
     let spec = host_spec();
     let base = runtime_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
-    recover_interrupted_runtime_swap(&base).map_err(|error| error.to_string())?;
+    if component != "fingerprints" {
+        recover_interrupted_runtime_swap(&base).map_err(|error| error.to_string())?;
+    }
 
     // Engine and Widevine swaps replace directories a running browser holds
     // open; fingerprint templates are plain JSON files, so they may sync live.
@@ -1069,6 +1138,13 @@ pub async fn runtime_apply_updates(
                 .map_err(|error| error.to_string())?;
             browser_etag = b;
             widevine_etag = Some(w);
+            record_pending_migration(
+                &manifest,
+                &browser_etag,
+                widevine_etag.clone(),
+                fingerprints_etag.clone(),
+            )
+            .map_err(|e| e.to_string())?;
             browser_replaced = true;
         }
         "widevine" => {
@@ -1104,12 +1180,15 @@ pub async fn runtime_apply_updates(
         manifest.grease_version.as_deref().unwrap_or(""),
     );
     let chromium = if browser_replaced {
-        if local.applied_signature.as_deref() != Some(sig.as_str()) {
+        {
             let n = migrate_all_to(
                 &target_ver,
                 manifest.grease_brand.as_deref(),
                 manifest.grease_version.as_deref(),
-            );
+            )
+            .map_err(|error| {
+                format!("Runtime installed, but profile migration failed; retry Repair: {error:#}")
+            })?;
             if n > 0 {
                 eprintln!("[runtime] migrated {n} profile/fingerprint file(s) to {sig}");
             }
@@ -1375,7 +1454,7 @@ async fn install_fingerprints(
         // are never iterated here, so they stay untouched.
         let dst = dir.join(p.file_name().unwrap());
         let existed = dst.exists();
-        fs::copy(&p, &dst)?;
+        crate::store::atomic_write(&dst, &fs::read(&p)?)?;
         if existed {
             overwritten += 1;
         } else {
@@ -1551,6 +1630,29 @@ fn place_widevine(base: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrapped_templates_migrate_payload_and_label_and_surface_corruption() {
+        let test = crate::store::TestStore::new();
+        let dir = test.root.join("templates");
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("template.json");
+        fs::write(&path, serde_json::to_vec(&serde_json::json!({"chrome": "151", "label": "Keep", "payload": {
+            "navigator": {"user_agent": "Mozilla/5.0 Chrome/151.0.0.0 Safari/537.36"}, "client_hints": {"brand_version": "151"}, "noise": {"canvas": {"seed": 12}}
+        }})).unwrap()).unwrap();
+        assert_eq!(
+            migrate_fingerprint_dir_to(&dir, "157.0.8103.50", Some("Not)A;Brand"), Some("99"))
+                .unwrap(),
+            1
+        );
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["chrome"], "157");
+        assert_eq!(value["payload"]["client_hints"]["brand_version"], "157");
+        assert_eq!(value["payload"]["noise"]["canvas"]["seed"], 12);
+        assert_eq!(value["label"], "Keep");
+        fs::write(&path, b"invalid JSON").unwrap();
+        assert!(migrate_fingerprint_dir_to(&dir, "157.0.8103.50", None, None).is_err());
+    }
 
     #[test]
     fn descriptor_migration_serializes_inline_proxy_without_plaintext_credentials() {

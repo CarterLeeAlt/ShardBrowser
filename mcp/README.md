@@ -4,7 +4,7 @@
 （Claude Desktop、Cursor 等）驱动 **ShardX 启动器**：
 
 - 本地自动化 **HTTP API** —— 创建/编辑/启动/关闭环境（profile），
-  管理代理、指纹、文件夹和 cookie；
+  管理代理、指纹、文件夹、Cookie、扩展库和回收站；
 - 已启动环境的 **CDP 浏览器**，由
   [`patchright`](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-nodejs)
   （打过反检测补丁的 Playwright）驱动，使自动化不被检测到。
@@ -70,9 +70,19 @@ MCP_HTTP_PORT=40326 SHARDX_API=http://127.0.0.1:40325 SHARDX_TOKEN=… node inde
 - `list_proxies`, `add_proxy`, `delete_proxy`
 - `list_fingerprints`, `list_folders`, `rename_folder`, `delete_folder`
 - `export_cookies`, `import_cookies`
+- `list_extensions`, `import_extension(path)`, `delete_extension(id)`
+- `list_trash`, `restore_trash(id)`, `purge_trash(id)`, `empty_trash`
+
+创建、临时创建和编辑环境均接受 `extensions: string[]`，对应扩展库 ID；扩展导入要求
+Manifest V3。删除普通环境会整份移入应用回收站并保留 7 天；临时环境直接删除。
+`purge_trash` 和 `empty_trash` 会永久删除数据。回收站操作的 `id` 是回收站条目 ID。
+Cookie 导入替换停止环境的全部 Cookie，保留分区和来源字段，返回实际数据库记录数。
 
 **浏览器（通过 patchright 走 CDP）** —— 若环境未在运行，会自动启动该
 环境（CDP，可选无头）；操作作用于环境的*活动*标签页：
+
+已运行但没有 CDP 的环境会返回明确错误，需要停止后经 API/MCP 重新启动。已启用 CDP
+的环境在启动器恢复进程跟踪后可继续连接；停止请求等待浏览器真正退出后才报告成功。
 
 - 导航：`browser_navigate(url, headless?)`, `browser_back`,
   `browser_forward`, `browser_reload`, `browser_current_url`

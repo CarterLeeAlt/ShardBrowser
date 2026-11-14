@@ -48,6 +48,9 @@ thread_local! { static TEST_ROOT: std::cell::RefCell<Option<PathBuf>> = const { 
 
 #[cfg(test)]
 pub(crate) struct TestStore {
+    // Production reservations are process-wide, so store fixtures must not
+    // overlap even though their filesystem roots are thread-local.
+    _serial_guard: std::sync::MutexGuard<'static, ()>,
     pub root: PathBuf,
     previous: Option<PathBuf>,
     _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
@@ -56,6 +59,8 @@ pub(crate) struct TestStore {
 #[cfg(test)]
 impl TestStore {
     pub fn new() -> Self {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let serial_guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -64,6 +69,7 @@ impl TestStore {
         std::fs::create_dir_all(&root).unwrap();
         let previous = TEST_ROOT.with(|value| value.replace(Some(root.clone())));
         Self {
+            _serial_guard: serial_guard,
             root,
             previous,
             _thread_bound: std::marker::PhantomData,

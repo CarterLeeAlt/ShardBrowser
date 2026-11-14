@@ -2971,6 +2971,7 @@ mod launch_tests {
 
     #[tokio::test]
     async fn unresponsive_launch_has_one_deadline_and_releases_reservation() {
+        let _test = crate::store::TestStore::new();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
