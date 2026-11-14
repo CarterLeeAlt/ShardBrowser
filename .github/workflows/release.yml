@@ -88,12 +88,10 @@ jobs:
 
           # Publishing a pre-existing tag would mutate its Release assets, so
           # validation fails before the build begins.
-          git ls-remote --exit-code --refs origin "refs/tags/$tag" | Out-Null
-          if ($LASTEXITCODE -eq 0) {
+          $existingTag = git ls-remote --refs origin "refs/tags/$tag"
+          Assert-NativeExit "check existing release tag"
+          if ($existingTag) {
             throw "Release tag $tag already exists on origin."
-          }
-          if ($LASTEXITCODE -ne 2) {
-            throw "Could not check whether release tag $tag exists on origin (git exit $LASTEXITCODE)."
           }
 
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
