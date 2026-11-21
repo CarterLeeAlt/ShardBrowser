@@ -27,6 +27,7 @@ mod startup_path;
 mod store;
 mod taskbar_icon;
 mod trash;
+mod window_sizing;
 mod workspace_backup;
 
 pub(crate) use fingerprint_identity::randomize_platform_version;
@@ -1561,8 +1562,10 @@ pub fn run() {
                 .first()
                 .cloned()
                 .expect("main window configuration missing");
+            // The launcher draws its own titlebar.
             let mut window_builder =
-                tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?;
+                tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
+                    .decorations(false);
 
             let launcher_root = {
                 let exe_dir = std::env::current_exe()?
@@ -1582,6 +1585,9 @@ pub fn run() {
             };
 
             let main_window = window_builder.build()?;
+            if window_config.shadow && window_config.min_width.is_some() {
+                window_sizing::honor_client_minimum(main_window.hwnd()?.0 as _)?;
+            }
             if let Err(error) = taskbar_icon::apply_launcher_taskbar_icon(
                 main_window.hwnd()?.0 as isize,
                 &launcher_root.join("icons"),
@@ -1621,12 +1627,6 @@ pub fn run() {
                         })
                         .build(app)?;
                 }
-            }
-
-            // The custom Windows titlebar owns the full client area.
-            use tauri::Manager;
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.set_decorations(false);
             }
 
             // Restore durable browser leases before any profile mutation or
