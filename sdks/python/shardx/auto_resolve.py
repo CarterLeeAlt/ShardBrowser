@@ -7,9 +7,8 @@ icu_locale / geolocation values."""
 from __future__ import annotations
 
 import os
-import sys
 import time
-from typing import Optional, Tuple
+from typing import Optional
 
 from .geo import GeoInfo, geo_check_via
 from .proxy import ParsedProxy

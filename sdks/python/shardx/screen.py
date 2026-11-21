@@ -12,8 +12,6 @@ All modes leave DPR / color_depth / orientation / etc. untouched.
 """
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple
-
 from .host import host_screen_size
 
 

@@ -115,8 +115,6 @@ def rust_character_comment(codepoint: int) -> str:
         character = "space"
     elif character == "\\":
         character = "backslash"
-    elif character == "\t":
-        character = "tab"
     return f"U+{codepoint:04X} {character}"
 
 

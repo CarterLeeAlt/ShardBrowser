@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { useStoreChanged } from "./useStoreChanged";
 import { open } from "@tauri-apps/plugin-dialog";
 import { tr } from "./i18n";
+import { FileUp, FolderOpen, Trash } from "./assets/icons/Lucide";
+import { ListState, PageToolbar } from "./Workspace";
 
 export type ExtensionEntry = {
   id: string; name: string; version: string; description: string;
@@ -79,28 +81,25 @@ export function ExtensionsView({ confirm, onSuccess, onError }: StorageViewProps
     catch (e) { onError(tr(String(e))); }
     finally { setBusy(false); }
   };
-  return <section className="page workspace-page">
-    <div className="topbar"><div className="crumbs">{tr("Library")} › {tr("Extensions")}</div></div>
-    <div className="page-title">
-      <h1>{tr("Extension Library")}</h1>
-      <div className="page-actions storage-actions">
-        <button className="btn-ghost" disabled={busy} onClick={() => void importLocal(true)}>{tr("Import folder")}</button>
-        <button className="btn-primary" disabled={busy} onClick={() => void importLocal(false)}>{busy ? tr("Importing…") : tr("Import CRX / ZIP")}</button>
-      </div>
-    </div>
-    <p className="muted small">{tr("Import once, select per profile. Extension settings and data stay separate for each browser.")}</p>
-    {error && <p className="storage-error" role="alert">{tr("Unable to load extensions: {0}", error)}</p>}
-    {loading ? <p className="muted">{tr("Loading…")}</p> : entries.length === 0 ? <div className="empty-rich">{tr("No extensions yet")}</div> :
-      <div className="extension-grid">{entries.map((entry) => {
+  return <section className="page">
+    <PageToolbar title={tr("Extension Library")}>
+      <button className="btn-ghost" disabled={busy} onClick={() => void importLocal(true)}><FolderOpen /> {tr("Import folder")}</button>
+      <button className="btn-primary" disabled={busy} onClick={() => void importLocal(false)}><FileUp /> {busy ? tr("Importing…") : tr("Import CRX / ZIP")}</button>
+    </PageToolbar>
+    {error && <ListState kind="error" text={tr("Unable to load extensions: {0}", error)} />}
+    {loading ? <ListState kind="loading" text={tr("Loading…")} /> : entries.length === 0 ? !error && <ListState kind="empty" text={tr("No extensions yet")} /> :
+      <div className="library-grid">{entries.map((entry) => {
         const referenced = entry.profile_names.length > 0 || entry.trash_count > 0 || !!entry.usage_error;
-        return <article className="card extension-card" key={entry.id}>
-          <header><h3>{entry.name}</h3><span className="lib-tag">{entry.version}</span></header>
+        return <article className="library-card" key={entry.id}>
+          <header className="library-card-head"><h3 title={entry.name}>{entry.name}</h3><span className="library-tag" title={entry.version}>{entry.version}</span></header>
           <p className="muted small">{entry.description}</p>
           <code className="extension-id">{entry.id}</code>
           {entry.error && <p className="storage-error" role="alert">{tr("Extension unavailable: {0}", entry.error)}</p>}
           {entry.usage_error && <p className="storage-error" role="alert">{entry.usage_error}</p>}
-          <p className="small" title={entry.profile_names.join(", ")}>{tr("{0} profiles · {1} recycle-bin items", entry.profile_names.length, entry.trash_count)}</p>
-          <button className="btn-ghost btn-sm danger" disabled={busy || referenced} title={referenced ? tr("Remove profile and recycle-bin references before deleting this extension") : tr("Delete extension")} onClick={() => void remove(entry)}>{tr("Delete")}</button>
+          <footer className="library-card-foot">
+            <span className="small" title={entry.profile_names.join(", ")}>{tr("{0} profiles · {1} recycle-bin items", entry.profile_names.length, entry.trash_count)}</span>
+            <button className="icon-btn danger" aria-label={tr("Delete extension")} disabled={busy || referenced} title={referenced ? tr("Remove profile and recycle-bin references before deleting this extension") : tr("Delete extension")} onClick={() => void remove(entry)}><Trash /></button>
+          </footer>
         </article>;
       })}</div>}
   </section>;

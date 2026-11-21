@@ -11,7 +11,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import tarfile
 import threading
 import zipfile
 from dataclasses import dataclass

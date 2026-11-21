@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { useStoreChanged } from "./useStoreChanged";
 import { tr, useLanguage } from "./i18n";
 import type { StorageViewProps } from "./Extensions";
+import { Trash } from "./assets/icons/Lucide";
+import { ListState, PageToolbar, SelectionBar } from "./Workspace";
 
 type TrashEntry = {
   id: string; profile_id: string; name: string; folder: string;
@@ -49,21 +51,18 @@ export function TrashView({ confirm, onSuccess, onError }: StorageViewProps) {
     finally { setBusy(false); }
   };
   const date = (seconds: number) => new Date(seconds * 1000).toLocaleString(language === "zh" ? "zh-CN" : "en-US");
-  return <section className="page workspace-page">
-    <div className="topbar"><div className="crumbs">{tr("Workspace")} › {tr("Recycle bin")}</div></div>
-    <div className="page-title"><h1>{tr("Recycle bin")}</h1>
-      <button className="btn-ghost danger" disabled={busy || !entries.length} onClick={() => void purge(true)}>{tr("Empty recycle bin")}</button>
-    </div>
-    <p className="muted small">{tr("Deleted profiles keep their identity and complete browser data for 7 days. Expired items are permanently deleted at startup and during hourly cleanup.")}</p>
-    {error && <p className="storage-error" role="alert">{tr("Unable to load recycle bin: {0}", error)}</p>}
-    {selected.size > 0 && <div className="bulk-bar browser-bulk-bar">
-      <span>{tr("{0} selected", selected.size)}</span>
+  return <section className="page">
+    <PageToolbar title={tr("Recycle bin")}>
+      <button className="btn-ghost danger" disabled={busy || !entries.length} onClick={() => void purge(true)}><Trash /> {tr("Empty recycle bin")}</button>
+    </PageToolbar>
+    {error && <ListState kind="error" text={tr("Unable to load recycle bin: {0}", error)} />}
+    <SelectionBar count={selected.size}>
       <button className="btn-ghost btn-sm" disabled={busy} onClick={() => void restore([...selected])}>{tr("Restore selected")}</button>
       <button className="btn-ghost btn-sm danger" disabled={busy} onClick={() => void purge(false)}>{tr("Delete permanently")}</button>
-    </div>}
-    {loading ? <p className="muted">{tr("Loading…")}</p> : entries.length === 0 ? <div className="empty-rich">{tr("Recycle bin is empty")}</div> :
+    </SelectionBar>
+    {loading ? <ListState kind="loading" text={tr("Loading…")} /> : entries.length === 0 ? !error && <ListState kind="empty" text={tr("Recycle bin is empty")} /> :
       <div className="storage-table-wrap"><table className="storage-table">
-        <thead><tr><th><input type="checkbox" aria-label={tr("Select all")} disabled={busy} checked={selected.size === entries.length} onChange={(e) => setSelected(new Set(e.target.checked ? entries.map((entry) => entry.id) : []))} /></th><th>{tr("Name")}</th><th>{tr("Folder")}</th><th>{tr("Deleted at")}</th><th>{tr("Expires at")}</th><th>{tr("Data size")}</th><th>{tr("ACTIONS")}</th></tr></thead>
+        <thead><tr><th><input type="checkbox" aria-label={tr("Select all")} disabled={busy} checked={selected.size === entries.length} onChange={(e) => setSelected(new Set(e.target.checked ? entries.map((entry) => entry.id) : []))} /></th><th>{tr("Name")}</th><th>{tr("Folder")}</th><th>{tr("Deleted at")}</th><th>{tr("Expires at")}</th><th>{tr("Data size")}</th><th>{tr("Actions")}</th></tr></thead>
         <tbody>{entries.map((entry) => <tr key={entry.id}>
           <td><input type="checkbox" aria-label={entry.name} disabled={busy} checked={selected.has(entry.id)} onChange={(e) => setSelected((current) => { const next = new Set(current); if (e.target.checked) next.add(entry.id); else next.delete(entry.id); return next; })} /></td>
           <td><strong>{entry.name}</strong><div className="muted small">{entry.profile_id}</div></td><td>{entry.folder || "—"}</td>

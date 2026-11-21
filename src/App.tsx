@@ -37,6 +37,14 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import {
+  AppWindow, Building2, CircleAlert, CircleCheck, Clock, Copy, CopyPlus, Download,
+  EllipsisVertical, FileUp, FingerprintPattern, Folder, FolderOpen, Globe, GripVertical, Info,
+  LoaderCircle, Maximize, Minus, Moon, Network, Pencil, Play, Plus, Puzzle, RefreshCw,
+  Save, Settings as SettingsIcon, Square, Sun, Trash, Upload, X,
+} from "./assets/icons/Lucide";
+import flagCodes from "./assets/icons/flag-codes.json";
+import { ListState, PageToolbar, SelectionBar } from "./Workspace";
 import "./fonts.css";
 import "./App.css";
 import { planAssignment } from "./proxy-assignment";
@@ -189,26 +197,8 @@ const toast = {
 };
 
 function ToastGlyph({ kind }: { kind: ToastItem["kind"] }) {
-  return (
-    <svg viewBox="0 0 14 14" aria-hidden="true">
-      {kind === "ok" ? (
-        <path d="M2.8 7.2 5.6 10 11.2 4.4" />
-      ) : kind === "err" ? (
-        <path d="m4 4 6 6m0-6-6 6" />
-      ) : kind === "warn" ? (
-        <>
-          <path d="M7 1.9 12.7 12H1.3Z" />
-          <path d="M7 5.7v2.9" />
-          <circle cx="7" cy="10.4" r="0.8" />
-        </>
-      ) : (
-        <>
-          <circle cx="7" cy="4.1" r="0.8" />
-          <path d="M7 6.4v3.7" />
-        </>
-      )}
-    </svg>
-  );
+  const Glyph = kind === "ok" ? CircleCheck : kind === "info" ? Info : CircleAlert;
+  return <Glyph />;
 }
 
 function ToastHost() {
@@ -305,7 +295,7 @@ function ConfirmHost() {
       <div className="dialog dialog-confirm">
         <header className="dialog-head">
           <h2>{req.title ?? tr("Confirm")}</h2>
-          <button className="icon-btn" onClick={() => done(null)}>✕</button>
+          <button className="icon-btn" onClick={() => done(null)} aria-label={tr("Close")} title={tr("Close")}><X /></button>
         </header>
         <div className="dialog-body">
           <p className="confirm-msg">{req.message}</p>
@@ -461,7 +451,6 @@ type FingerprintEntry = {
   platform: string;
   chrome: string;
   gpu: string;
-  tag_color: string;
   builtin: boolean;
   payload: any;
 };
@@ -874,18 +863,14 @@ export default function App() {
               aria-label={tr("Minimize")}
               onClick={() => getCurrentWindow().minimize()}
             >
-              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-                <line x1="1" y1="5" x2="9" y2="5" stroke="currentColor" strokeWidth="1" />
-              </svg>
+              <Minus size={14} />
             </button>
             <button
               className="tb-btn"
               aria-label={tr("Maximize")}
               onClick={() => getCurrentWindow().toggleMaximize()}
             >
-              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-                <rect x="1.5" y="1.5" width="7" height="7" fill="none" stroke="currentColor" strokeWidth="1" />
-              </svg>
+              <Maximize size={13} />
             </button>
             <button
               className="tb-btn tb-close"
@@ -895,10 +880,7 @@ export default function App() {
                 void getCurrentWindow().close();
               }}
             >
-              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-                <line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" strokeWidth="1" />
-                <line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" strokeWidth="1" />
-              </svg>
+              <X size={14} />
             </button>
           </div>
         )}
@@ -911,13 +893,15 @@ export default function App() {
             theme={theme}
             onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
           />
-          <main className="main">
-            {section === "browsers" && <BrowsersView />}
-            {section === "proxies" && <ProxiesView />}
-            {section === "fingerprints" && <FingerprintsView />}
-            {section === "extensions" && <ExtensionsView {...storageViewProps} />}
-            {section === "trash" && <TrashView {...storageViewProps} />}
-            {section === "settings" && <SettingsView />}
+          <main className="main" key={section}>
+            <div className="workspace-page">
+              {section === "browsers" && <BrowsersView />}
+              {section === "proxies" && <ProxiesView />}
+              {section === "fingerprints" && <FingerprintsView />}
+              {section === "extensions" && <ExtensionsView {...storageViewProps} />}
+              {section === "trash" && <TrashView {...storageViewProps} />}
+              {section === "settings" && <SettingsView />}
+            </div>
           </main>
           <ToastHost />
           <ConfirmHost />
@@ -939,24 +923,21 @@ function Sidebar({
     {
       label: tr("Workspace"),
       items: [
-        { id: "browsers", label: tr("Browsers"), svg: <IconShard /> },
-        { id: "trash", label: tr("Recycle bin"), svg: <Icon.Trash /> },
+        { id: "browsers", label: tr("Browsers"), svg: <AppWindow size={18} /> },
+        { id: "proxies", label: tr("Proxies"), svg: <Network size={18} /> },
+        { id: "trash", label: tr("Recycle bin"), svg: <Trash size={18} /> },
       ],
-    },
-    {
-      label: tr("PROXYLIST"),
-      items: [{ id: "proxies", label: tr("Proxies"), svg: <IconWire /> }],
     },
     {
       label: tr("Library"),
       items: [
-        { id: "fingerprints", label: tr("Fingerprints"), svg: <IconHex /> },
-        { id: "extensions", label: tr("Extensions"), svg: <IconHex /> },
+        { id: "fingerprints", label: tr("Fingerprints"), svg: <FingerprintPattern size={18} /> },
+        { id: "extensions", label: tr("Extensions"), svg: <Puzzle size={18} /> },
       ],
     },
     {
       label: tr("System"),
-      items: [{ id: "settings", label: tr("Settings"), svg: <IconCog /> }],
+      items: [{ id: "settings", label: tr("Settings"), svg: <SettingsIcon size={18} /> }],
     },
   ];
 
@@ -992,6 +973,7 @@ function Sidebar({
               <button
                 key={it.id}
                 className={`nav-item ${section === it.id ? "active" : ""}`}
+                aria-current={section === it.id ? "page" : undefined}
                 onClick={() => onSelect(it.id)}
               >
                 <span className="nav-icon">{it.svg}</span>
@@ -1012,13 +994,13 @@ function Sidebar({
               onClick={() => { clip.write(autoUrl); toast.ok(tr("Copied API URL")); }}
             >
               <span className="mono">{autoUrl.replace(/^https?:\/\//, "")}</span>
-              <Icon.Clone />
+              <Icon.Clone size={16} />
             </button>
           ) : (
             <div className="side-auto-off">{tr("API is not listening")}</div>
           )}
           <button className="side-auto-btn" onClick={downloadMcp} disabled={mcpBusy}>
-            <Icon.Download /> {mcpBusy ? tr("Downloading…") : tr("Download MCP")}
+            <Icon.Download size={16} /> {mcpBusy ? tr("Downloading…") : tr("Download MCP")}
           </button>
           <button
             className="side-auto-btn"
@@ -1027,7 +1009,7 @@ function Sidebar({
             }}
             title={tr("Open the full Automation API reference on docs.proxyshard.com")}
           >
-            <Icon.Info />  {tr("Documentation")} </button>
+            <Icon.Info size={16} />  {tr("Documentation")} </button>
         </div>
         <button
           className="theme-toggle"
@@ -1035,9 +1017,9 @@ function Sidebar({
           title={theme === "dark" ? tr("Switch to light theme") : tr("Switch to dark theme")}
         >
           <span className={`theme-seg ${theme === "light" ? "active" : ""}`}>
-            <IconSun />  {tr("Light")} </span>
+            <Sun size={16} />  {tr("Light")} </span>
           <span className={`theme-seg ${theme === "dark" ? "active" : ""}`}>
-            <IconMoon />  {tr("Dark")} </span>
+            <Moon size={16} />  {tr("Dark")} </span>
         </button>
         <VersionPill />
       </div>
@@ -1061,31 +1043,6 @@ function ShardLogo() {
     </svg>
   );
 }
-const IconShard = () => (
-  <svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 1L13 7L7 13L1 7Z" fill="currentColor" /></svg>
-);
-const IconWire = () => (
-  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-    <path d="M2 4H10M4 10H12M3 4L1 6L3 8M11 6L13 8L11 10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
-  </svg>
-);
-const IconHex = () => (
-  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-    <path d="M7 1L12 4V10L7 13L2 10V4Z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round"/>
-  </svg>
-);
-const IconCog = () => (
-  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-    <circle cx="7" cy="7" r="2" stroke="currentColor" strokeWidth="1.4"/>
-    <path d="M7 1V3M7 11V13M1 7H3M11 7H13M2.5 2.5L4 4M10 10L11.5 11.5M2.5 11.5L4 10M10 4L11.5 2.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
-  </svg>
-);
-const IconCopy = () => (
-  <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
-    <rect x="4.4" y="4.4" width="7.2" height="7.2" rx="1.4" stroke="currentColor" strokeWidth="1.3"/>
-    <path d="M9.4 2.4H3.1c-.66 0-1.2.54-1.2 1.2v6.3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-  </svg>
-);
 /// Read-only value with inline copy glyph.
 function CopyField({ value, secret }: { value: string; secret?: boolean }) {
   return (
@@ -1097,129 +1054,15 @@ function CopyField({ value, secret }: { value: string; secret?: boolean }) {
         title={tr("Copy")}
         onClick={async () => { try { await clip.write(value); toast.ok(tr("Copied")); } catch (e) { toast.err(String(e)); } }}
       >
-        <IconCopy />
+        <Copy size={16} />
       </button>
     </div>
   );
 }
-const IconSun = () => (
-  <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
-    <circle cx="7" cy="7" r="2.6" stroke="currentColor" strokeWidth="1.3"/>
-    <path d="M7 .8V2M7 12v1.2M.8 7H2M12 7h1.2M2.6 2.6l.85.85M10.55 10.55l.85.85M2.6 11.4l.85-.85M10.55 3.45l.85-.85"
-          stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-  </svg>
-);
-const IconMoon = () => (
-  <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
-    <path d="M12 8.2A5 5 0 1 1 5.8 2 4 4 0 0 0 12 8.2z"
-          stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/>
-  </svg>
-);
-
-/// Inline-SVG icon set; stroke-based at 14x14, inherits color, `size` override.
-type IconProps = { size?: number; className?: string };
 const Icon = {
-  Edit: ({ size = 13, className }: IconProps) => (
-    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" className={className}>
-      <path d="M10 1.5l2.5 2.5M9 2.5l2.5 2.5M2.5 9l6.5-6.5 2.5 2.5L5 11.5l-3 0.5z"
-            stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" strokeLinecap="round"/>
-    </svg>
-  ),
-  Clone: ({ size = 13, className }: IconProps) => (
-    // "Duplicate" — two offset rounded rectangles.
-    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" className={className}>
-      <rect x="4.5" y="4.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3"/>
-      <path d="M2 9.5V2.5C2 1.95 2.45 1.5 3 1.5h7" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-    </svg>
-  ),
-  More: ({ size = 13, className }: IconProps) => (
-    // Vertical kebab — opens the same menu as right-click.
-    <svg width={size} height={size} viewBox="0 0 14 14" fill="currentColor" className={className}>
-      <circle cx="7" cy="2.5" r="1.3" />
-      <circle cx="7" cy="7" r="1.3" />
-      <circle cx="7" cy="11.5" r="1.3" />
-    </svg>
-  ),
-  Trash: ({ size = 13, className }: IconProps) => (
-    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" className={className}>
-      <path d="M2 3.5h10M5 3.5V2.2C5 1.8 5.3 1.5 5.7 1.5h2.6c0.4 0 0.7 0.3 0.7 0.7v1.3M3.3 3.5l0.7 8.4c0 0.4 0.4 0.6 0.7 0.6h4.6c0.4 0 0.7-0.2 0.7-0.6L10.7 3.5"
-            stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
-      <path d="M6 6v4M8 6v4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-    </svg>
-  ),
-  Refresh: ({ size = 13, className }: IconProps) => (
-    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" className={className}>
-      <path d="M12 7a5 5 0 1 1-1.5-3.5M12 1.5v3h-3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
-    </svg>
-  ),
-  Grip: ({ size = 14, className }: IconProps) => (
-    <svg width={size} height={size} viewBox="0 0 14 14" fill="currentColor" className={className}>
-      <circle cx="4" cy="3" r="1" /><circle cx="10" cy="3" r="1" />
-      <circle cx="4" cy="7" r="1" /><circle cx="10" cy="7" r="1" />
-      <circle cx="4" cy="11" r="1" /><circle cx="10" cy="11" r="1" />
-    </svg>
-  ),
-  Loader: ({ size = 13, className }: IconProps) => (
-    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" className={className}>
-      <circle cx="7" cy="7" r="5" stroke="currentColor" strokeWidth="1.4" opacity="0.25"/>
-      <path d="M7 2a5 5 0 0 1 5 5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
-    </svg>
-  ),
-  Info: ({ size = 13, className }: IconProps) => (
-    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" className={className}>
-      <circle cx="7" cy="7" r="5.5" stroke="currentColor" strokeWidth="1.3"/>
-      <path d="M7 6.3v3.7" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-      <circle cx="7" cy="4.4" r="0.75" fill="currentColor"/>
-    </svg>
-  ),
-  Folder: ({ size = 13, className }: IconProps) => (
-    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" className={className}>
-      <path d="M1.5 4.5V3c0-0.5 0.4-1 1-1h3l1.5 1.5h5c0.5 0 1 0.5 1 1V11c0 0.5-0.5 1-1 1H2.5c-0.6 0-1-0.5-1-1V4.5z"
-            stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/>
-    </svg>
-  ),
-  Upload: ({ size = 13, className }: IconProps) => (
-    // Up-arrow into a tray — used for "Export".
-    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" className={className}>
-      <path d="M7 1.5v7M4 4.5l3-3 3 3M2.5 9.5V12c0 0.3 0.2 0.5 0.5 0.5h8c0.3 0 0.5-0.2 0.5-0.5V9.5"
-            stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
-    </svg>
-  ),
-  Download: ({ size = 13, className }: IconProps) => (
-    // Down-arrow into a tray — used for "Import".
-    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" className={className}>
-      <path d="M7 8.5v-7M4 5.5l3 3 3-3M2.5 9.5V12c0 0.3 0.2 0.5 0.5 0.5h8c0.3 0 0.5-0.2 0.5-0.5V9.5"
-            stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
-    </svg>
-  ),
-  Globe: ({ size = 14, className }: IconProps) => (
-    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" className={className}>
-      <circle cx="7" cy="7" r="5.5" stroke="currentColor" strokeWidth="1.3"/>
-      <path d="M1.5 7h11M7 1.5c1.8 2 1.8 9 0 11M7 1.5c-1.8 2-1.8 9 0 11" stroke="currentColor" strokeWidth="1.2"/>
-    </svg>
-  ),
-  Clock: ({ size = 14, className }: IconProps) => (
-    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" className={className}>
-      <circle cx="7" cy="7" r="5.5" stroke="currentColor" strokeWidth="1.3"/>
-      <path d="M7 3.5V7l2.5 1.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-    </svg>
-  ),
-  Building: ({ size = 14, className }: IconProps) => (
-    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" className={className}>
-      <path d="M3 12.5V2.5h6v10M9 6.5h2.5V12.5M5 4.5h2M5 6.5h2M5 8.5h2M5 10.5h2"
-            stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" strokeLinecap="round"/>
-    </svg>
-  ),
-  Stop: ({ size = 13, className }: IconProps) => (
-    <svg width={size} height={size} viewBox="0 0 14 14" className={className}>
-      <rect x="3" y="3" width="8" height="8" rx="1" fill="currentColor"/>
-    </svg>
-  ),
-  Play: ({ size = 13, className }: IconProps) => (
-    <svg width={size} height={size} viewBox="0 0 14 14" className={className}>
-      <path d="M4 2.5l8 4.5-8 4.5z" fill="currentColor"/>
-    </svg>
-  ),
+  Edit: Pencil, Clone: CopyPlus, More: EllipsisVertical, Trash, Refresh: RefreshCw,
+  Grip: GripVertical, Loader: LoaderCircle, Info, Folder, Upload, Download,
+  Globe, Clock, Building: Building2, Stop: Square, Play,
 };
 
 type SortKind = "profile" | "proxy";
@@ -1313,7 +1156,7 @@ function listDrop<T extends { id: string }>(event: DragEndEvent, items: T[], kin
 }
 
 function SortDragLabel({ label }: { label: string }) {
-  return <span className="sort-drag-label"><Icon.Grip /><span>{label}</span></span>;
+  return <span className="sort-drag-label"><Icon.Grip size={16} /><span>{label}</span></span>;
 }
 
 function ListSortOverlay() {
@@ -1391,7 +1234,7 @@ function SortableRow({
             {...attributes}
             {...listeners}
           >
-            <Icon.Grip />
+            <Icon.Grip size={16} />
           </button>
         </div>
         {children}
@@ -1442,6 +1285,8 @@ function FolderDropTab({
 
 function BrowsersView() {
   const [profiles, setProfiles] = useState<ProfileMeta[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [proxies, setProxies] = useState<ProxyEntry[]>([]);
   const [proxySnapshots, setProxySnapshots] = useState<Record<string, ProxyTestSnapshot>>({});
   const [search, setSearch] = useState("");
@@ -1531,9 +1376,10 @@ function BrowsersView() {
     try {
       setProfiles(await invoke<ProfileMeta[]>("profile_list"));
       setProxies(await invoke<ProxyEntry[]>("proxy_list"));
+      setLoadError(null);
     } catch (e) {
-      toast.err(String(e));
-    }
+      setLoadError(String(e));
+    } finally { setLoading(false); }
   };
   useEffect(() => { reload(); }, []);
   // Pick up profiles/proxies created via the automation API or MCP live.
@@ -2096,20 +1942,20 @@ function BrowsersView() {
       {...sort}
       onDragEnd={handleProfileDragEnd}
     >
-    <section className="page workspace-page">
-      <Topbar crumbs={[tr("Workspace"), tr("Browsers")]} search={search} onSearch={setSearch} />
+    <section className="page">
+      <PageToolbar title={tr("Browsers")} search={{ value: search, onChange: setSearch }}>
+        <button className="btn-ghost" disabled={backupBusy || operations.runtime} onClick={bulkImport} title={tr("Import one or more .shardx-backup files")}><Icon.Download size={16} /> {tr("Import profile")}</button>
+        <button className="btn-primary" disabled={saveBusy || operations.runtime || !!recovery?.incomplete} onClick={newProfile}><Plus /> {tr("New profile")}</button>
+      </PageToolbar>
 
-      <div className="metric-strip">
+      <dl className="metric-strip">
         <Metric label={tr("Profiles")} value={String(profiles.length)} accent />
-        <Metric label={tr("Running")} value={String(runningCount)} pulse={runningCount > 0} />
+        <Metric label={tr("Running")} value={String(runningCount)} running={runningCount > 0} />
         <Metric label={tr("Proxies")} value={String(proxies.length)} />
         <Metric label={tr("Fingerprints")} value={String(fingerprints.length)} />
-      </div>
+      </dl>
 
-      <div className="page-title">
-        <div className="title-with-tabs">
-          <h1>{tr("Browsers")}</h1>
-          <div className="folder-tabs" ref={folderTabsRef}>
+        <div className="folder-tabs" ref={folderTabsRef}>
             <FolderDropTab
               dropId="profile-folder:all"
               folder=""
@@ -2139,31 +1985,24 @@ function BrowsersView() {
               </FolderDropTab>
             ))}
             <button
-              className="folder-tab folder-tab-add"
-              title={tr("Create a new folder")}
+                 className="folder-tab folder-tab-add"
+                 title={tr("Create a new folder")}
+                 aria-label={tr("Create a new folder")}
               onClick={() => setFolderModal({ profileId: null })}
             >
-              +
+               <Plus />
             </button>
-          </div>
-        </div>
-        <div className="page-actions">
-          <button className="btn-ghost profile-page-action" disabled={backupBusy || operations.runtime} onClick={bulkImport} title={tr("Import one or more .shardx-backup files")}><Icon.Download /> {tr("Import profile")}</button>
-          <button className="btn-primary profile-page-action" disabled={saveBusy || operations.runtime || !!recovery?.incomplete} onClick={newProfile}>{tr("+ New profile")}</button>
-        </div>
       </div>
       {recovery?.incomplete && <div className="operation-banner" role="alert"><div><strong>{tr("Browser recovery needs attention")}</strong><p>{recovery.error}</p></div><button className="btn-ghost" disabled={recovering} onClick={() => void retryRecovery()}>{recovering ? tr("Recovering…") : tr("Retry recovery")}</button></div>}
       {(backupBusy || operations.runtime || operations.profiles.length > 0) && <div className="operation-banner" role="status">{operations.runtime ? tr("Runtime update in progress. Profile changes will be available when it finishes.") : tr("Profile backup in progress. Keep the launcher open until it finishes.")}</div>}
-      {selected.size > 0 && (
-        <div className="bulk-bar browser-bulk-bar">
-          <span>{selected.size} {tr("selected")}</span>
+      <SelectionBar count={selected.size}>
           <button
             className="btn-ghost btn-sm"
             onClick={bulkLaunch}
             disabled={selectedHasActive}
             title={selectedHasRunning ? tr("Stop selected running browsers before launching") : selectedHasStarting ? tr("Wait for selected browsers to finish starting") : tr("Launch selected profiles")}
-          ><Icon.Play /> {tr("Launch")}</button>
-          <button className="btn-ghost btn-sm" onClick={bulkStop}><Icon.Stop /> {tr("Stop")}</button>
+          ><Icon.Play size={16} /> {tr("Launch")}</button>
+          <button className="btn-ghost btn-sm" onClick={bulkStop}><Icon.Stop size={16} /> {tr("Stop")}</button>
           {selectedHasStarting && <button className="btn-ghost btn-sm" onClick={() => {
             for (const id of selected) if (startBusy.has(id) || (backendActiveIds.has(id) && !running[id])) void cancelStart(id);
           }}>{tr("Cancel launch")}</button>}
@@ -2173,15 +2012,15 @@ function BrowsersView() {
             onClick={bulkExport}
             disabled={selectedHasActive || backupBusy}
             title={selectedHasActive ? tr("Stop selected active browsers before exporting") : tr("Back up selected profiles, excluding rebuildable caches")}
-          ><Icon.Upload /> {tr("Export")}</button>
+          ><Icon.Upload size={16} /> {tr("Export")}</button>
           <button
             className="btn-ghost btn-sm"
             onClick={bulkDelete}
             disabled={selectedHasActive}
             title={selectedHasActive ? tr("Stop selected active browsers before deleting") : tr("Delete selected profiles")}
-          ><Icon.Trash /> {tr("Delete")}</button>
-        </div>
-      )}
+          ><Icon.Trash size={16} /> {tr("Delete")}</button>
+      </SelectionBar>
+      {loadError !== null && <ListState kind="error" text={tr("Unable to load browsers: {0}", loadError)} />}
       {folderModal && (() => {
         const moving = folderModal.profileId
           ? profiles.find((p) => p.id === folderModal!.profileId) ?? null
@@ -2212,7 +2051,7 @@ function BrowsersView() {
       />}
       <div className="rows">
         <div className="rows-head t-cols">
-          <div className="sort-head" title={tr("Drag rows to reorder")}><Icon.Grip /></div>
+          <div className="sort-head" title={tr("Drag rows to reorder")}><Icon.Grip size={16} /></div>
           <div></div>
           <div>
             <input
@@ -2238,7 +2077,7 @@ function BrowsersView() {
               }}
             />
           </div>
-          <div>{tr("Name")}</div><div>{tr("Label")}</div><div>{tr("Status")}</div><div className="head-proxy">{tr("Proxy")}</div><div>{tr("Notes")}</div><div className="head-lastrun">{tr("Last run")}</div><div className="head-actions">{tr("ACTIONS")}</div>
+          <div>{tr("Name")}</div><div>{tr("Label")}</div><div>{tr("Status")}</div><div className="head-proxy">{tr("Proxy")}</div><div>{tr("Notes")}</div><div className="head-lastrun">{tr("Last run")}</div><div className="head-actions">{tr("Actions")}</div>
         </div>
         {expanded === "__new__" && draft && (
           <div className="row-wrap row-expanded row-new">
@@ -2327,14 +2166,14 @@ function BrowsersView() {
                   <span className={`shard ${isRunning ? "shard-on" : "shard-off"}`} />
                 </div>
                 <div>
-                  <input type="checkbox" checked={isSel} onChange={() => toggleSel(p.id)} />
+                  <input type="checkbox" aria-label={p.name} checked={isSel} onChange={() => toggleSel(p.id)} />
                 </div>
                 <div
                   className={`cell-name ${isActive ? "cell-locked" : ""}`}
                   onClick={isActive || edit?.field === "name" ? undefined : () => beginRename(p, "name")}
                   title={isActive ? tr("Stop the browser or wait for it to finish starting before renaming") : tr("Click to rename")}
                 >
-                  {edit?.field === "name" ? renderInlineEdit("name") : <div className="name-main">{p.name}</div>}
+                  {edit?.field === "name" ? renderInlineEdit("name") : <div className="name-main" title={p.name}>{p.name}</div>}
                   <div className="name-sub">{p.id.slice(0, 8)}</div>
                 </div>
                 <div className="cell-label" title={isActive ? tr("Stop the browser before editing its taskbar label") : undefined}>
@@ -2404,33 +2243,26 @@ function BrowsersView() {
                     aria-busy={isStarting}
                   >
                     <span className={`btn-launch-ico ${isStarting ? "spin" : ""}`}>
-                      {isRunning ? <Icon.Stop /> : isStarting ? <Icon.Loader /> : <Icon.Play />}
+                      {isRunning ? <Icon.Stop size={16} /> : isStarting ? <Icon.Loader size={16} /> : <Icon.Play size={16} />}
                     </span>
                   </button>
-                  <button className="icon-btn" onClick={() => expand(p.id)} disabled={isActive} title={isActive ? tr("Stop browser before editing") : tr("Edit")}><Icon.Edit /></button>
-                  <button className="icon-btn" onClick={() => cloneProfile(p.id)} disabled={isActive} title={isActive ? tr("Stop browser before cloning") : tr("Clone")}><Icon.Clone /></button>
-                  <button className="icon-btn danger" onClick={() => remove(p.id)} disabled={isActive} title={isActive ? tr("Stop browser before deleting") : tr("Delete")}><Icon.Trash /></button>
+                  <button className="icon-btn" onClick={() => expand(p.id)} disabled={isActive} title={isActive ? tr("Stop browser before editing") : tr("Edit")}><Icon.Edit size={16} /></button>
+                  <button className="icon-btn" onClick={() => cloneProfile(p.id)} disabled={isActive} title={isActive ? tr("Stop browser before cloning") : tr("Clone")}><Icon.Clone size={16} /></button>
+                  <button className="icon-btn danger" onClick={() => remove(p.id)} disabled={isActive} title={isActive ? tr("Stop browser before deleting") : tr("Delete")}><Icon.Trash size={16} /></button>
                   <button
                     className="icon-btn"
                     onClick={(e) => { e.stopPropagation(); ctx.open(e, profileMenu(p)); }}
                     disabled={isActive}
                     title={isActive ? tr("Stop browser before using more actions") : tr("More actions")}
-                  ><Icon.More /></button>
+                  ><Icon.More size={16} /></button>
                 </div>
             </SortableRow>
           );
         })}
         </SortableContext>
-        {visible.length === 0 && !expanded && (
-          <div className="empty-rich">
-            <div className="empty-shard"><ShardLogo /></div>
-            <h3>{tr("No profiles yet")}</h3>
-            <p>{tr("Create a browser profile to get started.")}</p>
-            <div className="empty-cta">
-              <button className="btn-primary profile-page-action" onClick={newProfile}>{tr("+ New profile")}</button>
-            </div>
-          </div>
-        )}
+        {visible.length === 0 && !expanded && loadError === null && (loading
+          ? <ListState kind="loading" text={tr("Loading…")} />
+          : <ListState kind="empty" text={tr(search.trim() ? "No matching browsers" : folder !== "all" ? "No browsers in this folder" : "No profiles yet")} />)}
       </div>
       {ctx.node}
       {quickEdit && (
@@ -2528,7 +2360,7 @@ function AssignProxiesDialog({ profiles, proxies, selected, activeIds, onClose, 
       <div className="dialog assign-dialog">
         <header className="dialog-head">
           <h2>{tr("Assign proxies")}</h2>
-          <button className="icon-btn" disabled={busy} onClick={onClose} aria-label={tr("Close")}>✕</button>
+          <button className="icon-btn" disabled={busy} onClick={onClose} aria-label={tr("Close")} title={tr("Close")}><X /></button>
         </header>
         <div className="dialog-body">
           <p className="muted small">{tr("Profiles and proxies are paired in list order. Profiles without a match keep their current binding.")}</p>
@@ -2604,8 +2436,8 @@ function QuickEditDialog({
     <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
       <div className="dialog">
         <header className="dialog-head">
-          <h2><ShardMini /> {kind === "proxy" ? tr("Bind proxy") : tr("Edit notes")} — {profile.name}</h2>
-          <button className="icon-btn" onClick={onClose}>✕</button>
+          <h2>{kind === "proxy" ? tr("Bind proxy") : tr("Edit notes")} — {profile.name}</h2>
+          <button className="icon-btn" onClick={onClose} aria-label={tr("Close")} title={tr("Close")}><X /></button>
         </header>
         <div className="dialog-body">
           {kind === "proxy" ? (
@@ -2630,7 +2462,7 @@ function QuickEditDialog({
         <footer className="dialog-foot">
           <button className="btn-ghost" onClick={onClose}>{tr("Cancel")}</button>
           <button className="btn-primary" onClick={kind === "proxy" ? saveProxy : saveNotes}>
-            <ShardMini />  {tr("Save")} </button>
+            <Save /> {tr("Save")} </button>
         </footer>
       </div>
     </DialogBackdrop>
@@ -2994,7 +2826,7 @@ function InlineEditor({
       <div className="ie-foot">
         <button className="btn-ghost" onClick={onCancel}>{tr("Cancel")}</button>
         <button className="btn-primary" onClick={onSave} disabled={nameError != null} title={nameError ?? undefined}>
-          <ShardMini /> {busy ? tr("Saving…") : f.id ? tr("Save changes") : tr("Create profile")}
+          {f.id ? <Save /> : <Plus />} {busy ? tr("Saving…") : f.id ? tr("Save changes") : tr("Create profile")}
         </button>
       </div>
     </fieldset>
@@ -3099,7 +2931,7 @@ function PortList({
         {value.map((p) => (
           <span key={p} className="port-chip">
             <span>{p}</span>
-            <button type="button" className="port-chip-x" onClick={() => remove(p)} title={tr("Remove")}>✕</button>
+            <button type="button" className="port-chip-x" onClick={() => remove(p)} title={tr("Remove")} aria-label={`${tr("Remove")} ${p}`}><X size={14} /></button>
           </span>
         ))}
         <input
@@ -3232,32 +3064,11 @@ function SelectField<T extends string | number>({
   );
 }
 
-// ---- topbar + metrics ----
-
-function Topbar({ crumbs, search, onSearch }: { crumbs: string[]; search: string; onSearch: (v: string) => void }) {
-  return (
-    <div className="topbar">
-      <div className="crumbs">
-        {crumbs.map((c, i) => (
-          <span key={i}>
-            {i > 0 && <span className="sep">›</span>}
-            <span className={i === crumbs.length - 1 ? "crumb-now" : ""}>{c}</span>
-          </span>
-        ))}
-      </div>
-      <div className="search">
-        <span className="search-icon">⌕</span>
-        <input placeholder={tr("Search…   ⌘K")} value={search} onChange={(e) => onSearch(e.target.value)} />
-      </div>
-    </div>
-  );
-}
-
-function Metric({ label, value, accent, pulse }: { label: string; value: string; accent?: boolean; pulse?: boolean }) {
+function Metric({ label, value, accent, running }: { label: string; value: string; accent?: boolean; running?: boolean }) {
   return (
     <div className={`metric ${accent ? "metric-accent" : ""}`}>
-      <div className="m-k">{label}</div>
-      <div className={`m-v ${pulse ? "m-v-pulse" : ""}`}>{value}</div>
+      <dt className="m-k">{label}</dt>
+      <dd className={`m-v ${running ? "m-v-running" : ""}`}>{value}</dd>
     </div>
   );
 }
@@ -3330,6 +3141,8 @@ async function testProxiesIncrementally(
 
 function ProxiesView() {
   const [proxies, setProxies] = useState<ProxyEntry[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<ProxyEntry | null>(null);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [snapshots, setSnapshots] = useState<Record<string, ProxyTestSnapshot>>({});
@@ -3412,7 +3225,9 @@ function ProxiesView() {
       setProxies(await invoke<ProxyEntry[]>("proxy_list"));
       // Profile list powers the per-proxy bound-count column.
       setProfiles(await invoke<ProfileMeta[]>("profile_list"));
-    } catch (e) { toast.err(String(e)); }
+      setLoadError(null);
+    } catch (e) { setLoadError(String(e)); }
+    finally { setLoading(false); }
   };
   useEffect(() => { reload(); }, []);
   // Pick up proxies/profiles added via the automation API or MCP live.
@@ -3597,31 +3412,25 @@ function ProxiesView() {
       {...sort}
       onDragEnd={handleProxyDragEnd}
     >
-    <section className="page workspace-page">
-      <Topbar crumbs={[tr("Proxylist"), tr("Proxies")]} search={search} onSearch={setSearch} />
-      <div className="page-title">
-        <h1>{tr("Proxies")}</h1>
-        <div className="page-actions">
-          {proxySel.size > 0 && (
-            <div className="bulk-bar bulk-bar-floating">
-              <span>{proxySel.size}  {tr("selected")}</span>
-              <button className="btn-ghost btn-sm" onClick={bulkTest}><Icon.Refresh />  {tr("Test")}</button>
-              <button className="btn-ghost btn-sm" onClick={bulkExport}><Icon.Upload />  {tr("Export")}</button>
-              <button
-                className="btn-ghost btn-sm"
-                onClick={bulkDelete}
-                disabled={selectedHasLockedProxy}
-                title={selectedHasLockedProxy ? tr("Stop browsers using selected proxies before deleting") : tr("Delete selected proxies")}
-              ><Icon.Trash />  {tr("Delete")}</button>
-            </div>
-          )}
-          <button className="btn-ghost" onClick={bulkImportClipboard} title={tr("Import proxies from the clipboard")}><Icon.Download />  {tr("Import")}</button>
-          <button className="btn-primary" onClick={() => setBulkOpen(true)}>{tr("+ New proxy")}</button>
-        </div>
-      </div>
+    <section className="page">
+      <PageToolbar title={tr("Proxies")} search={{ value: search, onChange: setSearch }}>
+        <button className="btn-ghost" onClick={bulkImportClipboard} title={tr("Import proxies from the clipboard")}><Icon.Download size={16} /> {tr("Import")}</button>
+        <button className="btn-primary" onClick={() => setBulkOpen(true)}><Plus /> {tr("New proxy")}</button>
+      </PageToolbar>
+      <SelectionBar count={proxySel.size}>
+        <button className="btn-ghost btn-sm" onClick={bulkTest}><Icon.Refresh size={16} /> {tr("Test")}</button>
+        <button className="btn-ghost btn-sm" onClick={bulkExport}><Icon.Upload size={16} /> {tr("Export")}</button>
+        <button
+          className="btn-ghost btn-sm danger"
+          onClick={bulkDelete}
+          disabled={selectedHasLockedProxy}
+          title={selectedHasLockedProxy ? tr("Stop browsers using selected proxies before deleting") : tr("Delete selected proxies")}
+        ><Icon.Trash size={16} /> {tr("Delete")}</button>
+      </SelectionBar>
+      {loadError !== null && <ListState kind="error" text={tr("Unable to load proxies: {0}", loadError)} />}
       <div className="rows">
         <div className="rows-head p-cols">
-          <div className="sort-head" title={tr("Drag rows to reorder")}><Icon.Grip /></div>
+          <div className="sort-head" title={tr("Drag rows to reorder")}><Icon.Grip size={16} /></div>
           <div>
             <input
               type="checkbox"
@@ -3646,7 +3455,7 @@ function ProxiesView() {
               }}
             />
           </div>
-          <div>{tr("Name")}</div><div>{tr("Type")}</div><div>{tr("Host:Port")}</div><div>{tr("Country")}</div><div>{tr("Profiles")}</div><div>{tr("Test result")}</div><div className="head-actions">{tr("ACTIONS")}</div>
+          <div>{tr("Name")}</div><div>{tr("Type")}</div><div>{tr("Host:Port")}</div><div>{tr("Country")}</div><div>{tr("Profiles")}</div><div>{tr("Test result")}</div><div className="head-actions">{tr("Actions")}</div>
         </div>
         <SortableContext items={filteredProxies.map((proxy) => proxy.id)} strategy={verticalListSortingStrategy}>
         {filteredProxies.map((p) => {
@@ -3792,35 +3601,28 @@ function ProxiesView() {
                     className="icon-btn"
                     onClick={(e) => setInfoFor({ proxy: p, anchor: { x: e.clientX, y: e.clientY } })}
                     title={tr("Details + history")}
-                  ><Icon.Info /></button>
-                  <button className="icon-btn" onClick={() => fullTest(p)} disabled={isBusy} title={tr("Test TCP + UDP + geo")}><Icon.Refresh /></button>
+                  ><Icon.Info size={16} /></button>
+                  <button className="icon-btn" onClick={() => fullTest(p)} disabled={isBusy} title={tr("Test TCP + UDP + geo")}><Icon.Refresh size={16} /></button>
                   <button
                     className="icon-btn"
                     onClick={() => setEditing(p)}
                     disabled={isLocked}
                     title={isLocked ? tr("Stop the browser using this proxy before editing") : tr("Edit")}
-                  ><Icon.Edit /></button>
+                  ><Icon.Edit size={16} /></button>
                   <button
                     className="icon-btn danger"
                     onClick={() => remove(p.id)}
                     disabled={isLocked}
                     title={isLocked ? tr("Stop the browser using this proxy before deleting") : tr("Delete")}
-                  ><Icon.Trash /></button>
+                  ><Icon.Trash size={16} /></button>
                 </div>
             </SortableRow>
           );
         })}
         </SortableContext>
-        {proxies.length === 0 && (
-          <div className="empty-rich">
-            <div className="empty-shard"><IconWire /></div>
-            <h3>{tr("No proxies yet")}</h3>
-            <p>{tr("Add a SOCKS5/HTTP(S) endpoint so profiles can route through it.")}</p>
-            <div className="empty-cta">
-              <button className="btn-primary" onClick={() => setBulkOpen(true)}>{tr("+ New proxy")}</button>
-            </div>
-          </div>
-        )}
+        {filteredProxies.length === 0 && loadError === null && (loading
+          ? <ListState kind="loading" text={tr("Loading…")} />
+          : <ListState kind="empty" text={tr(search.trim() ? "No matching proxies" : "No proxies yet")} />)}
       </div>
       {editing && <ProxyEditor initial={editing} onClose={() => { setEditing(null); reload(); }} />}
       {bulkOpen && <ProxyBulkImporter onClose={() => { setBulkOpen(false); reload(); }} />}
@@ -3876,24 +3678,24 @@ function ProxyInfoPopover({
             {latest.ip && (
               <>
                 <div className="pop-row">
-                  <span className="pop-ico"><Icon.Globe /></span>
+                  <span className="pop-ico"><Icon.Globe size={16} /></span>
                   <span className="mono">{latest.ip}</span>
                 </div>
                 <div className="pop-row">
-                  <span className="pop-ico">{latest.country_code ? <CountryFlag cc={latest.country_code} height={14} /> : <Icon.Globe />}</span>
+                  <span className="pop-ico">{latest.country_code ? <CountryFlag cc={latest.country_code} height={14} /> : <Icon.Globe size={16} />}</span>
                   <span>{[latest.region, latest.city].filter(Boolean).join(", ") || latest.country || "—"}</span>
                 </div>
               </>
             )}
             {latest.timezone && (
               <div className="pop-row">
-                <span className="pop-ico"><Icon.Clock /></span>
+                <span className="pop-ico"><Icon.Clock size={16} /></span>
                 <span>{latest.timezone}</span>
               </div>
             )}
             {latest.isp && (
               <div className="pop-row">
-                <span className="pop-ico"><Icon.Building /></span>
+                <span className="pop-ico"><Icon.Building size={16} /></span>
                 <span className="muted small">{latest.isp}</span>
               </div>
             )}
@@ -3943,18 +3745,12 @@ function ProxyInfoPopover({
   );
 }
 
-/// Flat 4:3 country flag (flag-icons sprite); empty input renders nothing.
+const countryFlagCodes = new Set(flagCodes.split(" "));
+
 function CountryFlag({ cc, height = 15 }: { cc: string; height?: number }) {
-  if (!cc || cc.length !== 2 || !/^[a-zA-Z]{2}$/.test(cc)) return null;
   const code = cc.toLowerCase();
-  // `fi fi-XX`; omit `fis` to keep 4:3 rectangle.
-  return (
-    <span
-      className={`fi fi-${code} flag-rect`}
-      style={{ height, width: Math.round(height * 4 / 3) }}
-      aria-hidden
-    />
-  );
+  if (!countryFlagCodes.has(code)) return null;
+  return <img className="flag-rect" src={`${import.meta.env.BASE_URL}icons/flags/${code}.svg`} width={Math.round(height * 4 / 3)} height={height} alt="" />;
 }
 
 /// "@1700000000" → "May 26, 14:30" (UTC for cross-timezone consistency).
@@ -4107,8 +3903,8 @@ function ProxyBulkImporter({ onClose }: { onClose: () => void }) {
     <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
       <div className="dialog dialog-wide">
         <header className="dialog-head">
-          <h2><ShardMini />  {tr("Bulk import proxies")}</h2>
-          <button className="icon-btn" onClick={onClose}>✕</button>
+          <h2>{tr("Bulk import proxies")}</h2>
+          <button className="icon-btn" onClick={onClose} aria-label={tr("Close")} title={tr("Close")}><X /></button>
         </header>
         <div className="dialog-body">
           {rows.length === 0 ? (
@@ -4180,7 +3976,7 @@ host:8080               # no auth
                     }}
                   >{tr("← Back")}</button>
                   <button className="btn-ghost btn-sm" onClick={testAll} disabled={busy}>
-                    {busy ? tr("Testing…") : <><Icon.Refresh />  {tr("Test all")}</>}
+                    {busy ? tr("Testing…") : <><Icon.Refresh size={16} />  {tr("Test all")}</>}
                   </button>
                   <button
                     className="btn-ghost btn-sm"
@@ -4239,7 +4035,7 @@ host:8080               # no auth
                         <span className="status-pill" title={r.error}>{tr("Incomplete")}</span>
                       )}
                     </div>
-                    <button className="btn-sm btn-ghost icon-only" onClick={() => testOne(i)} disabled={r.status === "testing"} title={tr("Test this row")}><Icon.Refresh /></button>
+                    <button className="btn-sm btn-ghost icon-only" onClick={() => testOne(i)} disabled={r.status === "testing"} title={tr("Test this row")}><Icon.Refresh size={16} /></button>
                   </div>
                 ))}
               </div>
@@ -4249,10 +4045,10 @@ host:8080               # no auth
         <footer className="dialog-foot">
           <button className="btn-ghost" onClick={onClose}>{tr("Cancel")}</button>
           {rows.length === 0 ? (
-            <button className="btn-primary" onClick={parse}><ShardMini />  {tr("Parse →")}</button>
+            <button className="btn-primary" onClick={parse}>{tr("Parse →")}</button>
           ) : (
             <button className="btn-primary" onClick={saveSelected}>
-              <ShardMini />  {tr("Import")} {selCount}
+              <Download /> {tr("Import")} {selCount}
             </button>
           )}
         </footer>
@@ -4294,8 +4090,8 @@ function ProxyEditor({ initial, onClose }: { initial: ProxyEntry; onClose: () =>
     <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
       <div className="dialog">
         <header className="dialog-head">
-          <h2><ShardMini /> {initial.id ? tr("Edit proxy") : tr("New proxy")}</h2>
-          <button className="icon-btn" onClick={onClose}>✕</button>
+          <h2>{initial.id ? tr("Edit proxy") : tr("New proxy")}</h2>
+          <button className="icon-btn" onClick={onClose} aria-label={tr("Close")} title={tr("Close")}><X /></button>
         </header>
         <div className="dialog-body">
           <Field label={tr("Name")} value={p.name} onChange={(v: string) => setP({ ...p, name: v })} error={nameError} />
@@ -4338,7 +4134,7 @@ function ProxyEditor({ initial, onClose }: { initial: ProxyEntry; onClose: () =>
         </div>
         <footer className="dialog-foot">
           <button className="btn-ghost" onClick={onClose}>{tr("Cancel")}</button>
-          <button className="btn-primary" onClick={save} disabled={nameError != null} title={nameError ?? undefined}><ShardMini />  {tr("Save")}</button>
+          <button className="btn-primary" onClick={save} disabled={nameError != null} title={nameError ?? undefined}><Save /> {tr("Save")}</button>
         </footer>
       </div>
     </DialogBackdrop>
@@ -4348,9 +4144,14 @@ function ProxyEditor({ initial, onClose }: { initial: ProxyEntry; onClose: () =>
 function FingerprintsView() {
   const [items, setItems] = useState<FingerprintEntry[]>([]);
   const [importerOpen, setImporterOpen] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  const reload = () =>
-    invoke<FingerprintEntry[]>("fingerprint_list").then(setItems).catch((e) => toast.err(String(e)));
+  const reload = async () => {
+    try { setItems(await invoke<FingerprintEntry[]>("fingerprint_list")); setLoadError(null); }
+    catch (e) { setLoadError(String(e)); }
+    finally { setLoading(false); }
+  };
   useEffect(() => { reload(); }, []);
 
   const use = async (id: string) => {
@@ -4382,11 +4183,8 @@ function FingerprintsView() {
   };
 
   return (
-    <section className="page workspace-page">
-      <Topbar crumbs={[tr("Library"), tr("Fingerprints")]} search="" onSearch={() => {}} />
-      <div className="page-title">
-        <h1>{tr("Fingerprint Library")}</h1>
-        <div className="page-actions">
+    <section className="page">
+      <PageToolbar title={tr("Fingerprint Library")}>
           <button
             className="btn-ghost"
             onClick={async () => {
@@ -4396,18 +4194,14 @@ function FingerprintsView() {
             }}
             title={tr("Reveal the on-disk library folder; drop JSONs here to add them")}
           >
-            <Icon.Folder />  {tr("Library folder")} </button>
-          <button className="btn-ghost" onClick={importJsonFile}><Icon.Folder />  {tr("Import from file")}</button>
-          <button className="btn-primary" onClick={() => setImporterOpen(true)}>{tr("+ Paste JSON")}</button>
-        </div>
-      </div>
-      <p className="muted small" style={{ marginBottom: 14 }}>
-         {tr("These FingerprintConfig snapshots populate the")} <strong>GPU</strong>  {tr("select in the profile editor. Import your own from any working ShardX profile JSON to expand the list.")} </p>
-      {items.length === 0 ? (
-        <div className="empty">{tr("Library is empty — click \"Import from file\" or \"Paste JSON\".")}</div>
-      ) : (
-        <LibraryGroups items={items} onUse={use} onRemove={remove} />
-      )}
+            <FolderOpen /> {tr("Library folder")} </button>
+          <button className="btn-ghost" onClick={importJsonFile}><FileUp /> {tr("Import from file")}</button>
+          <button className="btn-primary" onClick={() => setImporterOpen(true)}><Plus /> {tr("Paste JSON")}</button>
+      </PageToolbar>
+      {loadError !== null && <ListState kind="error" text={tr("Unable to load fingerprints: {0}", loadError)} />}
+      {loading ? <ListState kind="loading" text={tr("Loading…")} /> : items.length > 0
+        ? <LibraryGroups items={items} onUse={use} onRemove={remove} />
+        : loadError === null && <ListState kind="empty" text={tr("No fingerprints yet")} />}
       {importerOpen && (
         <FingerprintImporter onClose={() => { setImporterOpen(false); reload(); }} />
       )}
@@ -4446,25 +4240,24 @@ function LibraryGroups({
             <h3>{tr(platform)}</h3>
             <span className="lib-group-count">{list.length}</span>
           </div>
-          <div className="lib-grid">
+          <div className="library-grid">
             {list.map((t) => (
-              <div
+              <article
                 key={t.id}
-                className="lib-card"
-                style={{ ['--accent' as any]: t.tag_color }}
+                className="library-card"
               >
-                <div className="lib-card-head">
-                  <span className="lib-label">{t.label}</span>
-                  {t.chrome && <span className="lib-chrome">Chrome {t.chrome}</span>}
-                </div>
-                <div className="lib-gpu mono" title={t.gpu}>{t.gpu || "—"}</div>
-                <div className="lib-card-foot">
-                  <button className="btn-sm btn-ghost" onClick={() => onUse(t.id)}>{tr("Use →")}</button>
+                <header className="library-card-head">
+                  <h3 title={t.label}>{t.label}</h3>
+                  {t.chrome && <span className="library-tag">Chrome {t.chrome}</span>}
+                </header>
+                <p className="muted small">{t.gpu || "—"}</p>
+                <footer className="library-card-foot">
+                  <button className="btn-sm btn-ghost" onClick={() => onUse(t.id)}><Plus /> {tr("Use")}</button>
                   {t.builtin
-                    ? <span className="lib-tag">{tr("built-in")}</span>
-                    : <button className="btn-sm btn-ghost danger" onClick={() => onRemove(t.id)} title={tr("Remove")}>✕</button>}
-                </div>
-              </div>
+                    ? <span className="library-tag">{tr("built-in")}</span>
+                    : <button className="icon-btn danger" onClick={() => onRemove(t.id)} title={tr("Remove")} aria-label={tr("Remove")}><Trash /></button>}
+                </footer>
+              </article>
             ))}
           </div>
         </div>
@@ -4487,8 +4280,8 @@ function FingerprintImporter({ onClose }: { onClose: () => void }) {
     <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
       <div className="dialog dialog-wide">
         <header className="dialog-head">
-          <h2><ShardMini />  {tr("Paste FingerprintConfig JSON")}</h2>
-          <button className="icon-btn" onClick={onClose}>✕</button>
+          <h2>{tr("Paste FingerprintConfig JSON")}</h2>
+          <button className="icon-btn" onClick={onClose} aria-label={tr("Close")} title={tr("Close")}><X /></button>
         </header>
         <div className="dialog-body">
           <Field label={tr("Name (optional, becomes the file id)")} value={name} onChange={setName} placeholder={tr("e.g. mac-m4-pro-real")} />
@@ -4499,7 +4292,7 @@ function FingerprintImporter({ onClose }: { onClose: () => void }) {
         </div>
         <footer className="dialog-foot">
           <button className="btn-ghost" onClick={onClose}>{tr("Cancel")}</button>
-          <button className="btn-primary" onClick={save}><ShardMini />  {tr("Import")}</button>
+          <button className="btn-primary" onClick={save}><Download /> {tr("Import")}</button>
         </footer>
       </div>
     </DialogBackdrop>
@@ -4527,8 +4320,8 @@ function FolderModal({
     <DialogBackdrop onClose={onClose} dismissOnBackdrop={false}>
       <div className="dialog">
         <header className="dialog-head">
-          <h2><ShardMini /> {mode === "move" ? tr("Move to folder") : tr("New folder")}</h2>
-          <button className="icon-btn" onClick={onClose}>✕</button>
+          <h2>{mode === "move" ? tr("Move to folder") : tr("New folder")}</h2>
+          <button className="icon-btn" onClick={onClose} aria-label={tr("Close")} title={tr("Close")}><X /></button>
         </header>
         <div className="dialog-body">
           {showList && (
@@ -4537,7 +4330,7 @@ function FolderModal({
               <div className="folder-pick-list">
                 {existing.map((f) => (
                   <button key={f} className="folder-pick" onClick={() => onPick(f)}>
-                    <Icon.Folder /> {f}
+                    <Icon.Folder size={16} /> {f}
                   </button>
                 ))}
               </div>
@@ -4760,7 +4553,7 @@ function FirstRunGate({ children }: { children: ReactNode }) {
         )}
         {phase === "repair-required" && (
           <button className="btn-primary runtime-repair-btn" onClick={() => setRepairAttempt((attempt) => attempt + 1)}>
-            <Icon.Refresh /> {err ? tr("Retry browser runtime repair") : tr("Repair browser runtime")}
+            <Icon.Refresh size={16} /> {err ? tr("Retry browser runtime repair") : tr("Repair browser runtime")}
           </button>
         )}
       </div>
@@ -4938,7 +4731,7 @@ function RuntimeUpdateCard() {
           </p>
         </div>
         <button className="btn-ghost runtime-update-check" onClick={check} disabled={checking}>
-          <Icon.Refresh /> {checking ? tr("Checking…") : tr("Check for updates")}
+          <Icon.Refresh size={16} /> {checking ? tr("Checking…") : tr("Check for updates")}
         </button>
       </div>
 
@@ -5066,8 +4859,9 @@ function SettingsView() {
   const settingsDirty = saved !== null && JSON.stringify(s) !== JSON.stringify(saved);
   return (
     <section className="page settings-page">
-      <Topbar crumbs={[tr("System"), tr("Settings")]} search="" onSearch={() => {}} />
-      <div className="page-title"><h1>{tr("Settings")}</h1></div>
+      <PageToolbar title={tr("Settings")}>
+        <button className="btn-primary" onClick={async () => { await save(); refreshApi(); }} disabled={!settingsDirty}><Save /> {tr("Save settings")}</button>
+      </PageToolbar>
 
       <div className="settings-card-list">
         <div className="card settings-card">
@@ -5167,16 +4961,13 @@ function SettingsView() {
         <p className="muted small">
            {tr("Download the")} <strong>MCP</strong>  {tr("server source (lets an AI client drive profiles and a CDP browser) into a folder you choose. The app does not run it — install its deps and register it with your MCP client per the included README. Requires Node.js.")} </p>
         <button className="btn-ghost" onClick={downloadMcp} disabled={mcpBusy}>
-          <Icon.Download /> {mcpBusy ? tr("Downloading…") : tr("Download MCP server")}
+          <Icon.Download size={16} /> {mcpBusy ? tr("Downloading…") : tr("Download MCP server")}
         </button>
       </div>
 
         <RuntimeUpdateCard />
       </div>
 
-      <div className="card-actions">
-        <button className="btn-primary" onClick={async () => { await save(); refreshApi(); }} disabled={!settingsDirty}><ShardMini />  {tr("Save settings")}</button>
-      </div>
     </section>
   );
 }
