@@ -1052,6 +1052,8 @@ components:
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
+        taskbar_label: { type: string, description: Effective Windows taskbar label from the manual override or the last three characters of NAME. }
+        taskbar_label_custom: { type: boolean, description: Whether the taskbar label is manually set. }
         notes: { type: string }
         proxy_id: { type: string, nullable: true }
         last_launched_at: { type: string, nullable: true, description: ISO-8601 or null. }
@@ -1083,6 +1085,7 @@ components:
           properties:
             extensions: { $ref: "#/components/schemas/ExtensionIds" }
             id: { type: string, format: uuid }
+            taskbar_label: { type: string, maxLength: 3, description: Optional manual override for the Windows taskbar label. Omitted when automatic. }
             proxy_id: { type: string, nullable: true }
             inline_proxy:
               nullable: true

@@ -1548,7 +1548,7 @@ mod tests {
     fn lightweight_backup_preserves_persistent_data_and_source_files() {
         let _test = store::TestStore::new();
         let mut stored: profile::StoredProfile = serde_json::from_value(serde_json::json!({
-            "_meta": {"id": "persistent-data"}, "name": "Persistent_Data (v2.1)-A",
+            "_meta": {"id": "persistent-data", "taskbar_label": "Q.7"}, "name": "Persistent_Data (v2.1)-A",
             "navigator": {"platform_version": "17.0.0"}, "noise": {"seed": 42}
         }))
         .unwrap();
@@ -1681,6 +1681,8 @@ mod tests {
             .find(|p| p.id != stored.meta.id)
             .unwrap();
         let restored_data = profile::user_data_dir(&restored.id).unwrap();
+        assert_eq!(restored.taskbar_label, "Q.7");
+        assert!(restored.taskbar_label_custom);
         assert_eq!(
             cookies::export_os_crypt_key(&restored_data).unwrap(),
             [8; 32]

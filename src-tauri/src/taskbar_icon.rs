@@ -1,26 +1,12 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
-use unicode_segmentation::UnicodeSegmentation;
-
-const MAX_BADGE_GRAPHEMES: usize = 3;
-
-/// The taskbar badge is the last one to three user-perceived characters from NAME.
-/// Short names are never padded, so `A`, `AB`, and `ABC` stay exactly that.
-pub(crate) fn badge_label(name: &str) -> String {
-    let mut graphemes: Vec<&str> = UnicodeSegmentation::graphemes(name, true)
-        .rev()
-        .take(MAX_BADGE_GRAPHEMES)
-        .collect();
-    graphemes.reverse();
-    graphemes.concat()
-}
 
 pub(crate) fn prepare_profile_binary(
     original: &Path,
     profile_id: &str,
-    profile_name: &str,
+    label: &str,
 ) -> Result<PathBuf> {
-    windows::prepare_profile_binary(original, profile_id, profile_name)
+    windows::prepare_profile_binary(original, profile_id, label)
 }
 
 pub(crate) fn remove_profile_launchers(profile_id: &str) {
@@ -36,7 +22,6 @@ pub(crate) fn apply_launcher_taskbar_icon(window: isize, icon_dir: &Path) -> Res
 }
 
 mod windows {
-    use super::badge_label;
     use anyhow::{Context, Result};
     use ico::{IconDir, IconDirEntry, IconImage, ResourceType};
     use std::ffi::{c_void, OsStr, OsString};
@@ -288,7 +273,7 @@ mod windows {
     pub(super) fn prepare_profile_binary(
         original: &Path,
         profile_id: &str,
-        profile_name: &str,
+        label: &str,
     ) -> Result<PathBuf> {
         if !profile_id
             .chars()
@@ -301,7 +286,6 @@ mod windows {
             .parent()
             .context("browser executable has no parent directory")?;
         let metadata = fs::metadata(original).context("read browser executable metadata")?;
-        let label = badge_label(profile_name);
         let modified = metadata
             .modified()
             .ok()
@@ -324,7 +308,7 @@ mod windows {
             // free to show Chromium's default/cached icon.
             let icon_path = profile_icon_path(&target);
             if !icon_path.exists() {
-                let icon = build_badged_icon(&label)?;
+                let icon = build_badged_icon(label)?;
                 write_icon_sidecar(&icon_path, &icon)?;
             }
             cleanup_stale_launchers(parent, profile_id, Some(&target));
@@ -345,7 +329,7 @@ mod windows {
         })?;
 
         let result = (|| -> Result<()> {
-            let icon = build_badged_icon(&label)?;
+            let icon = build_badged_icon(label)?;
             patch_main_icon(&temporary, &icon)?;
             match fs::rename(&temporary, &target) {
                 Ok(()) => Ok(()),
@@ -1224,6 +1208,80 @@ mod windows {
         use std::io::Cursor;
 
         #[test]
+        fn resolved_taskbar_label_becomes_the_live_window_icon() {
+            use super::{
+                apply_window_callback, prepare_profile_binary, profile_app_id, profile_icon_path,
+                wide_null, LoadedIcons, WindowApplyContext,
+            };
+            use std::{ffi::OsStr, fs, ptr::null_mut};
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, SendMessageW, WM_GETICON, WS_OVERLAPPEDWINDOW,
+            };
+
+            let fixture = crate::store::TestStore::new();
+            let original = fixture.root.join("runtime.exe");
+            fs::copy(std::env::current_exe().unwrap(), &original).unwrap();
+            let id = "taskbar-label-icon";
+            let mut profile: crate::profile::StoredProfile =
+                serde_json::from_value(serde_json::json!({"name": "Shop-123"})).unwrap();
+            let automatic =
+                prepare_profile_binary(&original, id, &profile.effective_taskbar_label()).unwrap();
+            assert_eq!(
+                fs::read(profile_icon_path(&automatic)).unwrap(),
+                build_badged_icon("123").unwrap()
+            );
+            profile.meta.taskbar_label = crate::profile::normalize_taskbar_label("Q.7").unwrap();
+            let custom =
+                prepare_profile_binary(&original, id, &profile.effective_taskbar_label()).unwrap();
+            assert_ne!(custom, automatic);
+            let icon_path = profile_icon_path(&custom);
+            assert_eq!(
+                fs::read(&icon_path).unwrap(),
+                build_badged_icon("Q.7").unwrap()
+            );
+            let icons = LoadedIcons::from_icon_file(&icon_path).unwrap();
+            let app_id = wide_null(OsStr::new(&profile_app_id(id, &custom)));
+            let mut context = WindowApplyContext {
+                pid: std::process::id(),
+                executable: &custom,
+                icons: &icons,
+                app_id: app_id.as_ptr(),
+                matched_windows: 0,
+            };
+            let class = wide_null(OsStr::new("STATIC"));
+            // Real HWND, hidden so the test does not affect the user's desktop.
+            unsafe {
+                let window = CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    class.as_ptr(),
+                    WS_OVERLAPPEDWINDOW,
+                    0,
+                    0,
+                    100,
+                    100,
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                );
+                assert!(!window.is_null(), "{}", std::io::Error::last_os_error());
+                apply_window_callback(
+                    window as isize,
+                    (&mut context as *mut WindowApplyContext) as isize,
+                );
+                let expected = icons.profile_window_icons(window as isize);
+                let actual = (
+                    SendMessageW(window, WM_GETICON, 1, 0),
+                    SendMessageW(window, WM_GETICON, 0, 0),
+                );
+                DestroyWindow(window);
+                assert_eq!(context.matched_windows, 1);
+                assert_eq!(actual, expected);
+            }
+        }
+
+        #[test]
         fn generated_icon_contains_every_native_windows_size() {
             let icon = build_badged_icon("111").expect("generate test taskbar icon");
             let entries = parse_ico(&icon).expect("parse generated taskbar icon");
@@ -1465,27 +1523,5 @@ mod windows {
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::badge_label;
-
-    #[test]
-    fn badge_uses_up_to_three_trailing_characters_without_padding() {
-        assert_eq!(badge_label("A"), "A");
-        assert_eq!(badge_label("ABC"), "ABC");
-        assert_eq!(badge_label("ABCD"), "BCD");
-        assert_eq!(badge_label("ABCDE"), "CDE");
-    }
-
-    #[test]
-    fn badge_truncation_is_unicode_safe() {
-        assert_eq!(badge_label("浏览器"), "浏览器");
-        assert_eq!(badge_label("一号浏览器"), "浏览器");
-        assert_eq!(badge_label("A🧩环境"), "🧩环境");
-        assert_eq!(badge_label("五e\u{301}六七八"), "六七八");
-        assert_eq!(badge_label("X👨‍👩‍👧‍👦YZ"), "👨‍👩‍👧‍👦YZ");
     }
 }

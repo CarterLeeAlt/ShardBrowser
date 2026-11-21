@@ -397,6 +397,8 @@ function useContextMenu() {
 type ProfileMeta = {
   id: string;
   name: string;
+  taskbar_label: string;
+  taskbar_label_custom: boolean;
   notes: string;
   proxy_id: string | null;
   last_launched_at: string | null;
@@ -1254,6 +1256,7 @@ const listCollisionDetection: CollisionDetection = (args) => {
     : hitIndex < activeIndex && pointer.y > midpoint ? hitIndex + 1 : hitIndex;
   return [{ id: items[index] }];
 };
+type ProfileTextField = "name" | "label";
 
 const listKeyboardCoordinates: KeyboardCoordinateGetter = (event, { context, currentCoordinates }) => {
   if (event.code !== "ArrowUp" && event.code !== "ArrowDown") return;
@@ -1455,7 +1458,7 @@ function BrowsersView() {
   const queuedLaunches = useRef(new Set<string>());
   const [assigning, setAssigning] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [renaming, setRenaming] = useState<{ id: string; draft: string } | null>(null);
+  const [renaming, setRenaming] = useState<{ id: string; field: ProfileTextField; draft: string } | null>(null);
   const [fingerprints, setFingerprints] = useState<FingerprintEntry[]>([]);
   const [quickEdit, setQuickEdit] = useState<{ kind: "proxy" | "notes"; profile: ProfileMeta } | null>(null);
   // A profile may be launched while one of its editors is already open.
@@ -1767,38 +1770,40 @@ function BrowsersView() {
     { label: tr("Delete"), onClick: () => remove(p.id), danger: true },
   ];
 
-  const beginRename = (p: ProfileMeta) => {
+  const beginRename = (p: ProfileMeta, field: ProfileTextField) => {
     if (running[p.id] || startBusy.has(p.id) || backendActiveIds.has(p.id)) return;
     if (expanded === p.id) {
       setExpanded(null);
       setDraft(null);
     }
-    setRenaming({ id: p.id, draft: p.name });
+    setRenaming({ id: p.id, field, draft: field === "name" ? p.name : p.taskbar_label });
   };
 
-  const commitRename = async (id: string, draftName: string) => {
+  const commitRename = async (id: string, field: ProfileTextField, value: string) => {
+    const closeEditor = () => setRenaming((current) => current?.id === id && current.field === field ? null : current);
     const profile = profiles.find((p) => p.id === id);
     if (!profile) {
-      setRenaming((current) => current?.id === id ? null : current);
+      closeEditor();
       return;
     }
     if (running[id] || startBusy.has(id) || backendActiveIds.has(id)) {
-      setRenaming((current) => current?.id === id ? null : current);
+      closeEditor();
       toast.err(tr("Stop the browser or wait for it to finish starting before renaming"));
       return;
     }
 
-    const name = draftName;
-    if (name === profile.name) {
-      setRenaming((current) => current?.id === id ? null : current);
+    const original = field === "name" ? profile.name : profile.taskbar_label;
+    if (value === original) {
+      closeEditor();
       return;
     }
-    const error = displayNameError(name);
+    const error = displayNameError(value, undefined, field === "label");
     if (error) { toast.err(error); return; }
 
     try {
-      await invoke("profile_rename", { id, name });
-      setRenaming((current) => current?.id === id ? null : current);
+      if (field === "name") await invoke("profile_rename", { id, name: value });
+      else await invoke("profile_set_taskbar_label", { id, label: value });
+      closeEditor();
       await reload();
     } catch (e) {
       toast.err(String(e));
@@ -2209,7 +2214,7 @@ function BrowsersView() {
               }}
             />
           </div>
-          <div>{tr("Name")}</div><div>{tr("Status")}</div><div className="head-proxy">{tr("Proxy")}</div><div>{tr("Notes")}</div><div className="head-lastrun">{tr("Last run")}</div><div className="head-actions">{tr("ACTIONS")}</div>
+          <div>{tr("Name")}</div><div>{tr("Label")}</div><div>{tr("Status")}</div><div className="head-proxy">{tr("Proxy")}</div><div>{tr("Notes")}</div><div className="head-lastrun">{tr("Last run")}</div><div className="head-actions">{tr("ACTIONS")}</div>
         </div>
         {expanded === "__new__" && draft && (
           <div className="row-wrap row-expanded row-new">
@@ -2248,6 +2253,23 @@ function BrowsersView() {
           const isActive = isRunning || isStarting || isReserved;
           const isExpanded = expanded === p.id;
           const isSel = selected.has(p.id);
+          const edit = renaming?.id === p.id ? renaming : null;
+          const renderInlineEdit = (field: ProfileTextField) => edit?.field === field && (
+            <input
+              autoFocus
+              className="inline-rename profile-inline-rename"
+              value={edit.draft}
+              onClick={(e) => e.stopPropagation()}
+              onFocus={field === "label" ? (e) => e.currentTarget.select() : undefined}
+              onChange={(e) => setRenaming({ id: p.id, field, draft: e.target.value })}
+              onBlur={(e) => commitRename(p.id, field, e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") e.currentTarget.blur();
+                else if (e.key === "Escape") setRenaming(null);
+              }}
+              aria-label={field === "name" ? tr("Rename {0}", p.name) : tr("Taskbar label for {0}", p.name)}
+            />
+          );
           return (
             <SortableRow
               key={p.id}
@@ -2284,27 +2306,23 @@ function BrowsersView() {
                 </div>
                 <div
                   className={`cell-name ${isActive ? "cell-locked" : ""}`}
-                  onClick={isActive || renaming?.id === p.id ? undefined : () => beginRename(p)}
+                  onClick={isActive || edit?.field === "name" ? undefined : () => beginRename(p, "name")}
                   title={isActive ? tr("Stop the browser or wait for it to finish starting before renaming") : tr("Click to rename")}
                 >
-                  {renaming?.id === p.id ? (
-                    <input
-                      autoFocus
-                      className="inline-rename profile-inline-rename"
-                      value={renaming.draft}
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={(e) => setRenaming({ id: p.id, draft: e.target.value })}
-                      onBlur={(e) => commitRename(p.id, e.currentTarget.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") e.currentTarget.blur();
-                        else if (e.key === "Escape") setRenaming(null);
-                      }}
-                      aria-label={tr("Rename {0}", p.name)}
-                    />
-                  ) : (
-                    <div className="name-main">{p.name}</div>
-                  )}
+                  {edit?.field === "name" ? renderInlineEdit("name") : <div className="name-main">{p.name}</div>}
                   <div className="name-sub">{p.id.slice(0, 8)}</div>
+                </div>
+                <div className="cell-label" title={isActive ? tr("Stop the browser before editing its taskbar label") : undefined}>
+                  {edit?.field === "label" ? renderInlineEdit("label") : (
+                    <button
+                      type="button"
+                      className="taskbar-label-edit cell-click"
+                      onClick={() => beginRename(p, "label")}
+                      disabled={isActive}
+                      aria-label={tr("Edit taskbar label for {0}: {1}", p.name, p.taskbar_label)}
+                      title={isActive ? undefined : p.taskbar_label_custom ? tr("Custom taskbar label. Clear it to use NAME again.") : tr("Automatic taskbar label from NAME")}
+                    >{p.taskbar_label || "—"}</button>
+                  )}
                 </div>
                 <div className="cell-status">
                   <span className={`pill-status ${isRunning ? "ps-on" : "ps-off"}`}>

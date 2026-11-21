@@ -5,12 +5,17 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use unicode_segmentation::UnicodeSegmentation;
+
+const MAX_TASKBAR_LABEL_CHARS: usize = 3;
 
 /// Launcher-side view of a profile (wraps raw FingerprintConfig JSON).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileMeta {
     pub id: String,
     pub name: String,
+    pub taskbar_label: String,
+    pub taskbar_label_custom: bool,
     pub notes: String,
     pub proxy_id: Option<String>,
     pub last_launched_at: Option<String>,
@@ -56,6 +61,13 @@ pub struct StoredMeta {
     /// Source library fingerprint id; MUST round-trip — drives the editor GPU select.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_preset_id: Option<String>,
+    /// None derives the taskbar label from the current NAME at display time.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_taskbar_label"
+    )]
+    pub taskbar_label: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
     /// Inline proxy from temporary profile API; not in proxy store.
@@ -84,6 +96,67 @@ pub struct SessionNetworkIdentity {
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+pub(crate) fn normalize_taskbar_label(label: &str) -> Result<Option<String>> {
+    let label = crate::display_name::normalize_optional(label)?;
+    if label.len() > MAX_TASKBAR_LABEL_CHARS {
+        anyhow::bail!("Taskbar label must have at most 3 characters");
+    }
+    Ok((!label.is_empty()).then(|| label.to_string()))
+}
+
+fn deserialize_taskbar_label<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    match Option::<String>::deserialize(deserializer)? {
+        Some(label) => normalize_taskbar_label(&label).map_err(serde::de::Error::custom),
+        None => Ok(None),
+    }
+}
+
+impl StoredProfile {
+    fn display_name(&self) -> &str {
+        self.config
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("(unnamed)")
+    }
+
+    pub(crate) fn effective_taskbar_label(&self) -> String {
+        if let Some(label) = &self.meta.taskbar_label {
+            return label.clone();
+        }
+        let name = self.display_name();
+        let mut clusters = name.graphemes(true);
+        for _ in 0..MAX_TASKBAR_LABEL_CHARS {
+            clusters.next_back();
+        }
+        name[clusters.as_str().len()..].to_string()
+    }
+
+    pub(crate) fn into_summary(self) -> ProfileMeta {
+        let name = self.display_name().to_string();
+        let taskbar_label = self.effective_taskbar_label();
+        ProfileMeta {
+            id: self.meta.id,
+            name,
+            taskbar_label,
+            taskbar_label_custom: self.meta.taskbar_label.is_some(),
+            notes: self
+                .config
+                .get("notes")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            proxy_id: self.meta.proxy_id,
+            last_launched_at: self.meta.last_launched_at,
+            created_at: self.meta.created_at,
+            pinned: self.meta.pinned,
+            folder: self.meta.folder,
+            total_runtime_ms: self.meta.total_runtime_ms,
+        }
+    }
 }
 
 pub fn validate_profile_id(id: &str) -> Result<()> {
@@ -613,29 +686,7 @@ pub fn list_all() -> Result<Vec<ProfileMeta>> {
                 stored.meta.created_at = Some(ts);
             }
         }
-        let name = stored
-            .config
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("(unnamed)")
-            .to_string();
-        let notes = stored
-            .config
-            .get("notes")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        out.push(ProfileMeta {
-            id: stored.meta.id,
-            name,
-            notes,
-            proxy_id: stored.meta.proxy_id,
-            last_launched_at: stored.meta.last_launched_at,
-            created_at: stored.meta.created_at,
-            pinned: stored.meta.pinned,
-            folder: stored.meta.folder,
-            total_runtime_ms: stored.meta.total_runtime_ms,
-        });
+        out.push(stored.into_summary());
     }
     // Newest-first by created_at; name fallback for same-second ties. Manual
     // display order is applied by the UI-facing Tauri command afterwards.
@@ -1268,7 +1319,7 @@ pub fn clone_profile(id: &str) -> Result<ProfileMeta> {
     src.meta.total_runtime_ms = 0;
     src.meta.session_network_identity = None;
     src.config
-        .insert("name".into(), serde_json::Value::String(clone_name.clone()));
+        .insert("name".into(), serde_json::Value::String(clone_name));
     // Re-randomize CPU/RAM/platform_version so the copy doesn't collide on those axes.
     crate::randomize_platform_version(&mut src.config);
     crate::randomize_hardware(&mut src.config);
@@ -1276,22 +1327,7 @@ pub fn clone_profile(id: &str) -> Result<ProfileMeta> {
     // the current default noise policy and derive fresh seeds for the copy.
     crate::apply_default_noise(&mut src.config);
     save_new_unique(&mut src)?;
-    Ok(ProfileMeta {
-        id: src.meta.id,
-        name: clone_name,
-        notes: src
-            .config
-            .get("notes")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        proxy_id: src.meta.proxy_id,
-        last_launched_at: None,
-        created_at: src.meta.created_at,
-        pinned: false,
-        folder: src.meta.folder,
-        total_runtime_ms: 0,
-    })
+    Ok(src.into_summary())
 }
 
 #[derive(serde::Deserialize)]
@@ -1535,6 +1571,73 @@ mod tests {
     };
     use serde_json::json;
     use std::path::PathBuf;
+
+    #[test]
+    fn automatic_taskbar_label_preserves_short_names_and_unicode_characters() {
+        for (name, label) in [
+            ("", ""),
+            ("A", "A"),
+            ("AB", "AB"),
+            ("ABC", "ABC"),
+            ("Shop-123", "123"),
+            ("North AB", " AB"),
+            (
+                "\u{4e00}\u{53f7}\u{6d4f}\u{89c8}\u{5668}",
+                "\u{6d4f}\u{89c8}\u{5668}",
+            ),
+            (
+                "X\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}YZ",
+                "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}YZ",
+            ),
+        ] {
+            let profile: StoredProfile = serde_json::from_value(json!({"name": name})).unwrap();
+            assert_eq!(profile.effective_taskbar_label(), label);
+        }
+    }
+
+    #[test]
+    fn taskbar_label_updates_keep_name_independent_and_can_return_to_auto() {
+        let _test = crate::store::TestStore::new();
+        let id = "label-test";
+        let mut profile: StoredProfile =
+            serde_json::from_value(json!({"_meta": {"id": id}, "name": "Shop-123"})).unwrap();
+        super::save_raw(&mut profile).unwrap();
+        assert_eq!(super::list_all().unwrap()[0].taskbar_label, "123");
+        assert!(!super::list_all().unwrap()[0].taskbar_label_custom);
+        crate::profile_rename(id.into(), "Shop-456".into()).unwrap();
+        assert_eq!(super::list_all().unwrap()[0].taskbar_label, "456");
+        for invalid in ["LONG", "A:B", "A\t", "\u{6807}"] {
+            assert!(crate::profile_set_taskbar_label(id.into(), invalid.into()).is_err());
+            assert!(serde_json::from_value::<StoredProfile>(
+                json!({"_meta": {"taskbar_label": invalid}})
+            )
+            .is_err());
+        }
+        let reservation = crate::process::Tracker::shared()
+            .reserve_launch(id)
+            .unwrap();
+        assert!(crate::profile_set_taskbar_label(id.into(), "123".into()).is_err());
+        drop(reservation);
+        crate::profile_set_taskbar_label(id.into(), " (.) ".into()).unwrap();
+        crate::profile_rename(id.into(), "New Name".into()).unwrap();
+        let summary = super::list_all().unwrap().remove(0);
+        assert_eq!(summary.name, "New Name");
+        assert_eq!(summary.taskbar_label, "(.)");
+        assert!(summary.taskbar_label_custom);
+        let cloned = super::clone_profile(id).unwrap();
+        assert_eq!(cloned.taskbar_label, "(.)");
+        crate::profile_set_taskbar_label(id.into(), "A B".into()).unwrap();
+        assert_eq!(
+            super::load_raw(id).unwrap().effective_taskbar_label(),
+            "A B"
+        );
+        crate::profile_set_taskbar_label(id.into(), "  ".into()).unwrap();
+        let stored = super::load_raw(id).unwrap();
+        assert!(serde_json::to_value(&stored).unwrap()["_meta"]
+            .get("taskbar_label")
+            .is_none());
+        assert_eq!(stored.effective_taskbar_label(), "ame");
+    }
 
     #[test]
     fn editor_revision_rejects_stale_save_and_is_stable_with_inline_credentials() {

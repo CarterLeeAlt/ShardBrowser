@@ -759,6 +759,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 /* ===== rows ===== */
 
 .rows {
+  --browser-table-min-width: 1142px;
   container-type: inline-size;
   background: var(--bg-1);
   border: 1px solid var(--bd-1);
@@ -766,7 +767,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   overflow-x: auto;
 }
 .t-cols {
-  min-width: 1070px;
+  min-width: var(--browser-table-min-width);
   /* Keep the utility and action tracks fixed, then distribute only the
      remaining room between data columns. minmax() preserves every existing
      column floor without letting percentage tracks overrun the container. */
@@ -776,6 +777,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
     4px                     /* shard strip */
     28px                    /* checkbox */
     minmax(140px, 1fr)      /* name */
+    64px                    /* taskbar label */
     minmax(100px, 1fr)      /* status */
     minmax(227px, 1fr)      /* proxy */
     minmax(183px, 1fr)      /* notes */
@@ -1808,6 +1810,22 @@ button.status-pill.status-link:active { transform: translateY(1px); }
 .proxy-location {
   display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
 }
+.taskbar-label-edit {
+  display: block;
+  width: 100%;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--tx-2);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.taskbar-label-edit:focus-visible { outline: 1px solid var(--accent-hi); outline-offset: -1px; }
+.taskbar-label-edit:disabled { cursor: not-allowed; color: var(--tx-2); }
 .proxy-country {
   display: inline-flex; align-items: center; gap: 6px;
   min-width: 0;
@@ -2363,7 +2381,7 @@ button.status-pill.status-link:active { transform: translateY(1px); }
 .storage-table td:nth-child(2) { min-width: 160px; max-width: 250px; }
 .storage-table tr:last-child td { border-bottom: 0; }
 .operation-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; margin-bottom: 14px; border: 1px solid var(--bd-2); border-radius: var(--radius-lg); background: var(--bg-2); overflow-wrap: anywhere; }
-.row-wrap:has(> .t-cols) { min-width: 1070px; }
+.row-wrap:has(> .t-cols) { min-width: var(--browser-table-min-width); }
 .row-wrap:has(> .p-cols) { min-width: 1110px; }
 .operation-banner p { margin: 6px 0 0; }
 .operation-banner button { flex-shrink: 0; }

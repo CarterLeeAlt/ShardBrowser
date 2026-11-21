@@ -270,6 +270,8 @@ async fn list_profiles() -> ApiResult {
             json!({
                 "id": m.id,
                 "name": m.name,
+                "taskbar_label": m.taskbar_label,
+                "taskbar_label_custom": m.taskbar_label_custom,
                 "notes": m.notes,
                 "proxy_id": m.proxy_id,
                 "last_launched_at": m.last_launched_at,

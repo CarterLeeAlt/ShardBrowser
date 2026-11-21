@@ -141,6 +141,21 @@ fn profile_rename(id: String, name: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn profile_set_taskbar_label(id: String, label: String) -> Result<(), String> {
+    let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
+    profile::ensure_stopped(&id).map_err(|e| e.to_string())?;
+    let label = profile::normalize_taskbar_label(&label).map_err(|e| e.to_string())?;
+    let mut stored = profile::load_raw(&id).map_err(|e| e.to_string())?;
+    if stored.meta.taskbar_label == label {
+        return Ok(());
+    }
+    stored.meta.taskbar_label = label;
+    profile::save_raw(&mut stored).map_err(|e| e.to_string())?;
+    notify_store_changed("profiles");
+    Ok(())
+}
+
 /// Recover library fingerprint id by matching webgl.renderer (+ screen if ambiguous).
 pub(crate) fn infer_gpu_preset_id(config: &serde_json::Map<String, Value>) -> Option<String> {
     let renderer = config.get("webgl")?.get("renderer")?.as_str()?;
@@ -613,29 +628,7 @@ pub fn save_profile_core(
             );
         }
     }
-    let name = stored
-        .config
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("(unnamed)")
-        .to_string();
-    let notes = stored
-        .config
-        .get("notes")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    Ok(profile::ProfileMeta {
-        id: stored.meta.id,
-        name,
-        notes,
-        proxy_id: stored.meta.proxy_id,
-        last_launched_at: stored.meta.last_launched_at,
-        created_at: stored.meta.created_at,
-        pinned: stored.meta.pinned,
-        folder: stored.meta.folder,
-        total_runtime_ms: stored.meta.total_runtime_ms,
-    })
+    Ok(stored.into_summary())
 }
 
 #[tauri::command]
@@ -1462,6 +1455,7 @@ pub fn run() {
             profile_move_order,
             profile_get,
             profile_rename,
+            profile_set_taskbar_label,
             profile_save,
             profile_delete,
             profile_trash_many,

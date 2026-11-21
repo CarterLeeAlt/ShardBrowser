@@ -154,15 +154,11 @@ pub async fn launch_profile(
 
     // Prepare files only after the bound proxy passes preflight.
     let udd = profile::user_data_dir(profile_id)?;
-    let profile_name = stored
-        .config
-        .get("name")
-        .and_then(|value| value.as_str())
-        .unwrap_or("(unnamed)");
     let launch_bin = if headless {
         bin.clone()
     } else {
-        match crate::taskbar_icon::prepare_profile_binary(&bin, profile_id, profile_name) {
+        let taskbar_label = stored.effective_taskbar_label();
+        match crate::taskbar_icon::prepare_profile_binary(&bin, profile_id, &taskbar_label) {
             Ok(profile_binary) => profile_binary,
             Err(error) => {
                 eprintln!(
