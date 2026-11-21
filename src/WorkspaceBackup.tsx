@@ -91,7 +91,7 @@ export function WorkspaceBackup({ run, status, result }: ReturnType<typeof useWo
       <button className="btn-primary" disabled={status !== null} onClick={() => void run("export")}><Download /> {tr("Export complete backup")}</button>
       <button className="btn-ghost" disabled={status !== null} onClick={() => void run("restore")}><Upload /> {tr("Restore from backup")}</button>
     </div>
-    {status && status !== "confirm" && <p role="status" className="muted small">{tr(status === "export" ? "Exporting backup…" : status === "inspect" ? "Verifying backup…" : "Restoring backup…")}</p>}
-    {result && <p role={result.error ? "alert" : "status"} className={result.error ? "storage-error" : "muted small"}>{result.message}</p>}
+    {status && status !== "confirm" && <p role="status" className="muted">{tr(status === "export" ? "Exporting backup…" : status === "inspect" ? "Verifying backup…" : "Restoring backup…")}</p>}
+    {result && <p role={result.error ? "alert" : "status"} className={result.error ? "storage-error" : "muted"}>{result.message}</p>}
   </section>;
 }

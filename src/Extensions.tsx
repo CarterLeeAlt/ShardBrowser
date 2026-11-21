@@ -92,7 +92,7 @@ export function ExtensionsView({ confirm, onSuccess, onError }: StorageViewProps
         const referenced = entry.profile_names.length > 0 || entry.trash_count > 0 || !!entry.usage_error;
         return <article className="library-card" key={entry.id}>
           <header className="library-card-head"><h3 title={entry.name}>{entry.name}</h3><span className="library-tag" title={entry.version}>{entry.version}</span></header>
-          <p className="muted small">{entry.description}</p>
+          <p className="muted">{entry.description}</p>
           <code className="extension-id">{entry.id}</code>
           {entry.error && <p className="storage-error" role="alert">{tr("Extension unavailable: {0}", entry.error)}</p>}
           {entry.usage_error && <p className="storage-error" role="alert">{entry.usage_error}</p>}

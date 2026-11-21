@@ -75,11 +75,14 @@
 
 :root {
   --font-app: "Inter", "Noto Sans SC";
-  --text-small: 12px;
+  --text-navigation: 14px;
   --text-body: 13px;
-  --text-heading: 14px;
-  --text-page: 18px;
-  /* ShardX typography has two semantic levels only. */
+  --text-small: 12px;
+  --text-table-detail: 11px;
+  --line-navigation: 20px;
+  --line-body: 18px;
+  --line-small: 16px;
+  --line-table-detail: 14px;
   --font-weight-regular: 400;
   --font-weight-emphasis: 600;
 }

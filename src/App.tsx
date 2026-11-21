@@ -389,8 +389,6 @@ function useContextMenu() {
 type ProfileMeta = {
   id: string;
   name: string;
-  taskbar_label: string;
-  taskbar_label_custom: boolean;
   notes: string;
   proxy_id: string | null;
   last_launched_at: string | null;
@@ -1106,7 +1104,6 @@ const listPointerCollision: CollisionDetection = (args) => {
     : hitIndex < activeIndex && pointer.y > midpoint ? hitIndex + 1 : hitIndex;
   return [{ id: items[index] }];
 };
-type ProfileTextField = "name" | "label";
 
 function useListSort() {
   const keyboardTarget = useRef<UniqueIdentifier | null>(null);
@@ -1343,7 +1340,7 @@ function BrowsersView() {
   const queuedLaunches = useRef(new Set<string>());
   const [assigning, setAssigning] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [renaming, setRenaming] = useState<{ id: string; field: ProfileTextField; draft: string } | null>(null);
+  const [renaming, setRenaming] = useState<{ id: string; draft: string } | null>(null);
   const [fingerprints, setFingerprints] = useState<FingerprintEntry[]>([]);
   const [quickEdit, setQuickEdit] = useState<{ kind: "proxy" | "notes"; profile: ProfileMeta } | null>(null);
   // A profile may be launched while one of its editors is already open.
@@ -1637,17 +1634,17 @@ function BrowsersView() {
     { label: tr("Delete"), onClick: () => remove(p.id), danger: true },
   ];
 
-  const beginRename = (p: ProfileMeta, field: ProfileTextField) => {
+  const beginRename = (p: ProfileMeta) => {
     if (running[p.id] || startBusy.has(p.id) || backendActiveIds.has(p.id)) return;
     if (expanded === p.id) {
       setExpanded(null);
       setDraft(null);
     }
-    setRenaming({ id: p.id, field, draft: field === "name" ? p.name : p.taskbar_label });
+    setRenaming({ id: p.id, draft: p.name });
   };
 
-  const commitRename = async (id: string, field: ProfileTextField, value: string) => {
-    const closeEditor = () => setRenaming((current) => current?.id === id && current.field === field ? null : current);
+  const commitRename = async (id: string, value: string) => {
+    const closeEditor = () => setRenaming((current) => current?.id === id ? null : current);
     const profile = profiles.find((p) => p.id === id);
     if (!profile) {
       closeEditor();
@@ -1659,17 +1656,15 @@ function BrowsersView() {
       return;
     }
 
-    const original = field === "name" ? profile.name : profile.taskbar_label;
-    if (value === original) {
+    if (value === profile.name) {
       closeEditor();
       return;
     }
-    const error = displayNameError(value, undefined, field === "label");
+    const error = displayNameError(value);
     if (error) { toast.err(error); return; }
 
     try {
-      if (field === "name") await invoke("profile_rename", { id, name: value });
-      else await invoke("profile_set_taskbar_label", { id, label: value });
+      await invoke("profile_rename", { id, name: value });
       closeEditor();
       await reload();
     } catch (e) {
@@ -2070,7 +2065,7 @@ function BrowsersView() {
               }}
             />
           </div>
-          <div>{tr("Name")}</div><div>{tr("Label")}</div><div>{tr("Status")}</div><div className="head-proxy">{tr("Proxy")}</div><div>{tr("Notes")}</div><div className="head-lastrun">{tr("Last run")}</div><div className="head-actions">{tr("Actions")}</div>
+          <div>{tr("Name")}</div><div>{tr("Status")}</div><div className="head-proxy">{tr("Proxy")}</div><div>{tr("Notes")}</div><div className="head-lastrun">{tr("Last run")}</div><div className="head-actions">{tr("Actions")}</div>
         </div>
         {expanded === "__new__" && draft && (
           <div className="row-wrap row-expanded row-new">
@@ -2110,22 +2105,6 @@ function BrowsersView() {
           const isExpanded = expanded === p.id;
           const isSel = selected.has(p.id);
           const edit = renaming?.id === p.id ? renaming : null;
-          const renderInlineEdit = (field: ProfileTextField) => edit?.field === field && (
-            <input
-              autoFocus
-              className="inline-rename profile-inline-rename"
-              value={edit.draft}
-              onClick={(e) => e.stopPropagation()}
-              onFocus={field === "label" ? (e) => e.currentTarget.select() : undefined}
-              onChange={(e) => setRenaming({ id: p.id, field, draft: e.target.value })}
-              onBlur={(e) => commitRename(p.id, field, e.currentTarget.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") e.currentTarget.blur();
-                else if (e.key === "Escape") setRenaming(null);
-              }}
-              aria-label={field === "name" ? tr("Rename {0}", p.name) : tr("Taskbar label for {0}", p.name)}
-            />
-          );
           return (
             <SortableRow
               key={p.id}
@@ -2163,23 +2142,24 @@ function BrowsersView() {
                 </div>
                 <div
                   className={`cell-name ${isActive ? "cell-locked" : ""}`}
-                  onClick={isActive || edit?.field === "name" ? undefined : () => beginRename(p, "name")}
+                  onClick={isActive || edit ? undefined : () => beginRename(p)}
                   title={isActive ? tr("Stop the browser or wait for it to finish starting before renaming") : tr("Click to rename")}
                 >
-                  {edit?.field === "name" ? renderInlineEdit("name") : <div className="name-main" title={p.name}>{p.name}</div>}
-                  <div className="name-sub">{p.id.slice(0, 8)}</div>
-                </div>
-                <div className="cell-label" title={isActive ? tr("Stop the browser before editing its taskbar label") : undefined}>
-                  {edit?.field === "label" ? renderInlineEdit("label") : (
-                    <button
-                      type="button"
-                      className="taskbar-label-edit cell-click"
-                      onClick={() => beginRename(p, "label")}
-                      disabled={isActive}
-                      aria-label={tr("Edit taskbar label for {0}: {1}", p.name, p.taskbar_label)}
-                      title={isActive ? undefined : p.taskbar_label_custom ? tr("Custom taskbar label. Clear it to use NAME again.") : tr("Automatic taskbar label from NAME")}
-                    >{p.taskbar_label || "—"}</button>
-                  )}
+                  {edit ? (
+                    <input
+                      autoFocus
+                      className="inline-rename profile-inline-rename"
+                      value={edit.draft}
+                      onChange={(e) => setRenaming({ id: p.id, draft: e.target.value })}
+                      onBlur={(e) => commitRename(p.id, e.currentTarget.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") e.currentTarget.blur();
+                        else if (e.key === "Escape") setRenaming(null);
+                      }}
+                      aria-label={tr("Rename {0}", p.name)}
+                    />
+                  ) : <div className="name-main" title={p.name}>{p.name}</div>}
+                  <div className="name-sub table-detail">{p.id.slice(0, 8)}</div>
                 </div>
                 <div className="cell-status">
                   <span className={`pill-status ${isRunning ? "ps-on" : "ps-off"}`}>
@@ -2204,13 +2184,13 @@ function BrowsersView() {
                         )}
                       </div>
                       <div
-                        className={`proxy-detail ${proxyDetailText ? "" : "muted"}`}
+                        className="proxy-detail table-detail"
                         title={proxyDetailText || tr("No test data")}
                       >
                         <span className="proxy-detail-text">{proxyDetailText || tr("No test data")}</span>
                       </div>
                     </>
-                  ) : <span className="muted small">{tr("— direct —")}</span>}
+                  ) : <span className="muted">{tr("— direct —")}</span>}
                 </div>
                 <div
                   className={`cell-notes cell-click ${isActive ? "cell-locked" : ""} ${(p.notes || "").includes("\n") ? "notes-multi" : ""}`}
@@ -2219,7 +2199,7 @@ function BrowsersView() {
                 >
                   {p.notes ? <span className="notes-text">{p.notes}</span> : <span className="muted">—</span>}
                 </div>
-                <div className="cell-lastrun"><span className="muted small">{p.last_launched_at ? fmtTs(p.last_launched_at) : tr("never")}</span></div>
+                <div className="cell-lastrun"><span className="muted">{p.last_launched_at ? fmtTs(p.last_launched_at) : tr("never")}</span></div>
                 <div className="row-actions">
                   <button
                     className={`btn-launch ${isRunning ? "btn-launch-stop" : ""}`}
@@ -2354,7 +2334,7 @@ function AssignProxiesDialog({ profiles, proxies, selected, activeIds, onClose, 
           <button className="icon-btn" disabled={busy} onClick={onClose} aria-label={tr("Close")} title={tr("Close")}><X /></button>
         </header>
         <div className="dialog-body">
-          <p className="muted small">{tr("Profiles and proxies are paired in list order. Profiles without a match keep their current binding.")}</p>
+          <p className="muted">{tr("Profiles and proxies are paired in list order. Profiles without a match keep their current binding.")}</p>
           <div className="assign-proxy-list">
             {proxies.length === 0 && <p>{tr("No proxies available")}</p>}
             {proxies.map((p) => <label className="row-inline" key={p.id}>
@@ -3526,7 +3506,7 @@ function ProxiesView() {
                 <div><span className={`badge badge-${p.kind}`}>{p.kind}</span></div>
                 <div className="cell-hostport">
                   <span
-                    className={`mono small ${isLocked ? "cell-locked" : "cell-click"}`}
+                    className={`mono ${isLocked ? "cell-locked" : "cell-click"}`}
                     onClick={isLocked ? undefined : () => setEditing(p)}
                     title={isLocked ? tr("Stop the browser using this proxy before editing") : tr("Edit proxy")}
                   >
@@ -3539,8 +3519,8 @@ function ProxiesView() {
                       <CountryFlag cc={cc} />
                       <span className="flag">{cc}</span>
                     </span>
-                  ) : <span className="muted small">—</span>}
-                  <span className="proxy-city muted small">{r?.city.trim() || "—"}</span>
+                  ) : <span className="muted">—</span>}
+                  <span className="proxy-city muted table-detail">{r?.city.trim() || "—"}</span>
                 </div>
                 <div>
                   <span className="profile-count" title={tr("{0} profile(s) bound to this proxy", profileCountByProxy[p.id] ?? 0)}>
@@ -3926,7 +3906,7 @@ host:8080               # no auth
 # lines starting with # are ignored`}
                 />
               </label>
-              <p className="muted small">
+              <p className="muted">
                  {tr("Invalid lines must be fixed. Duplicates use type, host, port, and username and are skipped automatically.")} </p>
               {parseIssues.length > 0 && (
                 <div className="bulk-parse-errors" role="alert">
@@ -4121,7 +4101,7 @@ function ProxyEditor({ initial, onClose }: { initial: ProxyEntry; onClose: () =>
           {(p.credentials_configured || p.credentials_unavailable) && credentialsMode === "keep" && (
             <button className="btn-ghost" type="button" onClick={clearCredentials}>{tr("Clear saved credentials")}</button>
           )}
-          {p.credentials_unavailable && credentialsMode === "keep" && <p className="muted small">{tr("Credentials belong to another Windows user. Re-enter both values before testing or launching.")}</p>}
+          {p.credentials_unavailable && credentialsMode === "keep" && <p className="muted">{tr("Credentials belong to another Windows user. Re-enter both values before testing or launching.")}</p>}
         </div>
         <footer className="dialog-foot">
           <button className="btn-ghost" onClick={onClose}>{tr("Cancel")}</button>
@@ -4712,7 +4692,7 @@ function RuntimeUpdateCard() {
       <div className="runtime-update-head">
         <div className="settings-card-heading">
           <h3>{tr("Runtime update check")}</h3>
-          <p className="muted small">
+          <p className="muted">
              {tr("Checks run automatically at startup and every hour. Updates download and install only when you click Update.")} </p>
           <p className="runtime-update-last-check">
             {lastAttempt
@@ -4858,7 +4838,7 @@ function SettingsView({ workspaceBackup }: { workspaceBackup: ReturnType<typeof 
         <WorkspaceBackup {...workspaceBackup} />
         <div className="card settings-card">
           <h3>{tr("Interface language")}</h3>
-          <p className="muted small">{tr("Language changes apply immediately and are saved on this device.")}</p>
+          <p className="muted">{tr("Language changes apply immediately and are saved on this device.")}</p>
           <select aria-label={tr("Interface language")} value={language} onChange={(e) => setLanguage(e.target.value as Language)}>
             <option value="zh">简体中文</option>
             <option value="en">English</option>
@@ -4866,7 +4846,7 @@ function SettingsView({ workspaceBackup }: { workspaceBackup: ReturnType<typeof 
         </div>
         <div className="card settings-card">
           <h3>{tr("Proxy geo checker")}</h3>
-          <p className="muted small">{tr("Preferred free public IP-geo service for manual and scheduled proxy tests. If it times out, returns HTTP 429, or sends invalid JSON, ShardX automatically tries the next provider.")}</p>
+          <p className="muted">{tr("Preferred free public IP-geo service for manual and scheduled proxy tests. If it times out, returns HTTP 429, or sends invalid JSON, ShardX automatically tries the next provider.")}</p>
           <label>
             <span className="lbl">{tr("Preferred provider")}</span>
             <select value={s.geo_checker ?? "ipwho.is"} onChange={(e) => setS({ ...s, geo_checker: e.target.value })}>
@@ -4882,7 +4862,7 @@ function SettingsView({ workspaceBackup }: { workspaceBackup: ReturnType<typeof 
 
       <div className="card settings-card">
         <h3>{tr("Screen resolution")}</h3>
-        <p className="muted small">
+        <p className="muted">
           <strong>{tr("From fingerprint")}</strong>  {tr("reports the screen carried in the bound profile (recommended for anti-detect coherence).")} <strong>  {tr("Real")}</strong>  {tr("lets ShardX expose the host monitor's actual size.")} </p>
         <label>
           <span className="lbl">{tr("Mode")}</span>
@@ -4898,7 +4878,7 @@ function SettingsView({ workspaceBackup }: { workspaceBackup: ReturnType<typeof 
 
       <div className="card settings-card">
         <h3>{tr("Automation API")}</h3>
-        <p className="muted small">
+        <p className="muted">
            {tr("Local HTTP API (axum) for scripting — create/launch/close profiles and get a CDP WebSocket URL. Binds")} <strong>127.0.0.1</strong>  {tr("only, JWT Bearer auth. Changes to enable/port apply after restarting the app.")}{" "}
           <a
             href="#"
@@ -4950,7 +4930,7 @@ function SettingsView({ workspaceBackup }: { workspaceBackup: ReturnType<typeof 
 
       <div className="card settings-card">
         <h3>{tr("MCP server")}</h3>
-        <p className="muted small">
+        <p className="muted">
            {tr("Download the")} <strong>MCP</strong>  {tr("server source (lets an AI client drive profiles and a CDP browser) into a folder you choose. The app does not run it — install its deps and register it with your MCP client per the included README. Requires Node.js.")} </p>
         <button className="btn-ghost" onClick={downloadMcp} disabled={mcpBusy}>
           <Icon.Download size={16} /> {mcpBusy ? tr("Downloading…") : tr("Download MCP server")}
