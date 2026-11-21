@@ -1083,18 +1083,28 @@ fn is_windows_root(path: &str) -> bool {
 /// testable independently of live process inspection.
 fn command_line_uses_user_data_dir(command_line: &str, expected_user_data_dir: &str) -> bool {
     let args = windows_command_line_arguments(command_line);
+    let matches_directory = |value: &str| {
+        let path = Path::new(value);
+        same_windows_path(value, expected_user_data_dir)
+            // The lease stores a canonical path, but CreateProcess receives
+            // the launcher path, which can include a substituted drive.
+            || (path.is_absolute()
+                && std::fs::canonicalize(path).is_ok_and(|resolved| {
+                    same_windows_path(&resolved.to_string_lossy(), expected_user_data_dir)
+                }))
+    };
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
         if let Some((name, value)) = arg.split_once('=') {
             if name.eq_ignore_ascii_case("--user-data-dir") {
-                return same_windows_path(value, expected_user_data_dir);
+                return matches_directory(value);
             }
         }
         if arg.eq_ignore_ascii_case("--user-data-dir") {
             return args
                 .get(index + 1)
-                .is_some_and(|value| same_windows_path(value, expected_user_data_dir));
+                .is_some_and(|value| matches_directory(value));
         }
         index += 1;
     }
@@ -1657,6 +1667,21 @@ mod tests {
             r#"browser.exe --user-data-dir=D:\Profiles\other"#,
             r"D:\Profiles\one"
         ));
+    }
+
+    #[test]
+    fn command_line_verification_resolves_an_absolute_directory_alias() {
+        let test = crate::store::TestStore::new();
+        let directory = test.root.join("profile one");
+        let alias = test.root.join("anchor");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::create_dir(&alias).unwrap();
+        let expected = super::stable_path_string(&directory);
+        for (name, matches) in [("profile one", true), ("anchor", false)] {
+            let path = alias.join("..").join(name);
+            let command = format!(r#"browser.exe "--user-data-dir={}""#, path.display());
+            assert_eq!(command_line_uses_user_data_dir(&command, &expected), matches);
+        }
     }
 
     #[test]

@@ -96,16 +96,6 @@ pub fn trash_dir() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Cached Widevine CDM, seeded from a host Chrome install (or
-/// downloaded from the project's git LFS bucket for end users).  When
-/// present, every freshly-created profile's user-data-dir gets a
-/// pre-warmed `WidevineCdm/` copy so the browser doesn't sit waiting
-/// on the component updater the first time a DRM page (Netflix /
-/// Spotify / etc.) loads.
-pub fn widevine_cache_dir() -> Result<PathBuf> {
-    Ok(config_root()?.join("widevine-cdm"))
-}
-
 pub fn user_data_root() -> Result<PathBuf> {
     let p = config_root()?.join("user-data");
     std::fs::create_dir_all(&p)?;

@@ -133,6 +133,12 @@ pub async fn launch_profile(
     // Strip launcher-only fields and resolve "auto" sentinels before serialising.
     let mut raw = stored.config.clone();
     raw.remove("_meta");
+    let real_screen = settings::load()?.screen_resolution_mode.as_deref() == Some("real");
+    if real_screen {
+        // The engine's explicit fingerprint screen takes precedence over its
+        // host screen switch. Leave the saved profile intact for other modes.
+        raw.remove("screen");
+    }
     launch_reservation
         .wait(resolve_auto_fields(
             &mut raw,
@@ -202,10 +208,10 @@ pub async fn launch_profile(
     launch_args.push("--disable-quic".into());
     eprintln!("[launcher] QUIC disabled by launcher policy");
 
-    // Disable WebGPU when profile omits `webgpu` (matches real Linux Chrome).
+    // Disable Chromium's GPU service for WebGPU; the navigator API remains available.
     let webgpu_present = raw.get("webgpu").map(|v| !v.is_null()).unwrap_or(false);
     if !webgpu_present {
-        launch_args.push("--disable-features=WebGPU".into());
+        launch_args.push("--disable-features=WebGPUService".into());
     }
 
     // Interactive launches: restore previous session, suppress crash bubble.
@@ -282,8 +288,7 @@ pub async fn launch_profile(
     }
 
     // Screen resolution mode: presence-only switch to use host monitor.
-    let s = settings::load()?;
-    if s.screen_resolution_mode.as_deref() == Some("real") {
+    if real_screen {
         launch_args.push("--shardx-real-screen".into());
     }
 
@@ -715,18 +720,12 @@ async fn resolve_auto_fields(
     Ok(())
 }
 
-/// Copy cached Widevine CDM into `<udd>/WidevineCdm/<version>/` (versioned layout
-/// required by Chromium's DefaultComponentInstaller). No-op if cache absent.
+/// Copy the installed runtime CDM into Chromium's per-profile versioned layout.
 fn install_widevine(udd: &Path) -> Result<()> {
-    let src = store::widevine_cache_dir()?;
-    if !src.exists() {
-        anyhow::bail!("cache dir absent ({})", src.display());
-    }
+    let src = crate::runtime::widevine_dir()?;
     let manifest_path = src.join("manifest.json");
-    if !manifest_path.exists() {
-        anyhow::bail!("cache missing manifest.json — re-seed from a real Chrome");
-    }
-    let manifest_text = std::fs::read_to_string(&manifest_path)?;
+    let manifest_text = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("read installed Widevine manifest {}", manifest_path.display()))?;
     let manifest: serde_json::Value =
         serde_json::from_str(&manifest_text).context("parse widevine manifest.json")?;
     let version = manifest
@@ -789,6 +788,39 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn widevine_is_copied_from_the_installed_runtime() {
+        let store = store::TestStore::new();
+        let runtime = crate::runtime::widevine_dir().unwrap();
+        assert!(runtime.starts_with(&store.root));
+        let dll = Path::new("_platform_specific/win_x64/widevinecdm.dll");
+        std::fs::create_dir_all(runtime.join(dll.parent().unwrap())).unwrap();
+        let manifest = r#"{"version":"4.10.3050.0"}"#;
+        std::fs::write(runtime.join("manifest.json"), manifest).unwrap();
+        std::fs::write(runtime.join(dll), b"test CDM").unwrap();
+        let user_data = store.root.join("test-profile");
+
+        install_widevine(&user_data).unwrap();
+        install_widevine(&user_data).unwrap();
+
+        let cdm = user_data.join("WidevineCdm");
+        let version = cdm.join("4.10.3050.0");
+        assert_eq!(
+            std::fs::read_to_string(cdm.join("latest-component-updated-version")).unwrap(),
+            "4.10.3050.0"
+        );
+        assert_eq!(
+            std::fs::read_to_string(version.join("manifest.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(std::fs::read(version.join(dll)).unwrap(), b"test CDM");
+    }
 }
 
 /// Read host TZ from /etc/localtime symlink, fall back to $TZ.

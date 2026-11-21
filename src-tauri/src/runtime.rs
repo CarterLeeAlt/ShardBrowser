@@ -93,7 +93,11 @@ pub fn runtime_dir() -> Result<PathBuf> {
 
 /// Path to the chrome binary inside the extracted runtime.
 pub fn binary_path() -> Result<PathBuf> {
-    Ok(runtime_dir()?.join("ShardX-Windows").join("chrome.exe"))
+    Ok(runtime_dir()?.join(engine_root_dir()).join("chrome.exe"))
+}
+
+pub(crate) fn widevine_dir() -> Result<PathBuf> {
+    Ok(runtime_dir()?.join(engine_root_dir()).join("WidevineCdm"))
 }
 
 fn manifest_path() -> Result<PathBuf> {
@@ -379,13 +383,8 @@ fn fingerprints_are_installed(local: &Manifest) -> bool {
 
 fn widevine_is_installed(local: &Manifest) -> bool {
     local.widevine_etag.is_some()
-        && runtime_dir()
-            .map(|d| {
-                d.join("ShardX-Windows")
-                    .join("WidevineCdm")
-                    .join("manifest.json")
-                    .is_file()
-            })
+        && widevine_dir()
+            .map(|directory| directory.join("manifest.json").is_file())
             .unwrap_or(false)
 }
 
