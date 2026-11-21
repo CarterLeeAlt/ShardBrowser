@@ -32,6 +32,12 @@
   --radius-sm: 6px;
   --radius:    8px;
   --radius-lg: 12px;
+  --sidebar-width: 216px;
+  --main-padding: 24px;
+  --scrollbar-width: 10px;
+  --table-border: 1px;
+  --table-min-width: 1015px;
+  --diamond: polygon(50% 0, 100% 50%, 50% 100%, 0 50%);
 
   font-family: var(--font-app);
   font-weight: var(--font-weight-regular);
@@ -91,7 +97,7 @@ h1, h2, h3, h4, h5, h6 { font-size: inherit; }
 h1, h2, h3, h4, h5, h6, strong, b {
   font-weight: var(--font-weight-emphasis);
 }
-::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar { width: var(--scrollbar-width); height: var(--scrollbar-width); }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--bd-2); border-radius: 8px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--bd-3); }
@@ -198,7 +204,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .app {
   display: grid;
   grid-template-rows: minmax(0, 1fr);
-  grid-template-columns: 216px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   height: 100vh;
   padding-top: var(--titlebar-h);
   overflow: hidden;
@@ -343,7 +349,9 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .main {
   min-height: 0;
   min-width: 0;
-  padding: 16px 24px 24px;
+  padding-block: 16px 24px;
+  /* Reserve room for the whole table before allocating optional side gutters. */
+  padding-inline: clamp(12px, calc((100vw - var(--sidebar-width) - var(--scrollbar-width) - var(--table-min-width) - 2 * var(--table-border)) / 2), var(--main-padding));
   overflow-y: auto;
   scrollbar-gutter: stable;
   background: var(--bg-0);
@@ -392,7 +400,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 
 .folder-tabs {
   display: flex; gap: 0;
-  border-bottom: 1px solid var(--bd-1);
+  box-shadow: inset 0 -1px var(--bd-1);
   overflow-x: auto;
   min-width: 0;
   scrollbar-width: thin;
@@ -407,7 +415,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   padding: 8px 14px;
   font-size: var(--text-body); font-weight: var(--font-weight-regular); cursor: pointer;
   display: flex; align-items: center; gap: 6px;
-  margin-bottom: -1px;
   transition: color .12s, border-color .12s;
 }
 .folder-tab:hover { color: var(--tx-1); }
@@ -696,24 +703,24 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   --sort-min: 24px;
   --select-min: 28px;
   --column-gap: 8px;
-  --table-min-width: calc(var(--growing-min-width) + var(--actions-width) + var(--growing-columns) * var(--column-gap) + var(--table-padding-left) + var(--table-padding-right));
+  --growing-columns: 8;
+  --table-tracks-width: calc(var(--growing-min-width) + var(--actions-width) + var(--growing-columns) * var(--column-gap) + var(--table-padding-left) + var(--table-padding-right));
   container-type: inline-size;
   background: var(--bg-1);
-  border: 1px solid var(--bd-1);
+  border: var(--table-border) solid var(--bd-1);
   border-radius: var(--radius-lg);
   overflow-x: auto;
 }
 .browser-rows {
-  --indicator-min: 4px;
+  --indicator-min: 10px;
   --name-min: 140px;
   --status-min: 100px;
-  --proxy-min: 146px;
+  --proxy-min: 161px;
   --notes-min: 192px;
   --last-run-min: 128px;
   --actions-width: 160px;
   --table-padding-left: 0px;
   --table-padding-right: 8px;
-  --growing-columns: 8;
   --growing-min-width: calc(var(--sort-min) + var(--indicator-min) + var(--select-min) + var(--name-min) + var(--status-min) + var(--proxy-min) + var(--notes-min) + var(--last-run-min));
 }
 .proxy-rows {
@@ -726,7 +733,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   --actions-width: 124px;
   --table-padding-left: 16px;
   --table-padding-right: 16px;
-  --growing-columns: 8;
   --growing-min-width: calc(var(--sort-min) + var(--select-min) + var(--name-min) + var(--type-min) + var(--host-min) + var(--country-min) + var(--profiles-min) + var(--test-min));
 }
 .t-cols, .p-cols {
@@ -737,7 +743,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   padding: 5px var(--table-padding-right) 5px var(--table-padding-left);
   align-items: center;
   /* Every growing track gets its floor plus the same share of spare space. */
-  --column-extra: max(0px, calc((100cqw - var(--table-min-width)) / var(--growing-columns)));
+  --column-extra: calc((max(100cqw, var(--table-min-width)) - var(--table-tracks-width)) / var(--growing-columns));
 }
 .t-cols {
   grid-template-columns:
@@ -819,24 +825,20 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .row { transition: background .12s; }
 .row:hover { background: var(--bg-hover); }
 
-.row-wrap.row-running .cell-strip .shard.shard-on {
-  background: var(--ok);
-  box-shadow: 0 0 12px var(--ok);
-}
+.row-running .cell-strip { filter: drop-shadow(0 0 6px var(--ok)); }
+.row-running .cell-strip .shard { background: var(--ok); }
 .row-expanded .row { background: var(--bg-2); }
 
 .cell-strip {
-  display: flex; align-items: center; justify-content: center;
-  padding-left: 4px;
+  display: grid;
+  place-items: center;
 }
 .shard {
-  display: inline-block;
-  width: 7px; height: 7px;
-  transform: rotate(45deg);
+  width: 10px; height: 10px;
+  clip-path: var(--diamond);
   background: var(--bd-3);
-  transition: background .15s, box-shadow .15s;
+  transition: background .15s;
 }
-.shard-off { background: var(--bd-3); }
 
 .cell-name {
   cursor: pointer;
@@ -893,21 +895,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .proxy-main {
   display: flex; align-items: center; gap: 8px;
   min-width: 0;
-  white-space: nowrap;
-}
-.proxy-detail {
-  display: block;
-  width: 100%;
-  min-width: 0;
-  color: var(--tx-3);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.proxy-detail-text {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 .flag {
@@ -1075,10 +1062,11 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   display: flex; align-items: center; gap: 6px;
 }
 .ie-section-title::before {
-  content: ""; width: 6px; height: 6px;
+  content: "";
+  flex: 0 0 8px;
+  height: 8px;
   background: var(--accent);
-  transform: rotate(45deg);
-  display: inline-block;
+  clip-path: var(--diamond);
 }
 
 .inline-editor label {
@@ -1716,9 +1704,12 @@ button.status-pill.status-link:active { transform: translateY(1px); }
   min-width: 0;
 }
 .proxy-city {
+  display: block;
   max-width: 100%;
-  white-space: normal;
-  overflow-wrap: anywhere;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Flat 4:3 country flags. The 15px default is optically
@@ -1840,10 +1831,10 @@ button.status-pill.status-link:active { transform: translateY(1px); }
   margin-left: 2px;
 }
 .lib-group-dot {
-  width: 10px; height: 10px;
-  transform: rotate(45deg);
+  flex: 0 0 14px;
+  height: 14px;
+  clip-path: var(--diamond);
   background: var(--accent);
-  display: inline-block;
 }
 .lib-dot-macos    { background: #8b5cf6; }
 .lib-dot-windows  { background: #5dade2; }
@@ -2186,8 +2177,10 @@ button.status-pill.status-link:active { transform: translateY(1px); }
 .operation-banner p { margin: 6px 0 0; }
 .operation-banner button { flex-shrink: 0; }
 @media (max-width: 1250px) {
-  .app { grid-template-columns: 184px minmax(0, 1fr); }
-  .main { padding-inline: 16px; }
+  :root {
+    --sidebar-width: 184px;
+    --main-padding: 16px;
+  }
   .ie-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .runtime-update-row { grid-template-columns: minmax(0, 1fr); }
   .runtime-update-actions { justify-content: flex-start; flex-wrap: wrap; }

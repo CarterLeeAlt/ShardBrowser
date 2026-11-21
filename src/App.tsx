@@ -2085,18 +2085,6 @@ function BrowsersView() {
           const px = p.proxy_id ? proxyMap[p.proxy_id] : null;
           const proxySnapshot = px ? proxySnapshots[px.id] : undefined;
           const proxyCountry = (proxySnapshot?.country_code || px?.country || "").trim().toUpperCase();
-          const proxyLocation = compactProxyLocation(
-            proxySnapshot?.city,
-            proxySnapshot?.region,
-            proxySnapshot?.country,
-          );
-          const hostLooksLikeIp = !!px && (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(px.host) || px.host.includes(":"));
-          // Before the first test, an IP-literal endpoint is a useful fallback.
-          // Once a test exists (including a failed one), never relabel the
-          // endpoint as the detected exit IP.
-          const proxyIp = (proxySnapshot?.ip || (!proxySnapshot && hostLooksLikeIp ? px?.host : "") || "").trim();
-          const proxyDetailLocation = proxyLocation || (!proxySnapshot && proxyIp ? proxyCountry : "");
-          const proxyDetailText = [proxyDetailLocation, proxyIp].filter(Boolean).join(" · ");
           const isRunning = !!running[p.id];
           const isStarting = !isRunning && (startBusy.has(p.id) || backendActiveIds.has(p.id));
           const isReserved = operations.runtime || !!recovery?.incomplete || operations.profiles.includes(p.id);
@@ -2134,7 +2122,7 @@ function BrowsersView() {
               ) : undefined}
             >
                 <div className="cell-strip">
-                  <span className={`shard ${isRunning ? "shard-on" : "shard-off"}`} />
+                  <span className="shard" />
                 </div>
                 <div>
                   <input type="checkbox" aria-label={p.name} checked={isSel} onChange={() => toggleSel(p.id)} />
@@ -2182,12 +2170,7 @@ function BrowsersView() {
                           </>
                         )}
                       </div>
-                      <div
-                        className="proxy-detail table-detail"
-                        title={proxyDetailText || tr("No test data")}
-                      >
-                        <span className="proxy-detail-text">{proxyDetailText || tr("No test data")}</span>
-                      </div>
+                      <ProxyCity city={proxySnapshot?.city} />
                     </>
                   ) : <span className="muted">{tr("— direct —")}</span>}
                 </div>
@@ -2251,21 +2234,9 @@ function BrowsersView() {
   );
 }
 
-/// Keep browser-table proxy metadata compact. If city and region overlap,
-/// retain the more specific value ("Singapore" + "Central Singapore" becomes
-/// "Central Singapore"). Preserve both values when they are distinct, such as
-/// "Los Angeles, California".
-function compactProxyLocation(cityValue?: string, regionValue?: string, countryValue?: string) {
-  const city = (cityValue || "").trim();
-  const region = (regionValue || "").trim();
-  const country = (countryValue || "").trim();
-  if (!city) return region || country;
-  if (!region) return city;
-  const cityKey = city.toLowerCase();
-  const regionKey = region.toLowerCase();
-  if (regionKey.includes(cityKey)) return region;
-  if (cityKey.includes(regionKey)) return city;
-  return `${city}, ${region}`;
+function ProxyCity({ city }: { city?: string }) {
+  const name = city?.trim();
+  return <span className="proxy-city muted table-detail" title={name || undefined}>{name || "—"}</span>;
 }
 
 function proxyBindingLabel(proxy: ProxyEntry, snapshot?: ProxyTestSnapshot) {
@@ -3519,7 +3490,7 @@ function ProxiesView() {
                       <span className="flag">{cc}</span>
                     </span>
                   ) : <span className="muted">—</span>}
-                  <span className="proxy-city muted table-detail">{r?.city.trim() || "—"}</span>
+                  <ProxyCity city={r?.city} />
                 </div>
                 <div>
                   <span className="profile-count" title={tr("{0} profile(s) bound to this proxy", profileCountByProxy[p.id] ?? 0)}>
