@@ -517,34 +517,49 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .row-sort-source { opacity: .32; }
 .row-sort-placeholder { border-top-color: transparent; }
 .row-sort-placeholder > .row { opacity: 0; pointer-events: none; }
-.row-sort-placeholder::after {
-  content: "";
+.sort-placeholder-preview {
   position: absolute;
   inset: 4px 8px;
+  display: flex;
+  align-items: center;
+  padding-inline: 10px;
   border: 1px dashed var(--accent-hi);
   border-radius: var(--radius-sm);
   background: var(--accent-dim);
+  color: var(--accent-hi);
   pointer-events: none;
 }
-.row-sort-placeholder:focus-within::after { border-width: 2px; }
+.row-sort-placeholder:focus-within .sort-placeholder-preview { border-width: 2px; }
 @media (prefers-reduced-motion: reduce) {
   .rows > .row-wrap { transition: none !important; }
 }
-.sort-overlay {
+.sort-drag-label {
   display: flex;
   align-items: center;
   gap: 7px;
+  max-width: 260px;
+  font-size: 12px;
+  font-weight: var(--font-weight-emphasis);
+}
+.sort-drag-label > svg { flex: none; }
+.sort-drag-label > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sort-placeholder-preview .sort-drag-label {
+  position: sticky;
+  left: 12px;
+  max-width: min(260px, calc(100cqw - 36px));
+}
+.sort-overlay {
+  width: fit-content;
   max-width: 260px;
   padding: 7px 11px;
   border: 1px solid #a78bfaaa;
   border-radius: 999px;
   color: #fff;
   background: #7c3aedee;
-  font-size: 12px;
-  font-weight: var(--font-weight-emphasis);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   box-shadow: 0 8px 24px #0006;
   pointer-events: none;
 }

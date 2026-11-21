@@ -15,14 +15,15 @@ import {
   DragOverlay,
   KeyboardSensor,
   PointerSensor,
-  closestCenter,
   pointerWithin,
+  useDndContext,
   useDroppable,
   useSensor,
   useSensors,
   type DragEndEvent,
   type CollisionDetection,
   type KeyboardCoordinateGetter,
+  type UniqueIdentifier,
 } from "@dnd-kit/core";
 import {
   SortableContext,
@@ -1224,15 +1225,10 @@ const Icon = {
 type SortKind = "profile" | "proxy";
 type SortPlacement = "before" | "after";
 
-const listCollisionDetection: CollisionDetection = (args) => {
-  const items: string[] = args.active.data.current?.sortable?.items ?? [];
+const listPointerCollision: CollisionDetection = (args) => {
   const pointer = args.pointerCoordinates;
-  if (!pointer) {
-    return closestCenter({
-      ...args,
-      droppableContainers: args.droppableContainers.filter(({ data }) => data.current?.type === "sortable-row"),
-    });
-  }
+  if (!pointer) return [];
+  const items: string[] = args.active.data.current?.sortable?.items ?? [];
 
   // Untransformed row rects keep the insertion thresholds steady as rows move.
   // Hit-test the container as well: wide rows can extend behind the sidebar.
@@ -1258,23 +1254,32 @@ const listCollisionDetection: CollisionDetection = (args) => {
 };
 type ProfileTextField = "name" | "label";
 
-const listKeyboardCoordinates: KeyboardCoordinateGetter = (event, { context, currentCoordinates }) => {
-  if (event.code !== "ArrowUp" && event.code !== "ArrowDown") return;
-  event.preventDefault();
-  const { active, over, droppableRects, collisionRect } = context;
-  const items: string[] = active?.data.current?.sortable?.items ?? [];
-  const currentIndex = items.indexOf(String(over?.id ?? active?.id));
-  if (currentIndex < 0 || !collisionRect) return;
-  const nextId = items[currentIndex + (event.code === "ArrowDown" ? 1 : -1)];
-  const next = nextId === undefined ? undefined : droppableRects.get(nextId);
-  if (next) return { x: currentCoordinates.x, y: next.top + (next.height - collisionRect.height) / 2 };
-};
-
-function useListSortSensors() {
-  return useSensors(
+function useListSort() {
+  const keyboardTarget = useRef<UniqueIdentifier | null>(null);
+  const coordinateGetter: KeyboardCoordinateGetter = (event, { context, currentCoordinates }) => {
+    if (event.code !== "ArrowUp" && event.code !== "ArrowDown") return;
+    event.preventDefault();
+    const { active, droppableRects, collisionRect } = context;
+    const items: string[] = active?.data.current?.sortable?.items ?? [];
+    const currentIndex = items.indexOf(String(keyboardTarget.current ?? active?.id));
+    if (currentIndex < 0 || !collisionRect) return;
+    const nextId = items[currentIndex + (event.code === "ArrowDown" ? 1 : -1)];
+    const next = nextId === undefined ? undefined : droppableRects.get(nextId);
+    if (!next) return;
+    keyboardTarget.current = nextId;
+    // Coordinates scroll the target into view; the target ID resolves the drop.
+    return { x: currentCoordinates.x, y: next.top + (next.height - collisionRect.height) / 2 };
+  };
+  const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: listKeyboardCoordinates, scrollBehavior: "auto" }),
+    useSensor(KeyboardSensor, { coordinateGetter, scrollBehavior: "auto" }),
   );
+  const collisionDetection: CollisionDetection = (args) => {
+    if (args.pointerCoordinates) return listPointerCollision(args);
+    const target = keyboardTarget.current ?? args.active.id;
+    return args.droppableRects.has(target) ? [{ id: target }] : [];
+  };
+  return { sensors, collisionDetection, onDragStart: () => { keyboardTarget.current = null; } };
 }
 
 function moveByAnchor<T extends { id: string }>(
@@ -1307,9 +1312,28 @@ function listDrop<T extends { id: string }>(event: DragEndEvent, items: T[], kin
   return { id, anchorId, placement };
 }
 
+function SortDragLabel({ label }: { label: string }) {
+  return <span className="sort-drag-label"><Icon.Grip /><span>{label}</span></span>;
+}
+
+function ListSortOverlay() {
+  const { active, over } = useDndContext();
+  const label = active?.data.current?.label;
+  // Keep the overlay mounted for dnd-kit's row measurement. Only show a
+  // floating label when there is no row placeholder to carry it.
+  return (
+    <DragOverlay dropAnimation={null} style={{ pointerEvents: "none" }}>
+      {label && over?.data.current?.type !== "sortable-row" && (
+        <div className="sort-overlay" aria-hidden="true"><SortDragLabel label={label} /></div>
+      )}
+    </DragOverlay>
+  );
+}
+
 function SortableRow({
   id,
   kind,
+  name,
   disabledReason,
   className,
   rowClassName,
@@ -1319,6 +1343,7 @@ function SortableRow({
 }: {
   id: string;
   kind: SortKind;
+  name: string;
   disabledReason?: string;
   className: string;
   rowClassName: string;
@@ -1327,6 +1352,7 @@ function SortableRow({
   footer?: ReactNode;
 }) {
   const disabled = !!disabledReason;
+  const label = name || id.slice(0, 8);
   const {
     attributes,
     listeners,
@@ -1339,7 +1365,7 @@ function SortableRow({
   } = useSortable({
     id,
     disabled,
-    data: { type: "sortable-row", kind, entityId: id },
+    data: { type: "sortable-row", kind, label },
   });
   const placeholder = isDragging && overIndex >= 0;
   const style: CSSProperties = {
@@ -1371,6 +1397,9 @@ function SortableRow({
         {children}
       </div>
       {footer}
+      {placeholder && (
+        <div className="sort-placeholder-preview" aria-hidden="true"><SortDragLabel label={label} /></div>
+      )}
     </div>
   );
 }
@@ -1483,8 +1512,7 @@ function BrowsersView() {
     catch { return []; }
   });
   const [folderModal, setFolderModal] = useState<{ profileId: string | null } | null>(null);
-  const sortSensors = useListSortSensors();
-  const [activeSortId, setActiveSortId] = useState<string | null>(null);
+  const sort = useListSort();
   const rememberFolder = (f: string) =>
     setFolderRegistry((r) => {
       const next = r.includes(f) ? r : [...r, f];
@@ -2044,7 +2072,6 @@ function BrowsersView() {
 
   const handleProfileDragEnd = async (event: DragEndEvent) => {
     const { over } = event;
-    setActiveSortId(null);
     if (over?.data.current?.type === "profile-folder") {
       await setProfileFolder(String(event.active.id), String(over.data.current.folder ?? ""));
       return;
@@ -2066,10 +2093,7 @@ function BrowsersView() {
 
   return (
     <DndContext
-      sensors={sortSensors}
-      collisionDetection={listCollisionDetection}
-      onDragStart={(event) => setActiveSortId(String(event.active.id))}
-      onDragCancel={() => setActiveSortId(null)}
+      {...sort}
       onDragEnd={handleProfileDragEnd}
     >
     <section className="page workspace-page">
@@ -2275,6 +2299,7 @@ function BrowsersView() {
               key={p.id}
               id={p.id}
               kind="profile"
+              name={p.name}
               className={`row-wrap ${isRunning ? "row-running" : ""} ${isExpanded ? "row-expanded" : ""}`}
               rowClassName="row t-cols browser-data-row"
               disabledReason={isActive ? tr("Stop the browser before reordering this profile") : search.trim() ? tr("Clear search to reorder profiles") : isExpanded ? tr("Close the editor before reordering") : undefined}
@@ -2419,14 +2444,7 @@ function BrowsersView() {
         />
       )}
     </section>
-    <DragOverlay dropAnimation={null} style={{ pointerEvents: "none" }}>
-      {activeSortId && (
-        <div className="sort-overlay">
-          <Icon.Grip />
-          {profiles.find((profile) => profile.id === activeSortId)?.name || activeSortId.slice(0, 8)}
-        </div>
-      )}
-    </DragOverlay>
+    <ListSortOverlay />
     </DndContext>
   );
 }
@@ -3322,8 +3340,7 @@ function ProxiesView() {
   const [profiles, setProfiles] = useState<ProfileMeta[]>([]);
   const [lockedProxyIds, setLockedProxyIds] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
-  const proxySortSensors = useListSortSensors();
-  const [activeProxySortId, setActiveProxySortId] = useState<string | null>(null);
+  const sort = useListSort();
   const ctx = useContextMenu();
 
   // Search filter: matches name / host / port / country tag / notes / username
@@ -3563,7 +3580,6 @@ function ProxiesView() {
   };
 
   const handleProxyDragEnd = async (event: DragEndEvent) => {
-    setActiveProxySortId(null);
     const drop = listDrop(event, filteredProxies, "proxy");
     if (!drop) return;
     const previous = proxies;
@@ -3578,10 +3594,7 @@ function ProxiesView() {
 
   return (
     <DndContext
-      sensors={proxySortSensors}
-      collisionDetection={listCollisionDetection}
-      onDragStart={(event) => setActiveProxySortId(String(event.active.id))}
-      onDragCancel={() => setActiveProxySortId(null)}
+      {...sort}
       onDragEnd={handleProxyDragEnd}
     >
     <section className="page workspace-page">
@@ -3649,6 +3662,7 @@ function ProxiesView() {
               key={p.id}
               id={p.id}
               kind="proxy"
+              name={p.name}
               className="row-wrap"
               rowClassName="row p-cols proxy-data-row"
               disabledReason={isLocked ? tr("Stop the browser using this proxy before reordering") : search.trim() ? tr("Clear search to reorder proxies") : renaming?.id === p.id ? tr("Finish renaming before reordering") : undefined}
@@ -3820,14 +3834,7 @@ function ProxiesView() {
       )}
       {ctx.node}
     </section>
-    <DragOverlay dropAnimation={null} style={{ pointerEvents: "none" }}>
-      {activeProxySortId && (
-        <div className="sort-overlay">
-          <Icon.Grip />
-          {proxies.find((proxy) => proxy.id === activeProxySortId)?.name || activeProxySortId.slice(0, 8)}
-        </div>
-      )}
-    </DragOverlay>
+    <ListSortOverlay />
     </DndContext>
   );
 }
