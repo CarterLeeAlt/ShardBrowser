@@ -7,13 +7,13 @@
   "dragColumn": 24,
   "selectColumn": 28,
   "browser": {
-    "columns": { "name": 140, "status": 86, "proxy": 161, "notes": 192, "lastRun": 128 },
+    "columns": { "name": 119, "status": 86, "proxy": 161, "notes": 192, "lastRun": 128 },
     "actions": 160,
     "paddingLeft": 0,
     "paddingRight": 8
   },
   "proxy": {
-    "columns": { "name": 160, "type": 106, "host": 140, "country": 110, "profiles": 68, "test": 180 },
+    "columns": { "name": 144, "type": 106, "host": 140, "country": 110, "profiles": 68, "test": 180 },
     "actions": 124,
     "paddingLeft": 16,
     "paddingRight": 16

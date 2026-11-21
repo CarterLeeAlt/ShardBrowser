@@ -193,10 +193,10 @@ mod tests {
     fn widest_table_controls_window_minimum() {
         let mut layout: TableLayout =
             serde_json::from_str(include_str!("../../src/table-layout.json")).unwrap();
-        assert_eq!(layout.minimum_window_width(), 1284);
+        assert_eq!(layout.minimum_window_width(), 1268);
         *layout.proxy.columns.get_mut("type").unwrap() += 24;
-        assert_eq!(layout.minimum_window_width(), 1308);
+        assert_eq!(layout.minimum_window_width(), 1292);
         *layout.browser.columns.get_mut("status").unwrap() += 120;
-        assert_eq!(layout.minimum_window_width(), 1351);
+        assert_eq!(layout.minimum_window_width(), 1330);
     }
 }
