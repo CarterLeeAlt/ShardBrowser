@@ -128,8 +128,8 @@
 * **UDP 介绍：** [https://docs.proxyshard.com/eng/our-products/about-udp](https://docs.proxyshard.com/eng/our-products/about-udp?utm_source=shardx&utm_medium=referral&utm_campaign=shardx-launcher)
 * **p0f 介绍：** [https://docs.proxyshard.com/eng/our-products/p0f-spoofing](https://docs.proxyshard.com/eng/our-products/p0f-spoofing?utm_source=shardx&utm_medium=referral&utm_campaign=shardx-launcher)
 
-按任务需要选择任意方式驱动 ShardX — 四种方式读取同一份磁盘状态，
-环境在所有入口之间互通，无需任何同步步骤：
+桌面 UI、本地 HTTP API 和 MCP 操作同一份便携工作区。独立 SDK 则直接启动引擎，
+默认使用独立的数据目录：
 
 * **桌面 UI** — 日常工作区（环境、代理、Cookie、指纹编辑器）。
 * **本地 HTTP API** — `127.0.0.1:40325` 上的 Bearer-JWT 认证接口；用任意
@@ -372,6 +372,20 @@ npm run tauri:build:windows-x64
 `src-tauri/target/x86_64-pc-windows-msvc/release/`。迁移启动器时，请把
 EXE 与其旁侧的 `shardx-launcher` 数据目录一起移动。
 
+### 维护入口
+
+维护检查使用 CI 的 Node.js 22.14.0；`check:editor` 直接执行 TypeScript 模块。
+
+| 范围 | 代码入口 | 验证入口 |
+| --- | --- | --- |
+| 桌面界面 | [`src/App.tsx`](src/App.tsx) 组织应用和页面；[`src/profileForm.ts`](src/profileForm.ts) 转换环境表单与持久配置；[`src/profileEdit.ts`](src/profileEdit.ts) 合并保存前的并发修改 | `npm run check:editor`、`npm run build` |
+| 启动器后端 | [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs) 注册 Tauri 命令；环境、进程、代理和存储分别在 `profile.rs`、`process.rs`、`proxy.rs`、`store.rs` | `cargo test --manifest-path src-tauri/Cargo.toml --locked --target x86_64-pc-windows-msvc` |
+| 本地 HTTP 与 MCP | [`src-tauri/src/api.rs`](src-tauri/src/api.rs) 注册 HTTP 路由；[`openapi.yaml`](openapi.yaml) 描述 HTTP 契约；[`mcp/index.js`](mcp/index.js) 调用 HTTP 与 CDP | HTTP 随 Rust 测试验证；安装 `mcp/` 依赖后运行 `node scripts/check-mcp.mjs` |
+| 独立 SDK 与发布 | [`sdks/`](sdks/) 是三套独立发布的 SDK；[`.github/workflows/`](.github/workflows/) 定义持续集成、运行时归档和发行 | [`ci.yml`](.github/workflows/ci.yml)、`npm run check:versions` |
+
+调整表格列宽时只改 [`src/table-layout.json`](src/table-layout.json)；前端用它排列表格，
+Windows 窗口用同一份配置计算最小宽度。
+
 ### 首次启动
 
 **便携版**首次启动会从 CDN 下载 Windows x64 补丁版浏览器（约 150 MB）、
@@ -384,8 +398,8 @@ Widevine（约 16 MB）与指纹库（约 470 KB）；**自包含版**跳过全�
 
 ## 使用方式
 
-四种可互换的驱动方式 — 按任务选择即可。它们读取同一份磁盘状态，在 UI
-里创建的环境无需任何同步即可被 API、MCP 服务器和 SDK 访问。
+桌面 UI、HTTP API 和 MCP 无需同步即可访问同一批环境。独立 SDK 不连接启动器的
+工作区，默认使用 `shardx-sdk` 数据目录。
 
 ### 1. 桌面 UI
 

@@ -1,18 +1,6 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import ts from "typescript";
-
-// Execute the actual editor conversion functions without booting a WebView.
-const source = fs.readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
-const ast = ts.createSourceFile("App.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-const names = new Set(["defaultForm", "fromStored", "toStored", "deriveAcceptLanguage", "deriveLanguagesArray", "DEFAULT_BLOCKED_PORTS", "AUTO_TZ", "AUTO_LANG", "WEBGL_NOISE_INTENSITY", "CLIENT_RECTS_MAX_OFFSET"]);
-const declarations = ast.statements.filter(node => (node.name && names.has(node.name.text)) || (ts.isVariableStatement(node) && node.declarationList.declarations.some(d => names.has(d.name.getText(ast))))).map(node => node.getText(ast)).join("\n");
-const code = ts.transpileModule(declarations, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-const { fromStored, toStored } = new Function(`${code}; return {fromStored,toStored}`)();
-const mergeCode = ts.transpileModule(fs.readFileSync(new URL("../src/profileEdit.ts", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-const exports = {};
-new Function("exports", mergeCode)(exports);
-const { mergeProfileEdits } = exports;
+import { defaultForm, fromStored, toStored } from "../src/profileForm.ts";
+import { mergeProfileEdits } from "../src/profileEdit.ts";
 
 const original = {
   _meta: { id: "identity", gpu_preset_id: "preset", extensions: ["extension"], proxy_id: "proxy" }, _revision: "original",
@@ -39,4 +27,25 @@ assert.throws(() => mergeProfileEdits(original, edited, { ...latest, name: "Conc
 const enabled = toStored({ ...form, do_not_track: true }, null, original, form);
 assert.equal(enabled.navigator.do_not_track, "1");
 assert.deepEqual(enabled.navigator.languages, original.navigator.languages);
-console.log("Editor regression passed: language/DNT preservation, three-way merge, conflict detection, and identity retention.");
+
+const manualLanguage = toStored({ ...form, language: "fr-FR" }, null, original, form);
+assert.equal(manualLanguage.icu_locale, "fr-FR");
+assert.equal(manualLanguage.navigator.accept_language, "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7");
+assert.deepEqual(manualLanguage.navigator.languages, ["fr-FR", "fr", "en-US", "en"]);
+const autoLanguage = toStored({ ...form, language: "auto" }, null, original, form);
+assert.equal(autoLanguage.icu_locale, null);
+assert.equal(autoLanguage.navigator.languages, null);
+assert.equal(autoLanguage.navigator.accept_language, null);
+const template = { screen: { width: 1920 }, navigator: { vendor: "Template vendor" } };
+const switched = toStored({ ...form, gpu_preset_id: "another-preset" }, { payload: template }, original, form);
+assert.equal(switched._meta.id, "identity");
+assert.equal(switched._meta.gpu_preset_id, "another-preset");
+assert.deepEqual(switched.screen, template.screen);
+assert.equal(switched.navigator.vendor, "Template vendor");
+assert.equal(switched.noise.canvas.seed, 9183);
+assert.deepEqual(template, { screen: { width: 1920 }, navigator: { vendor: "Template vendor" } });
+const fresh = toStored(defaultForm(), null);
+assert.equal(fresh._meta.id, "");
+assert.equal(fresh.noise.canvas.seed, 0);
+assert.equal(fresh.navigator.language, "auto");
+console.log("Editor regression passed: create, edit, language/DNT, preset switch, identity, and concurrent edits.");

@@ -832,10 +832,7 @@ fn least_used_fingerprint_for(platform: Option<&str>) -> Result<String, ApiError
 
 // ---- server ----
 
-pub async fn serve(secret: String, port: u16) {
-    set_secret(&secret);
-    set_listener("starting", port, None);
-
+fn router(port: u16) -> Router {
     let protected = Router::new()
         .route("/trash", get(list_trash).delete(empty_trash))
         .route("/trash/:id", delete(purge_trash))
@@ -873,13 +870,19 @@ pub async fn serve(secret: String, port: u16) {
         format!("localhost:{port}"),
         format!("[::1]:{port}"),
     ];
-    let app = Router::new()
+    Router::new()
         .route("/health", get(health))
         .merge(protected)
         .layer(middleware::from_fn(move |req: Request, next: Next| {
             let allowed = loopback_hosts.clone();
             async move { enforce_loopback_host(allowed, req, next).await }
-        }));
+        }))
+}
+
+pub async fn serve(secret: String, port: u16) {
+    set_secret(&secret);
+    set_listener("starting", port, None);
+    let app = router(port);
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     match tokio::net::TcpListener::bind(addr).await {
@@ -1046,5 +1049,55 @@ mod tests {
             storage_error(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()).0,
             StatusCode::INTERNAL_SERVER_ERROR
         );
+
+        // Use the already-bound test port to verify the production router
+        // without racing a port probe or contacting the installed launcher.
+        let server = tokio::spawn(async move { axum::serve(listener, router(port)).await });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let base = format!("http://127.0.0.1:{port}");
+        let public = client.get(format!("{base}/health")).send().await.unwrap();
+        assert_eq!(public.status(), StatusCode::OK);
+        let body: Value = serde_json::from_str(&public.text().await.unwrap()).unwrap();
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["name"], "shardx-launcher");
+        assert_eq!(
+            client
+                .get(format!("{base}/health"))
+                .header("Host", "not-loopback.example")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let running = format!("{base}/running");
+        assert_eq!(
+            client.get(&running).send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
+                .get(&running)
+                .bearer_auth("invalid-token")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let authorized = client
+            .get(&running)
+            .bearer_auth(long_lived_token("test-secret").unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(authorized.status(), StatusCode::OK);
+        let body: Value = serde_json::from_str(&authorized.text().await.unwrap()).unwrap();
+        assert!(body.is_array());
+        server.abort();
     }
 }

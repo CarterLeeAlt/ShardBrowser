@@ -191,12 +191,17 @@ mod tests {
 
     #[test]
     fn widest_table_controls_window_minimum() {
-        let mut layout: TableLayout =
-            serde_json::from_str(include_str!("../../src/table-layout.json")).unwrap();
-        assert_eq!(layout.minimum_window_width(), 1268);
-        *layout.proxy.columns.get_mut("type").unwrap() += 24;
-        assert_eq!(layout.minimum_window_width(), 1292);
-        *layout.browser.columns.get_mut("status").unwrap() += 120;
-        assert_eq!(layout.minimum_window_width(), 1330);
+        let mut layout: TableLayout = serde_json::from_value(serde_json::json!({
+            "sidebarWidth": 200, "minimumSidePadding": 10, "scrollbarWidth": 10,
+            "tableBorder": 1, "columnGap": 8, "dragColumn": 24, "selectColumn": 28,
+            "browser": {"columns": {"name": 100, "status": 40}, "actions": 60, "paddingLeft": 0, "paddingRight": 8},
+            "proxy": {"columns": {"name": 100, "type": 80}, "actions": 40, "paddingLeft": 8, "paddingRight": 8}
+        })).unwrap();
+        // The proxy table needs 320 pixels; window chrome adds 232.
+        assert_eq!(layout.minimum_window_width(), 552);
+        *layout.proxy.columns.get_mut("type").unwrap() += 20;
+        assert_eq!(layout.minimum_window_width(), 572);
+        *layout.browser.columns.get_mut("status").unwrap() += 60;
+        assert_eq!(layout.minimum_window_width(), 584);
     }
 }

@@ -24,6 +24,13 @@ const MAX_CAPTURE_LOG_ENTRIES = 5_000;
 
 // ---------- HTTP API helper ----------
 
+function apiPath(...segments) {
+  if (segments.some(segment => !segment || segment === "." || segment === "..")) {
+    throw new Error("Invalid launcher API path segment");
+  }
+  return `/${segments.map(encodeURIComponent).join("/")}`;
+}
+
 async function api(path, { method = "GET", body } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
@@ -81,7 +88,7 @@ async function cdpEndpoint(profileId, { autostart = true, headless = false } = {
   const running = await api("/running");
   let entry = running.find((r) => r.profile_id === profileId);
   if (!entry && autostart) {
-    const started = await api(`/profiles/${profileId}/start`, {
+    const started = await api(apiPath("profiles", profileId, "start"), {
       method: "POST",
       body: { headless },
     });
@@ -148,7 +155,7 @@ server.tool(
   "get_profile",
   "Get a profile's full stored config by id.",
   { id: z.string() },
-  async ({ id }) => text(await api(`/profiles/${id}`)),
+  async ({ id }) => text(await api(apiPath("profiles", id))),
 );
 
 server.tool(
@@ -156,7 +163,7 @@ server.tool(
   "Generate a fresh uniquified fingerprint (random platform_version, host-aware CPU/RAM, clamped screen). Not persisted.",
   { platform: z.enum(["Windows", "macOS", "Linux"]).optional() },
   async ({ platform }) =>
-    text(await api(platform ? `/fingerprint/new/${platform}` : "/fingerprint/new")),
+    text(await api(platform ? apiPath("fingerprint", "new", platform) : "/fingerprint/new")),
 );
 
 const manualDisplayName = z.string().describe("Use only English letters, digits, spaces, and . - _ ( ). Leading and trailing ordinary spaces are removed.");
@@ -176,10 +183,10 @@ server.tool(
   },
   async ({ name, notes, folder, proxy, proxy_id, platform, fingerprint, extensions }) => {
     if (!fingerprint) {
-      const fp = await api(platform ? `/fingerprint/new/${platform}` : "/fingerprint/new");
+      const fp = await api(platform ? apiPath("fingerprint", "new", platform) : "/fingerprint/new");
       fingerprint = fp.fingerprint;
     }
-    const path = folder ? `/folders/${encodeURIComponent(folder)}/profiles` : "/profiles";
+    const path = folder ? apiPath("folders", folder, "profiles") : "/profiles";
     const body = { name, notes, proxy, proxy_id, fingerprint, extensions };
     if (folder) delete body.folder; // folder comes from the path
     return text(await api(path, { method: "POST", body }));
@@ -213,14 +220,14 @@ server.tool(
     fingerprint: z.any().optional(),
     extensions: z.array(z.string()).optional(),
   },
-  async ({ id, ...body }) => text(await api(`/profiles/${id}`, { method: "PATCH", body })),
+  async ({ id, ...body }) => text(await api(apiPath("profiles", id), { method: "PATCH", body })),
 );
 
 server.tool(
   "delete_profile",
   "Move a stopped persistent profile and its complete browser data to the 7-day recycle bin. Temporary profiles are permanently deleted.",
   { id: z.string() },
-  async ({ id }) => text(await api(`/profiles/${id}`, { method: "DELETE" })),
+  async ({ id }) => text(await api(apiPath("profiles", id), { method: "DELETE" })),
 );
 
 server.tool(
@@ -228,7 +235,7 @@ server.tool(
   "Launch a profile with CDP. Returns { pid, cdp:{ web_socket_debugger_url, http_url } }. Set headless to run without a window.",
   { id: z.string(), headless: z.boolean().optional() },
   async ({ id, headless }) =>
-    text(await api(`/profiles/${id}/start`, { method: "POST", body: { headless: !!headless } })),
+    text(await api(apiPath("profiles", id, "start"), { method: "POST", body: { headless: !!headless } })),
 );
 
 server.tool(
@@ -239,7 +246,7 @@ server.tool(
     await cleanupProfileState(id);
     const b = browsers.get(id);
     if (b) { try { await b.close(); } catch {} browsers.delete(id); }
-    return text(await api(`/profiles/${id}/stop`, { method: "POST" }));
+    return text(await api(apiPath("profiles", id, "stop"), { method: "POST" }));
   },
 );
 
@@ -261,7 +268,7 @@ server.tool(
   "Rename a folder (retags its profiles).",
   { folder: z.string(), name: z.string() },
   async ({ folder, name }) =>
-    text(await api(`/folders/${encodeURIComponent(folder)}`, { method: "PATCH", body: { name } })),
+    text(await api(apiPath("folders", folder), { method: "PATCH", body: { name } })),
 );
 
 server.tool(
@@ -271,7 +278,7 @@ server.tool(
   async ({ folder, delete_profiles }) =>
     text(
       await api(
-        `/folders/${encodeURIComponent(folder)}?delete_profiles=${delete_profiles ? "true" : "false"}`,
+        `${apiPath("folders", folder)}?delete_profiles=${delete_profiles ? "true" : "false"}`,
         { method: "DELETE" },
       ),
     ),
@@ -302,14 +309,14 @@ server.tool(
   "delete_proxy",
   "Delete a stored proxy by id.",
   { id: z.string() },
-  async ({ id }) => text(await api(`/proxies/${id}`, { method: "DELETE" })),
+  async ({ id }) => text(await api(apiPath("proxies", id), { method: "DELETE" })),
 );
 
 server.tool(
   "export_cookies",
   "Export a profile's cookies (decrypted).",
   { id: z.string() },
-  async ({ id }) => text(await api(`/profiles/${id}/cookies`)),
+  async ({ id }) => text(await api(apiPath("profiles", id, "cookies"))),
 );
 
 server.tool(
@@ -317,15 +324,15 @@ server.tool(
   "Import cookies into a STOPPED profile.",
   { id: z.string(), cookies: z.array(z.any()) },
   async ({ id, cookies }) =>
-    text(await api(`/profiles/${id}/cookies`, { method: "POST", body: { cookies } })),
+    text(await api(apiPath("profiles", id, "cookies"), { method: "POST", body: { cookies } })),
 );
 
 server.tool("list_extensions", "List library extensions, reference counts, and per-item errors.", {}, async () => text(await api("/extensions")));
 server.tool("import_extension", "Import a Manifest V3 folder, CRX, or ZIP from a local path on the launcher host.", { path: z.string() }, async body => text(await api("/extensions", { method: "POST", body })));
-server.tool("delete_extension", "Delete an extension only when no profile or recycle-bin item references it.", { id: z.string() }, async ({ id }) => text(await api(`/extensions/${encodeURIComponent(id)}`, { method: "DELETE" })));
+server.tool("delete_extension", "Delete an extension only when no profile or recycle-bin item references it.", { id: z.string() }, async ({ id }) => text(await api(apiPath("extensions", id), { method: "DELETE" })));
 server.tool("list_trash", "List recycled profiles and their 7-day expiry dates.", {}, async () => text(await api("/trash")));
-server.tool("restore_trash", "Restore a recycled profile with its original identity and complete browser data.", { id: z.string() }, async ({ id }) => text(await api(`/trash/${encodeURIComponent(id)}/restore`, { method: "POST" })));
-server.tool("purge_trash", "Permanently delete one recycle-bin item and its browser data. This cannot be undone.", { id: z.string() }, async ({ id }) => text(await api(`/trash/${encodeURIComponent(id)}`, { method: "DELETE" })));
+server.tool("restore_trash", "Restore a recycled profile with its original identity and complete browser data.", { id: z.string() }, async ({ id }) => text(await api(apiPath("trash", id, "restore"), { method: "POST" })));
+server.tool("purge_trash", "Permanently delete one recycle-bin item and its browser data. This cannot be undone.", { id: z.string() }, async ({ id }) => text(await api(apiPath("trash", id), { method: "DELETE" })));
 server.tool("empty_trash", "Permanently delete all recycle-bin items and their browser data. This cannot be undone.", {}, async () => text(await api("/trash", { method: "DELETE" })));
 
 // ================= CDP browser tools (patchright) =================
