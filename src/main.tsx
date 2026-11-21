@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { tr } from "./i18n";
+import { applyTableLayout } from "./tableLayout";
 
 class ErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -32,6 +33,7 @@ class ErrorBoundary extends React.Component<
   }
 }
 
+applyTableLayout();
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ErrorBoundary>

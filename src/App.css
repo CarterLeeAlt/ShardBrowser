@@ -32,11 +32,8 @@
   --radius-sm: 6px;
   --radius:    8px;
   --radius-lg: 12px;
-  --sidebar-width: 216px;
+  --sidebar-width: var(--layout-sidebar-width);
   --main-padding: 24px;
-  --scrollbar-width: 10px;
-  --table-border: 1px;
-  --table-min-width: 1022px;
   --diamond: polygon(50% 0, 100% 50%, 50% 100%, 0 50%);
 
   font-family: var(--font-app);
@@ -351,7 +348,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   min-width: 0;
   padding-block: 16px 24px;
   /* Reserve room for the whole table before allocating optional side gutters. */
-  padding-inline: clamp(10px, calc((100vw - var(--sidebar-width) - var(--scrollbar-width) - var(--table-min-width) - 2 * var(--table-border)) / 2), var(--main-padding));
+  padding-inline: clamp(var(--main-min-padding), calc((100vw - var(--sidebar-width) - var(--scrollbar-width) - var(--table-min-width) - 2 * var(--table-border)) / 2), var(--main-padding));
   overflow-y: auto;
   scrollbar-gutter: stable;
   background: var(--bg-0);
@@ -700,40 +697,11 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 /* ===== rows ===== */
 
 .rows {
-  --sort-min: 24px;
-  --select-min: 28px;
-  --column-gap: 8px;
-  --table-tracks-width: calc(var(--growing-min-width) + var(--actions-width) + var(--growing-columns) * var(--column-gap) + var(--table-padding-left) + var(--table-padding-right));
   container-type: inline-size;
   background: var(--bg-1);
   border: var(--table-border) solid var(--bd-1);
   border-radius: var(--radius-lg);
   overflow-x: auto;
-}
-.browser-rows {
-  --growing-columns: 7;
-  --name-min: 140px;
-  --status-min: 43px;
-  --proxy-min: 161px;
-  --notes-min: 192px;
-  --last-run-min: 128px;
-  --actions-width: 160px;
-  --table-padding-left: 0px;
-  --table-padding-right: 8px;
-  --growing-min-width: calc(var(--sort-min) + var(--select-min) + var(--name-min) + var(--status-min) + var(--proxy-min) + var(--notes-min) + var(--last-run-min));
-}
-.proxy-rows {
-  --growing-columns: 8;
-  --name-min: 160px;
-  --type-min: 92px;
-  --host-min: 140px;
-  --country-min: 110px;
-  --profiles-min: 68px;
-  --test-min: 180px;
-  --actions-width: 124px;
-  --table-padding-left: 16px;
-  --table-padding-right: 16px;
-  --growing-min-width: calc(var(--sort-min) + var(--select-min) + var(--name-min) + var(--type-min) + var(--host-min) + var(--country-min) + var(--profiles-min) + var(--test-min));
 }
 .t-cols, .p-cols {
   display: grid;
@@ -744,29 +712,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   align-items: center;
   /* Every growing track gets its floor plus the same share of spare space. */
   --column-extra: calc((max(100cqw, var(--table-min-width)) - var(--table-tracks-width)) / var(--growing-columns));
-}
-.t-cols {
-  grid-template-columns:
-    calc(var(--sort-min) + var(--column-extra))
-    calc(var(--select-min) + var(--column-extra))
-    calc(var(--name-min) + var(--column-extra))
-    calc(var(--status-min) + var(--column-extra))
-    calc(var(--proxy-min) + var(--column-extra))
-    calc(var(--notes-min) + var(--column-extra))
-    calc(var(--last-run-min) + var(--column-extra))
-    var(--actions-width);
-}
-.p-cols {
-  grid-template-columns:
-    calc(var(--sort-min) + var(--column-extra))
-    calc(var(--select-min) + var(--column-extra))
-    calc(var(--name-min) + var(--column-extra))
-    calc(var(--type-min) + var(--column-extra))
-    calc(var(--host-min) + var(--column-extra))
-    calc(var(--country-min) + var(--column-extra))
-    calc(var(--profiles-min) + var(--column-extra))
-    calc(var(--test-min) + var(--column-extra))
-    var(--actions-width);
 }
 /* Keep long values inside their own track. */
 :is(.t-cols, .p-cols) > * { min-width: 0; }

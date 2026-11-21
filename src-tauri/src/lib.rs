@@ -1562,9 +1562,7 @@ pub fn run() {
                 .first()
                 .cloned()
                 .expect("main window configuration missing");
-            window_config.width = window_config
-                .min_width
-                .expect("main window minimum width missing");
+            window_sizing::configure(&mut window_config)?;
             // The launcher draws its own titlebar.
             let mut window_builder =
                 tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
@@ -1713,8 +1711,9 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!());
-    if let Err(error) = result {
-        startup_path::show_fatal_startup_error_and_exit(&error.to_string());
+        .build(tauri::generate_context!());
+    match result {
+        Ok(app) => app.run(window_sizing::remember_size()),
+        Err(error) => startup_path::show_fatal_startup_error_and_exit(&error.to_string()),
     }
 }
