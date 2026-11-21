@@ -2039,7 +2039,6 @@ function BrowsersView() {
       <div className="rows browser-rows">
         <div className="rows-head t-cols">
           <div className="sort-head" title={tr("Drag rows to reorder")}><Icon.Grip size={16} /></div>
-          <div></div>
           <div>
             <input
               type="checkbox"
@@ -2064,7 +2063,7 @@ function BrowsersView() {
               }}
             />
           </div>
-          <div>{tr("Name")}</div><div>{tr("Status")}</div><div className="head-proxy">{tr("Proxy")}</div><div>{tr("Notes")}</div><div className="head-lastrun">{tr("Last run")}</div><div className="head-actions">{tr("Actions")}</div>
+          <div>{tr("Name")}</div><div className="head-status">{tr("Status")}</div><div className="head-proxy">{tr("Proxy")}</div><div>{tr("Notes")}</div><div className="head-lastrun">{tr("Last run")}</div><div className="head-actions">{tr("Actions")}</div>
         </div>
         {expanded === "__new__" && draft && (
           <div className="row-wrap row-expanded row-new">
@@ -2089,6 +2088,8 @@ function BrowsersView() {
           const isStarting = !isRunning && (startBusy.has(p.id) || backendActiveIds.has(p.id));
           const isReserved = operations.runtime || !!recovery?.incomplete || operations.profiles.includes(p.id);
           const isActive = isRunning || isStarting || isReserved;
+          const status = isRunning ? "running" : isReserved ? "busy" : isStarting ? "starting" : "idle";
+          const statusLabel = tr({ running: "Running", busy: "Busy", starting: "Starting…", idle: "Idle" }[status]);
           const isExpanded = expanded === p.id;
           const isSel = selected.has(p.id);
           const edit = renaming?.id === p.id ? renaming : null;
@@ -2098,7 +2099,7 @@ function BrowsersView() {
               id={p.id}
               kind="profile"
               name={p.name}
-              className={`row-wrap ${isRunning ? "row-running" : ""} ${isExpanded ? "row-expanded" : ""}`}
+              className={`row-wrap${isExpanded ? " row-expanded" : ""}`}
               rowClassName="row t-cols browser-data-row"
               disabledReason={isActive ? tr("Stop the browser before reordering this profile") : search.trim() ? tr("Clear search to reorder profiles") : isExpanded ? tr("Close the editor before reordering") : undefined}
               onContextMenu={(e) => {
@@ -2121,9 +2122,6 @@ function BrowsersView() {
                 />
               ) : undefined}
             >
-                <div className="cell-strip">
-                  <span className="shard" />
-                </div>
                 <div>
                   <input type="checkbox" aria-label={p.name} checked={isSel} onChange={() => toggleSel(p.id)} />
                 </div>
@@ -2148,11 +2146,12 @@ function BrowsersView() {
                   ) : <div className="name-main" title={p.name}>{p.name}</div>}
                   <div className="name-sub table-detail">{p.id.slice(0, 8)}</div>
                 </div>
-                <div className="cell-status">
-                  <span className={`pill-status ${isRunning ? "ps-on" : "ps-off"}`}>
-                    <i className="dot" />
-                    {isRunning ? tr("Running") : isReserved ? tr("Busy") : isStarting ? tr("Starting…") : tr("Idle")}
-                  </span>
+                <div className="cell-status" data-state={status} role="img" aria-label={statusLabel} title={statusLabel}>
+                  {status === "starting" ? <Icon.Loader size={14} /> : status === "busy" ? <Clock size={14} /> : (
+                    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" focusable="false">
+                      <path d="M7 1.5 12.5 7 7 12.5 1.5 7Z" fill={isRunning ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.25" />
+                    </svg>
+                  )}
                 </div>
                 <div
                   className={`cell-proxy cell-click ${px ? "" : "cell-proxy-direct"} ${isActive ? "cell-locked" : ""}`}
