@@ -465,12 +465,12 @@ type FingerprintEntry = {
 
 // ---- profile form ----
 
-const PROFILE_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
-function profileNameError(name: string): string | null {
-  if (!name.trim()) return tr("Profile name is required");
-  if (!PROFILE_NAME_PATTERN.test(name)) {
-    return tr("Use only letters, numbers, underscores (_), and hyphens (-)");
+function displayNameError(name: string, original?: string, optional = false): string | null {
+  if (name === original) return null;
+  if (/[^A-Za-z0-9 ._()-]/.test(name)) {
+    return tr("Use only English letters, digits, spaces, and . - _ ( )");
   }
+  if (!optional && !name.trim()) return tr("Name is required");
   return null;
 }
 
@@ -1788,11 +1788,13 @@ function BrowsersView() {
       return;
     }
 
-    const name = draftName.trim();
+    const name = draftName;
     if (name === profile.name) {
       setRenaming((current) => current?.id === id ? null : current);
       return;
     }
+    const error = displayNameError(name);
+    if (error) { toast.err(error); return; }
 
     try {
       await invoke("profile_rename", { id, name });
@@ -1990,9 +1992,9 @@ function BrowsersView() {
     setExpanded("__new__");
   };
 
+  const nameError = draft ? displayNameError(draft.name, draftBaseline?.name) : null;
   const saveDraft = async () => {
     if (!draft || saveInFlight.current) return;
-    const nameError = profileNameError(draft.name);
     if (nameError) {
       toast.err(nameError);
       return;
@@ -2213,6 +2215,7 @@ function BrowsersView() {
           <div className="row-wrap row-expanded row-new">
             <InlineEditor
               draft={draft}
+              nameError={nameError}
               setDraft={setDraft}
               proxies={proxies}
               fingerprints={fingerprints}
@@ -2263,6 +2266,7 @@ function BrowsersView() {
               footer={isExpanded && draft ? (
                 <InlineEditor
                   draft={draft}
+                  nameError={nameError}
                   setDraft={setDraft}
                   proxies={proxies}
                   fingerprints={fingerprints}
@@ -2607,9 +2611,10 @@ const OS_OPTIONS: { id: OsPlatform; label: string }[] = [
 ];
 
 function InlineEditor({
-  draft, setDraft, proxies, fingerprints, onSave, onCancel, busy,
+  draft, nameError, setDraft, proxies, fingerprints, onSave, onCancel, busy,
 }: {
   draft: ProfileForm;
+  nameError: string | null;
   setDraft: (f: ProfileForm) => void;
   proxies: ProxyEntry[];
   fingerprints: FingerprintEntry[];
@@ -2618,7 +2623,6 @@ function InlineEditor({
   busy: boolean;
 }) {
   const f = draft;
-  const nameError = profileNameError(f.name);
   const u = <K extends keyof ProfileForm>(k: K, v: ProfileForm[K]) => setDraft({ ...f, [k]: v });
   const draftRef = useRef(f);
   draftRef.current = f;
@@ -3347,8 +3351,10 @@ function ProxiesView() {
       toast.err(tr("Stop the running browser using this proxy before renaming it"));
       return;
     }
-    const newName = renaming.draft.trim();
+    const newName = renaming.draft;
     if (newName === entry.name) { setRenaming(null); return; }
+    const error = displayNameError(newName, entry.name, true);
+    if (error) { toast.err(error); return; }
     try {
       const request: ProxySaveRequest = {
         id: entry.id,
@@ -4233,7 +4239,9 @@ host:8080               # no auth
 function ProxyEditor({ initial, onClose }: { initial: ProxyEntry; onClose: () => void }) {
   const [p, setP] = useState<ProxyEntry>({ ...initial, username: "", password: "" });
   const [credentialsMode, setCredentialsMode] = useState<"keep" | "replace" | "clear">("keep");
+  const nameError = displayNameError(p.name, initial.name, true);
   const save = async () => {
+    if (nameError) return;
     try {
       const credentials: ProxyCredentialsUpdate = credentialsMode === "replace"
         ? { mode: "replace", username: p.username ?? "", password: p.password ?? "" }
@@ -4265,7 +4273,7 @@ function ProxyEditor({ initial, onClose }: { initial: ProxyEntry; onClose: () =>
           <button className="icon-btn" onClick={onClose}>✕</button>
         </header>
         <div className="dialog-body">
-          <Field label={tr("Name")} value={p.name} onChange={(v: string) => setP({ ...p, name: v })} />
+          <Field label={tr("Name")} value={p.name} onChange={(v: string) => setP({ ...p, name: v })} error={nameError} />
           <div className="form-row">
             <label>
               <span className="lbl">{tr("Type")}</span>
@@ -4305,7 +4313,7 @@ function ProxyEditor({ initial, onClose }: { initial: ProxyEntry; onClose: () =>
         </div>
         <footer className="dialog-foot">
           <button className="btn-ghost" onClick={onClose}>{tr("Cancel")}</button>
-          <button className="btn-primary" onClick={save}><ShardMini />  {tr("Save")}</button>
+          <button className="btn-primary" onClick={save} disabled={nameError != null} title={nameError ?? undefined}><ShardMini />  {tr("Save")}</button>
         </footer>
       </div>
     </DialogBackdrop>

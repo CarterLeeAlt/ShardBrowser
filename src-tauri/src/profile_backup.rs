@@ -414,7 +414,7 @@ fn build_backup_archive(profile_id: &str, stamp: u128, exported_at: &str) -> Res
         .and_then(|value| value.as_str())
         .unwrap_or("")
         .to_string();
-    profile::validate_profile_name(&name)?;
+    crate::display_name::normalize(&name)?;
     if stored.meta.id != profile_id {
         bail!("profile id does not match its on-disk filename");
     }
@@ -815,7 +815,7 @@ fn prepare_import_inner(
     }
     uuid::Uuid::parse_str(&manifest.backup_id).context("backup id is invalid")?;
     validate_profile_id(&manifest.source_profile_id)?;
-    profile::validate_profile_name(&manifest.name)?;
+    crate::display_name::normalize(&manifest.name)?;
 
     let mut record_names = HashSet::new();
     let mut total_uncompressed = 0u64;
@@ -1548,7 +1548,7 @@ mod tests {
     fn lightweight_backup_preserves_persistent_data_and_source_files() {
         let _test = store::TestStore::new();
         let mut stored: profile::StoredProfile = serde_json::from_value(serde_json::json!({
-            "_meta": {"id": "persistent-data"}, "name": "PersistentData",
+            "_meta": {"id": "persistent-data"}, "name": "Persistent_Data (v2.1)-A",
             "navigator": {"platform_version": "17.0.0"}, "noise": {"seed": 42}
         }))
         .unwrap();
@@ -1646,6 +1646,12 @@ mod tests {
         }
         let manifest: BackupManifest =
             serde_json::from_reader(archive.by_name(MANIFEST_ENTRY).unwrap()).unwrap();
+        assert_eq!(manifest.name, "Persistent_Data (v2.1)-A");
+        assert!(backup
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("Persistent_Datav21-A__"));
         let actual_bytes: u64 = manifest
             .entries
             .iter()

@@ -159,11 +159,13 @@ server.tool(
     text(await api(platform ? `/fingerprint/new/${platform}` : "/fingerprint/new")),
 );
 
+const manualDisplayName = z.string().describe("Use only English letters, digits, spaces, and . - _ ( ). Leading and trailing ordinary spaces are removed.");
+
 server.tool(
   "create_profile",
   "Create a persistent profile. If `fingerprint` is omitted, a new one is generated for `platform` (or the host OS). `proxy` is a string added to the store; `folder` files it.",
   {
-    name: z.string().optional(),
+    name: manualDisplayName.optional(),
     notes: z.string().optional(),
     folder: z.string().optional(),
     proxy: z.string().optional(),
@@ -191,7 +193,7 @@ server.tool(
     fingerprint_id: z.string().optional(),
     platform: z.enum(["Windows", "macOS", "Linux"]).optional(),
     proxy: z.string().optional(),
-    name: z.string().optional(),
+    name: manualDisplayName.optional(),
     folder: z.string().optional(),
     extensions: z.array(z.string()).optional(),
   },
@@ -203,7 +205,7 @@ server.tool(
   "Edit a profile. Only provided fields change; `fingerprint` replaces it verbatim; folder:'' unfiles; proxy_id:'' unbinds.",
   {
     id: z.string(),
-    name: z.string().optional(),
+    name: manualDisplayName.optional(),
     notes: z.string().optional(),
     folder: z.string().optional(),
     proxy_id: z.string().optional(),
@@ -281,7 +283,7 @@ server.tool("list_proxies", "List stored proxies (no credentials).", {}, async (
 
 server.tool(
   "add_proxy",
-  "Add a proxy to the store. Pass `proxy` as a string (scheme://user:pass@host:port) or explicit fields.",
+  "Add a proxy to the store. Pass `proxy` as a string (scheme://user:pass@host:port) or explicit fields. Omit or leave `name` blank to use host:port.",
   {
     proxy: z.string().optional(),
     kind: z.enum(["socks5", "http", "https"]).optional(),
@@ -289,7 +291,7 @@ server.tool(
     port: z.number().optional(),
     username: z.string().optional(),
     password: z.string().optional(),
-    name: z.string().optional(),
+    name: manualDisplayName.optional(),
     country: z.string().optional(),
     notes: z.string().optional(),
   },

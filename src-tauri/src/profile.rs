@@ -99,36 +99,22 @@ pub fn validate_profile_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// User-facing profile names are also passed to browser/taskbar integration,
-/// so keep the accepted alphabet explicit and consistent across every entry point.
-pub fn validate_profile_name(name: &str) -> Result<()> {
-    if name.trim().is_empty() {
-        anyhow::bail!("Profile name is required");
-    }
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        anyhow::bail!(
-            "Profile name may only contain letters, numbers, underscores (_), and hyphens (-)"
-        );
-    }
-    Ok(())
-}
-
 /// Produce a valid name only for names generated internally (templates/clones).
 /// Explicit user input is validated and rejected instead of being rewritten.
 pub fn generated_profile_name(value: &str, fallback: &str) -> String {
     fn sanitize(value: &str) -> String {
+        if let Ok(name) = crate::display_name::normalize(value) {
+            return name.to_string();
+        }
         let mut out = String::with_capacity(value.len());
         for ch in value.chars() {
-            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            if crate::display_name::is_allowed(ch) {
                 out.push(ch);
             } else if !out.is_empty() && !out.ends_with('-') {
                 out.push('-');
             }
         }
-        out.trim_matches('-').to_string()
+        out.trim_matches([' ', '-']).to_string()
     }
 
     let generated = sanitize(value);

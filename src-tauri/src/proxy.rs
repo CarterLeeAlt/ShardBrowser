@@ -575,6 +575,10 @@ fn validate_host(host: &str) -> Result<()> {
     Ok(())
 }
 
+fn endpoint_name(host: &str, port: u16) -> String {
+    format!("{host}:{port}")
+}
+
 fn normalize_entry(mut entry: ProxyEntry) -> Result<ProxyEntry> {
     entry.host = entry.host.trim().to_string();
     validate_host(&entry.host)?;
@@ -605,9 +609,8 @@ fn normalize_entry(mut entry: ProxyEntry) -> Result<ProxyEntry> {
         anyhow::bail!("country must be a two-letter code");
     }
 
-    entry.name = entry.name.trim().to_string();
     if entry.name.is_empty() {
-        entry.name = format!("{}:{}", entry.host, entry.port);
+        entry.name = endpoint_name(&entry.host, entry.port);
     }
     Ok(entry)
 }
@@ -726,9 +729,14 @@ pub fn upsert_with_status(
     let mut s = load_unlocked()?;
     let existing_index = s.proxies.iter().position(|proxy| proxy.id == request.id);
     let existing = existing_index.and_then(|index| s.proxies.get(index));
+    let name = if existing.is_some_and(|proxy| proxy.name == request.name) {
+        request.name
+    } else {
+        crate::display_name::normalize_optional(&request.name)?.to_string()
+    };
     let mut entry = ProxyEntry {
         id: request.id,
-        name: request.name,
+        name,
         kind: request.kind,
         host: request.host,
         port: request.port,
@@ -1201,7 +1209,7 @@ fn parse_one_checked(line: &str, default_kind: &ProxyKind) -> Result<ProxyEntry>
     normalize_entry(ProxyEntry {
         // ID assigned now so pre-save test snapshots key under the kept uuid.
         id: uuid::Uuid::new_v4().to_string(),
-        name: format!("{host}:{port}"),
+        name: String::new(),
         kind,
         host: host.to_string(),
         port,
@@ -1222,8 +1230,14 @@ pub fn bulk_save_with_entries(
     let entries = entries
         .into_iter()
         .enumerate()
-        .map(|(index, entry)| {
-            normalize_entry(entry).with_context(|| format!("entry {} is invalid", index + 1))
+        .map(|(index, mut entry)| {
+            (|| {
+                if entry.name != endpoint_name(entry.host.trim(), entry.port) {
+                    entry.name = crate::display_name::normalize_optional(&entry.name)?.to_string();
+                }
+                normalize_entry(entry)
+            })()
+            .with_context(|| format!("entry {} is invalid", index + 1))
         })
         .collect::<Result<Vec<_>>>()?;
     let _guard = PROXY_STORE_LOCK
@@ -1273,6 +1287,40 @@ mod bulk_import_tests {
             country: String::new(),
             notes: String::new(),
         }
+    }
+
+    #[test]
+    fn edits_preserve_legacy_names_and_bulk_import_keeps_endpoint_labels() {
+        let _test = store::TestStore::new();
+        let mut legacy = entry(ProxyKind::Socks5, "legacy.example", 1080, "");
+        legacy.name = "\u{4ee3}\u{7406}:legacy".into();
+        let legacy = upsert_dedup(legacy).unwrap();
+        let request = |name: &str| ProxySaveRequest {
+            id: legacy.id.clone(),
+            name: name.into(),
+            kind: legacy.kind.clone(),
+            host: legacy.host.clone(),
+            port: legacy.port,
+            country: "US".into(),
+            notes: "updated".into(),
+            credentials: ProxyCredentialsUpdate::Keep,
+        };
+        let (saved, ..) = upsert_with_status(request(&legacy.name)).unwrap();
+        assert_eq!(saved.name, legacy.name);
+        assert_eq!(saved.notes, "updated");
+        assert!(upsert_with_status(request("New:Invalid")).is_err());
+        let (saved, ..) = upsert_with_status(request("  New_Name (v2.0)  ")).unwrap();
+        assert_eq!(saved.name, "New_Name (v2.0)");
+        let (saved, ..) = upsert_with_status(request("  ")).unwrap();
+        assert_eq!(saved.name, "legacy.example:1080");
+
+        let endpoint = parse_single("socks5://[2001:db8::2]:1080").unwrap();
+        let mut invalid = entry(ProxyKind::Socks5, "invalid.example", 1080, "");
+        invalid.name = "Invalid:Name".into();
+        assert!(bulk_save_with_entries(vec![endpoint.clone(), invalid]).is_err());
+        assert_eq!(load().unwrap().proxies.len(), 1);
+        let (saved, _) = bulk_save_with_entries(vec![endpoint]).unwrap();
+        assert_eq!(saved[0].name, "[2001:db8::2]:1080");
     }
 
     #[test]

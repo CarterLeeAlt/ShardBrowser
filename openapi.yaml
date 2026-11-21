@@ -980,12 +980,17 @@ components:
           type: integer
           description: Per-profile entropy; 0 = derive automatically.
 
+    ManualDisplayName:
+      type: string
+      description: Use only English letters, digits, ordinary spaces, and `. - _ ( )`. Leading and trailing ordinary spaces are removed.
+      example: US-West_01 (v2.1)
+
     CreateProfileRequest:
       type: object
       required: [fingerprint]
       properties:
         extensions: { $ref: "#/components/schemas/ExtensionIds" }
-        name: { type: string }
+        name: { $ref: "#/components/schemas/ManualDisplayName" }
         notes: { type: string }
         proxy_id:
           type: string
@@ -1013,7 +1018,7 @@ components:
       description: All fields optional — only what's present is changed.
       properties:
         extensions: { $ref: "#/components/schemas/ExtensionIds" }
-        name: { type: string }
+        name: { $ref: "#/components/schemas/ManualDisplayName" }
         notes: { type: string }
         folder: { type: string, description: '"" unfiles (moves to All).' }
         proxy_id: { type: string, description: '"" unbinds the proxy.' }
@@ -1038,7 +1043,7 @@ components:
         proxy:
           type: string
           description: Inline proxy string (not saved to the store).
-        name: { type: string }
+        name: { $ref: "#/components/schemas/ManualDisplayName" }
         folder: { type: string }
 
     ProfileMeta:
@@ -1140,7 +1145,9 @@ components:
         port: { type: integer }
         username: { type: string }
         password: { type: string }
-        name: { type: string }
+        name:
+          allOf: [{ $ref: "#/components/schemas/ManualDisplayName" }]
+          description: Omit or leave blank to use the endpoint (`host:port`) as the display name.
         country: { type: string }
         notes: { type: string }
 

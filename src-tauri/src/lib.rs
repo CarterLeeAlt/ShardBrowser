@@ -6,6 +6,7 @@ compile_error!("ShardX Launcher supports only Windows x64 (x86_64-pc-windows-msv
 mod api;
 mod browser_cdp;
 mod cookies;
+mod display_name;
 mod display_order;
 mod errors;
 mod extensions;
@@ -127,10 +128,11 @@ fn profile_rename(id: String, name: String) -> Result<(), String> {
     let _resource_guard = process::lock_profile_resources().map_err(|e| e.to_string())?;
     profile::ensure_stopped(&id).map_err(|e| e.to_string())?;
 
-    let name = name.trim();
-    profile::validate_profile_name(name).map_err(|e| e.to_string())?;
-
     let mut stored = profile::load_raw(&id).map_err(|e| e.to_string())?;
+    if stored.config.get("name").and_then(Value::as_str) == Some(name.as_str()) {
+        return Ok(());
+    }
+    let name = display_name::normalize(&name).map_err(|e| e.to_string())?;
     stored
         .config
         .insert("name".into(), Value::String(name.to_string()));
@@ -567,8 +569,11 @@ pub fn save_profile_core(
             })
             .unwrap_or(true);
     if name_changed {
-        profile::validate_profile_name(&profile_name)
+        let name = display_name::normalize(&profile_name)
             .map_err(|e| errors::Failure::InvalidInput(e.to_string()))?;
+        stored
+            .config
+            .insert("name".into(), Value::String(name.to_string()));
     }
     if !is_new {
         profile::ensure_stopped(&stored.meta.id)?;

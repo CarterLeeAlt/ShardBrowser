@@ -359,7 +359,7 @@ async fn persist_created(folder_override: Option<String>, body: CreateReq) -> Ap
         cfg.insert("notes".into(), json!(n));
     }
     let profile_name = cfg.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    crate::profile::validate_profile_name(profile_name)
+    crate::display_name::normalize(profile_name)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let folder = folder_override.or(body.folder).unwrap_or_default();
@@ -427,7 +427,7 @@ async fn create_temporary(Json(body): Json<TempReq>) -> ApiResult {
         cfg.insert("name".into(), json!(n));
     }
     let profile_name = cfg.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    crate::profile::validate_profile_name(profile_name)
+    crate::display_name::normalize(profile_name)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
     let mut meta = json!({ "id": "", "folder": body.folder.unwrap_or_default(), "temporary": true, "extensions": body.extensions });
     if let Some(pstr) = body.proxy.as_ref() {
@@ -535,8 +535,9 @@ async fn edit_profile(Path(id): Path<String>, Json(body): Json<EditReq>) -> ApiR
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if edited_name != original_name.as_str() {
-        crate::profile::validate_profile_name(edited_name)
+        let name = crate::display_name::normalize(edited_name)
             .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+        stored.config.insert("name".into(), json!(name));
     }
     if let Some(pid) = body.proxy_id.as_ref() {
         stored.meta.proxy_id = if pid.is_empty() {
@@ -753,8 +754,10 @@ async fn add_proxy(Json(body): Json<AddProxyReq>) -> ApiResult {
         }
     };
     // metadata overrides (applied to parsed entries too).
-    if let Some(n) = body.name.filter(|s| !s.is_empty()) {
-        entry.name = n;
+    if let Some(name) = body.name.as_deref() {
+        entry.name = crate::display_name::normalize_optional(name)
+            .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?
+            .to_string();
     }
     if let Some(c) = body.country {
         entry.country = c;
@@ -898,6 +901,72 @@ pub async fn serve(secret: String, port: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn profile_and_proxy_display_names_share_the_manual_rules() {
+        let _test = crate::store::TestStore::new();
+        let error_details = |error: ApiError| (error.0, error.1);
+        let create = |name| {
+            Json(serde_json::from_value(json!({ "name": name, "fingerprint": {} })).unwrap())
+        };
+        assert_eq!(
+            create_profile(create("A:B")).await.unwrap_err().0,
+            StatusCode::BAD_REQUEST
+        );
+        let Json(profile) = create_profile(create("  US-West_01  (v2.1) "))
+            .await
+            .map_err(error_details)
+            .unwrap();
+        assert_eq!(profile["name"], "US-West_01  (v2.1)");
+        let id = profile["id"].as_str().unwrap();
+        let edit = |name| Json(serde_json::from_value(json!({ "name": name })).unwrap());
+        assert_eq!(
+            edit_profile(Path(id.into()), edit("Bad/Name"))
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        let Json(edited) = edit_profile(Path(id.into()), edit("  Edited (v3.0) "))
+            .await
+            .map_err(error_details)
+            .unwrap();
+        assert_eq!(edited["name"], "Edited (v3.0)");
+        assert_eq!(
+            crate::profile::load_raw(id).unwrap().config["name"],
+            "Edited (v3.0)"
+        );
+        crate::profile_rename(id.into(), "  Line_Edit-1 (v3.0)  ".into()).unwrap();
+        assert_eq!(
+            crate::profile::clone_profile(id).unwrap().name,
+            "Line_Edit-1 (v3.0)-C"
+        );
+
+        let proxy = |host, name| {
+            Json(
+                serde_json::from_value(json!({ "host": host, "port": 1080, "name": name }))
+                    .unwrap(),
+            )
+        };
+        assert_eq!(
+            add_proxy(proxy("invalid.example", "A:B"))
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        let Json(saved) = add_proxy(proxy("proxy.example", "  US-West_01  (v2.1)  "))
+            .await
+            .map_err(error_details)
+            .unwrap();
+        assert_eq!(saved["name"], "US-West_01  (v2.1)");
+        let Json(automatic) = add_proxy(proxy("[2001:db8::1]", "  "))
+            .await
+            .map_err(error_details)
+            .unwrap();
+        assert_eq!(automatic["name"], "[2001:db8::1]:1080");
+    }
+
     #[tokio::test]
     async fn partial_patch_after_proxy_probe_preserves_concurrent_note_edit() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

@@ -27,6 +27,19 @@ try {
   for (const name of ["create_profile", "create_temporary_profile", "edit_profile"]) {
     assert.equal(tools.find(tool => tool.name === name).inputSchema.properties.extensions.type, "array");
   }
+  for (const [toolName, args, url] of [
+    ["create_profile", { fingerprint: {} }, "/profiles"],
+    ["create_temporary_profile", {}, "/profiles/temporary"],
+    ["edit_profile", { id: "profile" }, "/profiles/profile"],
+    ["add_proxy", { host: "example.invalid", port: 1080 }, "/proxies"],
+  ]) {
+    const name = "  US-West_01 (v2.1) ";
+    assert.match(tools.find(tool => tool.name === toolName).inputSchema.properties.name.description, /English letters, digits, spaces/);
+    const result = await client.callTool({ name: toolName, arguments: { ...args, name } });
+    assert.ok(!result.isError, JSON.stringify(result));
+    assert.equal(requests.at(-1).url, url);
+    assert.equal(requests.at(-1).body.name, name);
+  }
   assert.match(tools.find(tool => tool.name === "delete_profile").description, /7-day recycle bin/);
   for (const [name, args, method, url] of [
     ["list_extensions", {}, "GET", "/extensions"],
