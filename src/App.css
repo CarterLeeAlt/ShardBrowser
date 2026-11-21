@@ -354,6 +354,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   min-width: 0;
   margin-inline: auto;
 }
+.workspace-page-wide { width: 100%; }
 
 .page-toolbar {
   display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
@@ -692,59 +693,81 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 /* ===== rows ===== */
 
 .rows {
-  --browser-table-min-width: 988px;
-  --proxy-table-min-width: 1010px;
+  --sort-min: 24px;
+  --select-min: 28px;
+  --column-gap: 8px;
+  --table-min-width: calc(var(--growing-min-width) + var(--actions-width) + var(--growing-columns) * var(--column-gap) + var(--table-padding-left) + var(--table-padding-right));
   container-type: inline-size;
   background: var(--bg-1);
   border: 1px solid var(--bd-1);
   border-radius: var(--radius-lg);
   overflow-x: auto;
 }
-.t-cols {
-  min-width: var(--browser-table-min-width);
-  /* The proxy gets 15% of the space left by the 216px fixed tracks and
-     64px of gaps, with a 145.5px floor. The remaining columns share the rest. */
-  display: grid;
-  grid-template-columns:
-    24px                    /* sort handle */
-    4px                     /* shard strip */
-    28px                    /* checkbox */
-    minmax(140px, 1fr)      /* name */
-    minmax(100px, 1fr)      /* status */
-    max(145.5px, calc(15% - 42px)) /* proxy */
-    minmax(192.4px, 1fr)    /* notes */
-    minmax(116px, 1fr)      /* last run */
-    160px;                  /* row actions */
-  gap: 8px;
-  min-height: 40px;
-  padding: 5px 8px 5px 0;
-  align-items: center;
+.browser-rows {
+  --indicator-min: 4px;
+  --name-min: 140px;
+  --status-min: 100px;
+  --proxy-min: 146px;
+  --notes-min: 192px;
+  --last-run-min: 128px;
+  --actions-width: 160px;
+  --table-padding-left: 0px;
+  --table-padding-right: 8px;
+  --growing-columns: 8;
+  --growing-min-width: calc(var(--sort-min) + var(--indicator-min) + var(--select-min) + var(--name-min) + var(--status-min) + var(--proxy-min) + var(--notes-min) + var(--last-run-min));
 }
-/* Grid tracks default each cell's min-width to auto (= content
-   width), so a single long string in any cell pushes other columns
-   off-screen.  Force every direct child to shrink. */
-.t-cols > *,
-.p-cols > * { min-width: 0; }
-.p-cols {
-  min-width: var(--proxy-table-min-width);
-  /* Match the browser table: percentages based on the full table ignore the
-     fixed controls, gaps, and padding. Flexible tracks share only the room
-     that is actually left, so the action column stays inside the card. */
+.proxy-rows {
+  --name-min: 160px;
+  --type-min: 80px;
+  --host-min: 140px;
+  --country-min: 110px;
+  --profiles-min: 68px;
+  --test-min: 180px;
+  --actions-width: 124px;
+  --table-padding-left: 16px;
+  --table-padding-right: 16px;
+  --growing-columns: 8;
+  --growing-min-width: calc(var(--sort-min) + var(--select-min) + var(--name-min) + var(--type-min) + var(--host-min) + var(--country-min) + var(--profiles-min) + var(--test-min));
+}
+.t-cols, .p-cols {
   display: grid;
-  grid-template-columns:
-    24px                    /* sort handle */
-    28px                    /* checkbox */
-    minmax(160px, 1fr)      /* name */
-    minmax(80px, 1fr)       /* type */
-    minmax(140px, 1fr)      /* host:port */
-    minmax(110px, 1fr)      /* country */
-    minmax(68px, 1fr)       /* profiles */
-    minmax(180px, 1fr)      /* test result */
-    124px;                  /* row actions */
-  gap: 8px;
+  min-width: var(--table-min-width);
+  gap: var(--column-gap);
   min-height: 40px;
-  padding: 5px 16px;
+  padding: 5px var(--table-padding-right) 5px var(--table-padding-left);
   align-items: center;
+  /* Every growing track gets its floor plus the same share of spare space. */
+  --column-extra: max(0px, calc((100cqw - var(--table-min-width)) / var(--growing-columns)));
+}
+.t-cols {
+  grid-template-columns:
+    calc(var(--sort-min) + var(--column-extra))
+    calc(var(--indicator-min) + var(--column-extra))
+    calc(var(--select-min) + var(--column-extra))
+    calc(var(--name-min) + var(--column-extra))
+    calc(var(--status-min) + var(--column-extra))
+    calc(var(--proxy-min) + var(--column-extra))
+    calc(var(--notes-min) + var(--column-extra))
+    calc(var(--last-run-min) + var(--column-extra))
+    var(--actions-width);
+}
+.p-cols {
+  grid-template-columns:
+    calc(var(--sort-min) + var(--column-extra))
+    calc(var(--select-min) + var(--column-extra))
+    calc(var(--name-min) + var(--column-extra))
+    calc(var(--type-min) + var(--column-extra))
+    calc(var(--host-min) + var(--column-extra))
+    calc(var(--country-min) + var(--column-extra))
+    calc(var(--profiles-min) + var(--column-extra))
+    calc(var(--test-min) + var(--column-extra))
+    var(--actions-width);
+}
+/* Keep long values inside their own track. */
+:is(.t-cols, .p-cols) > * { min-width: 0; }
+:is(.t-cols, .p-cols) > :has(> input[type="checkbox"]) {
+  display: grid;
+  place-items: center;
 }
 
 .profile-count {
@@ -1008,18 +1031,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 }
 
 .row-actions { display: flex; align-items: center; gap: 4px; justify-content: flex-end; }
-.t-cols > .row-actions {
-  min-width: 160px;
-  flex-wrap: nowrap;
-}
-.t-cols > .row-actions > .icon-btn {
-  flex: 0 0 28px;
-}
-.p-cols > .row-actions {
-  min-width: 124px;
-  flex-wrap: nowrap;
-}
-.p-cols > .row-actions > .icon-btn {
+:is(.t-cols, .p-cols) > .row-actions > .icon-btn {
   flex: 0 0 28px;
 }
 
@@ -2170,8 +2182,7 @@ button.status-pill.status-link:active { transform: translateY(1px); }
 .storage-table td:nth-child(2) { min-width: 160px; max-width: 250px; }
 .storage-table tr:last-child td { border-bottom: 0; }
 .operation-banner { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; padding: 12px; border: 1px solid var(--bd-2); border-radius: var(--radius); background: var(--bg-2); overflow-wrap: anywhere; }
-.row-wrap:has(> .t-cols) { min-width: var(--browser-table-min-width); }
-.row-wrap:has(> .p-cols) { min-width: var(--proxy-table-min-width); }
+.row-wrap:has(> :is(.t-cols, .p-cols)) { min-width: var(--table-min-width); }
 .operation-banner p { margin: 6px 0 0; }
 .operation-banner button { flex-shrink: 0; }
 @media (max-width: 1250px) {

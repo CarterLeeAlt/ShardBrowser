@@ -900,7 +900,7 @@ export default function App() {
             onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
           />
           <main className="main" key={section}>
-            <div className="workspace-page">
+            <div className={`workspace-page${section === "browsers" || section === "proxies" ? " workspace-page-wide" : ""}`}>
               {section === "browsers" && <BrowsersView />}
               {section === "proxies" && <ProxiesView />}
               {section === "fingerprints" && <FingerprintsView />}
@@ -2036,7 +2036,7 @@ function BrowsersView() {
         activeIds={new Set([...backendActiveIds, ...startBusy, ...Object.keys(running).filter((id) => running[id])])}
         onClose={() => setAssigning(false)} onSaved={reload}
       />}
-      <div className="rows">
+      <div className="rows browser-rows">
         <div className="rows-head t-cols">
           <div className="sort-head" title={tr("Drag rows to reorder")}><Icon.Grip size={16} /></div>
           <div></div>
@@ -3398,7 +3398,7 @@ function ProxiesView() {
         ><Icon.Trash size={16} /> {tr("Delete")}</button>
       </SelectionBar>
       {loadError !== null && <ListState kind="error" text={tr("Unable to load proxies: {0}", loadError)} />}
-      <div className="rows">
+      <div className="rows proxy-rows">
         <div className="rows-head p-cols">
           <div className="sort-head" title={tr("Drag rows to reorder")}><Icon.Grip size={16} /></div>
           <div>
