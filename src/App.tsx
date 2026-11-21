@@ -1368,36 +1368,6 @@ function FolderDropTab({
   );
 }
 
-function PageDropButton({
-  dropId,
-  direction,
-  disabled,
-  onClick,
-  children,
-}: {
-  dropId: string;
-  direction: "previous" | "next";
-  disabled: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  const { setNodeRef, isOver } = useDroppable({
-    id: dropId,
-    disabled,
-    data: { type: "page", direction },
-  });
-  return (
-    <button
-      ref={setNodeRef}
-      className={`btn-ghost btn-sm ${isOver ? "pager-drop-active" : ""}`}
-      disabled={disabled}
-      onClick={onClick}
-    >
-      {children}
-    </button>
-  );
-}
-
 // ---- Browsers view ----
 
 function BrowsersView() {
@@ -1475,7 +1445,6 @@ function BrowsersView() {
   const sortSensors = useListSortSensors();
   const [activeSortId, setActiveSortId] = useState<string | null>(null);
   const [sortIndicator, setSortIndicator] = useState<{ id: string; placement: SortPlacement } | null>(null);
-  const [pageHover, setPageHover] = useState<"previous" | "next" | null>(null);
   const rememberFolder = (f: string) =>
     setFolderRegistry((r) => {
       const next = r.includes(f) ? r : [...r, f];
@@ -1591,28 +1560,6 @@ function BrowsersView() {
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
-
-  // Pagination of the (filtered) profile list.
-  const PAGE_SIZE = 20;
-  const [page, setPage] = useState(1);
-  const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
-  // Reset to page 1 when the filter changes; clamp if the list shrank.
-  useEffect(() => { setPage(1); }, [folder, search]);
-  useEffect(() => { if (page > pageCount) setPage(pageCount); }, [pageCount, page]);
-  const paged = useMemo(
-    () => visible.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
-    [visible, page],
-  );
-  useEffect(() => {
-    if (!pageHover) return;
-    const timer = setTimeout(() => {
-      setPage((current) => pageHover === "previous"
-        ? Math.max(1, current - 1)
-        : Math.min(pageCount, current + 1));
-      setPageHover(null);
-    }, 600);
-    return () => clearTimeout(timer);
-  }, [pageHover, pageCount]);
 
   // Reuse the most recent persisted test for every saved proxy. Browser rows
   // consume their bound proxy's snapshot, while the bind-proxy dialog can
@@ -2054,24 +2001,11 @@ function BrowsersView() {
   const resetProfileDrag = () => {
     setActiveSortId(null);
     setSortIndicator(null);
-    setPageHover(null);
   };
 
   const handleProfileDragOver = (event: DragOverEvent) => {
     const over = event.over;
-    if (!over) {
-      setSortIndicator(null);
-      setPageHover(null);
-      return;
-    }
-    const overType = over.data.current?.type;
-    if (overType === "page") {
-      setSortIndicator(null);
-      setPageHover(over.data.current?.direction === "previous" ? "previous" : "next");
-      return;
-    }
-    setPageHover(null);
-    if (overType !== "sortable-row" || over.data.current?.kind !== "profile") {
+    if (!over || over.data.current?.type !== "sortable-row" || over.data.current.kind !== "profile") {
       setSortIndicator(null);
       return;
     }
@@ -2083,7 +2017,7 @@ function BrowsersView() {
     }
     setSortIndicator({
       id: target.id,
-      placement: dropPlacementFor(event, paged.map((profile) => profile.id)),
+      placement: dropPlacementFor(event, visible.map((profile) => profile.id)),
     });
   };
 
@@ -2103,7 +2037,7 @@ function BrowsersView() {
     const moving = profiles.find((profile) => profile.id === activeId);
     const anchor = profiles.find((profile) => profile.id === anchorId);
     if (!moving || !anchor) return;
-    const placement = dropPlacementFor(event, paged.map((profile) => profile.id));
+    const placement = dropPlacementFor(event, visible.map((profile) => profile.id));
     setProfiles(moveByAnchor(profiles, activeId, anchorId, placement));
     try {
       await invoke("profile_move_order", { id: activeId, anchorId, placement });
@@ -2247,22 +2181,21 @@ function BrowsersView() {
           <div>
             <input
               type="checkbox"
-              title={tr("Select all on this page")}
-              // Header checkbox toggles only visible page rows; other pages preserved.
-              checked={paged.length > 0 && paged.every((p) => selected.has(p.id))}
+              title={tr("Select all matching rows")}
+              checked={visible.length > 0 && visible.every((p) => selected.has(p.id))}
               ref={(el) => {
                 if (!el) return;
-                const anySel = paged.some((p) => selected.has(p.id));
-                const allSel = paged.length > 0 && paged.every((p) => selected.has(p.id));
+                const anySel = visible.some((p) => selected.has(p.id));
+                const allSel = visible.every((p) => selected.has(p.id));
                 el.indeterminate = anySel && !allSel;
               }}
               onChange={(e) => {
                 setSelected((prev) => {
                   const next = new Set(prev);
                   if (e.target.checked) {
-                    for (const p of paged) next.add(p.id);
+                    for (const p of visible) next.add(p.id);
                   } else {
-                    for (const p of paged) next.delete(p.id);
+                    for (const p of visible) next.delete(p.id);
                   }
                   return next;
                 });
@@ -2284,8 +2217,8 @@ function BrowsersView() {
             />
           </div>
         )}
-        <SortableContext items={paged.map((profile) => profile.id)} strategy={verticalListSortingStrategy}>
-        {paged.map((p) => {
+        <SortableContext items={visible.map((profile) => profile.id)} strategy={verticalListSortingStrategy}>
+        {visible.map((p) => {
           const px = p.proxy_id ? proxyMap[p.proxy_id] : null;
           const proxySnapshot = px ? proxySnapshots[px.id] : undefined;
           const proxyCountry = (proxySnapshot?.country_code || px?.country || "").trim().toUpperCase();
@@ -2448,23 +2381,6 @@ function BrowsersView() {
           </div>
         )}
       </div>
-      {pageCount > 1 && (
-        <div className="pager">
-          <PageDropButton
-            dropId="profile-page-previous"
-            direction="previous"
-            disabled={page <= 1}
-            onClick={() => setPage((p) => Math.max(1, p - 1))}
-          >{tr("‹ Prev")}</PageDropButton>
-          <span className="pager-info">{tr("Page")} {page}  {tr("of")} {pageCount} · {visible.length}  {tr("profiles")}</span>
-          <PageDropButton
-            dropId="profile-page-next"
-            direction="next"
-            disabled={page >= pageCount}
-            onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
-          >{tr("Next ›")}</PageDropButton>
-        </div>
-      )}
       {ctx.node}
       {quickEdit && (
         <QuickEditDialog
@@ -3383,7 +3299,6 @@ function ProxiesView() {
   const proxySortSensors = useListSortSensors();
   const [activeProxySortId, setActiveProxySortId] = useState<string | null>(null);
   const [proxySortIndicator, setProxySortIndicator] = useState<{ id: string; placement: SortPlacement } | null>(null);
-  const [proxyPageHover, setProxyPageHover] = useState<"previous" | "next" | null>(null);
   const ctx = useContextMenu();
 
   // Search filter: matches name / host / port / country tag / notes / username
@@ -3409,30 +3324,6 @@ function ProxiesView() {
       );
     });
   }, [proxies, snapshots, search]);
-
-  // Pagination over the filtered list.
-  const PROXY_PAGE_SIZE = 20;
-  const [proxyPage, setProxyPage] = useState(1);
-  const proxyPageCount = Math.max(1, Math.ceil(filteredProxies.length / PROXY_PAGE_SIZE));
-  useEffect(() => {
-    if (proxyPage > proxyPageCount) setProxyPage(proxyPageCount);
-  }, [proxyPageCount, proxyPage]);
-  // Reset to page 1 when the search narrows the list to fewer pages.
-  useEffect(() => { setProxyPage(1); }, [search]);
-  const pagedProxies = useMemo(
-    () => filteredProxies.slice((proxyPage - 1) * PROXY_PAGE_SIZE, proxyPage * PROXY_PAGE_SIZE),
-    [filteredProxies, proxyPage],
-  );
-  useEffect(() => {
-    if (!proxyPageHover) return;
-    const timer = setTimeout(() => {
-      setProxyPage((current) => proxyPageHover === "previous"
-        ? Math.max(1, current - 1)
-        : Math.min(proxyPageCount, current + 1));
-      setProxyPageHover(null);
-    }, 600);
-    return () => clearTimeout(timer);
-  }, [proxyPageHover, proxyPageCount]);
 
   const selectedHasLockedProxy = [...proxySel].some((id) => lockedProxyIds.has(id));
 
@@ -3647,23 +3538,11 @@ function ProxiesView() {
   const resetProxyDrag = () => {
     setActiveProxySortId(null);
     setProxySortIndicator(null);
-    setProxyPageHover(null);
   };
 
   const handleProxyDragOver = (event: DragOverEvent) => {
     const over = event.over;
-    if (!over) {
-      setProxySortIndicator(null);
-      setProxyPageHover(null);
-      return;
-    }
-    if (over.data.current?.type === "page") {
-      setProxySortIndicator(null);
-      setProxyPageHover(over.data.current?.direction === "previous" ? "previous" : "next");
-      return;
-    }
-    setProxyPageHover(null);
-    if (over.data.current?.type !== "sortable-row" || over.data.current?.kind !== "proxy") {
+    if (!over || over.data.current?.type !== "sortable-row" || over.data.current.kind !== "proxy") {
       setProxySortIndicator(null);
       return;
     }
@@ -3674,7 +3553,7 @@ function ProxiesView() {
     }
     setProxySortIndicator({
       id: targetId,
-      placement: dropPlacementFor(event, pagedProxies.map((proxy) => proxy.id)),
+      placement: dropPlacementFor(event, filteredProxies.map((proxy) => proxy.id)),
     });
   };
 
@@ -3690,7 +3569,7 @@ function ProxiesView() {
     ) return;
 
     const anchorId = String(over.id);
-    const placement = dropPlacementFor(event, pagedProxies.map((proxy) => proxy.id));
+    const placement = dropPlacementFor(event, filteredProxies.map((proxy) => proxy.id));
     const previous = proxies;
     setProxies(moveByAnchor(proxies, activeId, anchorId, placement));
     try {
@@ -3738,22 +3617,21 @@ function ProxiesView() {
           <div>
             <input
               type="checkbox"
-              title={tr("Select all on this page")}
-              // Page-only header toggle (matches profile table behaviour).
-              checked={pagedProxies.length > 0 && pagedProxies.every((p) => proxySel.has(p.id))}
+              title={tr("Select all matching rows")}
+              checked={filteredProxies.length > 0 && filteredProxies.every((p) => proxySel.has(p.id))}
               ref={(el) => {
                 if (!el) return;
-                const any = pagedProxies.some((p) => proxySel.has(p.id));
-                const all = pagedProxies.length > 0 && pagedProxies.every((p) => proxySel.has(p.id));
+                const any = filteredProxies.some((p) => proxySel.has(p.id));
+                const all = filteredProxies.every((p) => proxySel.has(p.id));
                 el.indeterminate = any && !all;
               }}
               onChange={(e) => {
                 setProxySel((prev) => {
                   const next = new Set(prev);
                   if (e.target.checked) {
-                    for (const p of pagedProxies) next.add(p.id);
+                    for (const p of filteredProxies) next.add(p.id);
                   } else {
-                    for (const p of pagedProxies) next.delete(p.id);
+                    for (const p of filteredProxies) next.delete(p.id);
                   }
                   return next;
                 });
@@ -3762,8 +3640,8 @@ function ProxiesView() {
           </div>
           <div>{tr("Name")}</div><div>{tr("Type")}</div><div>{tr("Host:Port")}</div><div>{tr("Country")}</div><div>{tr("Profiles")}</div><div>{tr("Test result")}</div><div className="head-actions">{tr("ACTIONS")}</div>
         </div>
-        <SortableContext items={pagedProxies.map((proxy) => proxy.id)} strategy={verticalListSortingStrategy}>
-        {pagedProxies.map((p) => {
+        <SortableContext items={filteredProxies.map((proxy) => proxy.id)} strategy={verticalListSortingStrategy}>
+        {filteredProxies.map((p) => {
           const r = snapshots[p.id];
           const testFailure = r ? proxyTestFailureReason(r) : null;
           const isActive = !!r && testFailure == null;
@@ -3936,23 +3814,6 @@ function ProxiesView() {
           </div>
         )}
       </div>
-      {proxyPageCount > 1 && (
-        <div className="pager">
-          <PageDropButton
-            dropId="proxy-page-previous"
-            direction="previous"
-            disabled={proxyPage <= 1}
-            onClick={() => setProxyPage((p) => Math.max(1, p - 1))}
-          >{tr("‹ Prev")}</PageDropButton>
-          <span className="pager-info">{tr("Page")} {proxyPage}  {tr("of")} {proxyPageCount} · {tr("{0} proxies", proxies.length)}</span>
-          <PageDropButton
-            dropId="proxy-page-next"
-            direction="next"
-            disabled={proxyPage >= proxyPageCount}
-            onClick={() => setProxyPage((p) => Math.min(proxyPageCount, p + 1))}
-          >{tr("Next ›")}</PageDropButton>
-        </div>
-      )}
       {editing && <ProxyEditor initial={editing} onClose={() => { setEditing(null); reload(); }} />}
       {bulkOpen && <ProxyBulkImporter onClose={() => { setBulkOpen(false); reload(); }} />}
       {infoFor && (
