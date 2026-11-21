@@ -2169,7 +2169,7 @@ function BrowsersView() {
                           </>
                         )}
                       </div>
-                      <ProxyCity city={proxySnapshot?.city} />
+                      <ProxyLocationDetail city={proxySnapshot?.city} ip={proxySnapshot?.ip} />
                     </>
                   ) : <span className="muted">{tr("— direct —")}</span>}
                 </div>
@@ -2233,9 +2233,17 @@ function BrowsersView() {
   );
 }
 
-function ProxyCity({ city }: { city?: string }) {
+function ProxyLocationDetail({ city, ip }: { city?: string; ip?: string }) {
   const name = city?.trim();
-  return <span className="proxy-city muted table-detail" title={name || undefined}>{name || "—"}</span>;
+  const address = ip?.trim();
+  const detail = [name, address].filter(Boolean).join(" · ");
+  return (
+    <span className="proxy-location-detail muted table-detail" title={detail || undefined}>
+      {(name || !address) && <span>{name || "—"}</span>}
+      {name && address && <span className="proxy-detail-separator">·</span>}
+      {address && <span className="proxy-detail-ip">{address}</span>}
+    </span>
+  );
 }
 
 function proxyBindingLabel(proxy: ProxyEntry, snapshot?: ProxyTestSnapshot) {
@@ -3489,7 +3497,7 @@ function ProxiesView() {
                       <span className="flag">{cc}</span>
                     </span>
                   ) : <span className="muted">—</span>}
-                  <ProxyCity city={r?.city} />
+                  <ProxyLocationDetail city={r?.city} />
                 </div>
                 <div>
                   <span className="profile-count" title={tr("{0} profile(s) bound to this proxy", profileCountByProxy[p.id] ?? 0)}>

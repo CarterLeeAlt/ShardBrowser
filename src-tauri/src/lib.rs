@@ -1555,13 +1555,16 @@ pub fn run() {
             // created here. On Windows, explicitly use an absolute WebView2
             // data directory beside the executable; otherwise Tauri defaults
             // to `%LOCALAPPDATA%\com.shardx.launcher`.
-            let window_config = app
+            let mut window_config = app
                 .config()
                 .app
                 .windows
                 .first()
                 .cloned()
                 .expect("main window configuration missing");
+            window_config.width = window_config
+                .min_width
+                .expect("main window minimum width missing");
             // The launcher draws its own titlebar.
             let mut window_builder =
                 tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
@@ -1585,7 +1588,7 @@ pub fn run() {
             };
 
             let main_window = window_builder.build()?;
-            if window_config.shadow && window_config.min_width.is_some() {
+            if window_config.shadow {
                 window_sizing::honor_client_minimum(main_window.hwnd()?.0 as _)?;
             }
             if let Err(error) = taskbar_icon::apply_launcher_taskbar_icon(

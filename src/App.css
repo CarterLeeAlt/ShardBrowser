@@ -36,7 +36,7 @@
   --main-padding: 24px;
   --scrollbar-width: 10px;
   --table-border: 1px;
-  --table-min-width: 1015px;
+  --table-min-width: 1022px;
   --diamond: polygon(50% 0, 100% 50%, 50% 100%, 0 50%);
 
   font-family: var(--font-app);
@@ -351,7 +351,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   min-width: 0;
   padding-block: 16px 24px;
   /* Reserve room for the whole table before allocating optional side gutters. */
-  padding-inline: clamp(12px, calc((100vw - var(--sidebar-width) - var(--scrollbar-width) - var(--table-min-width) - 2 * var(--table-border)) / 2), var(--main-padding));
+  padding-inline: clamp(10px, calc((100vw - var(--sidebar-width) - var(--scrollbar-width) - var(--table-min-width) - 2 * var(--table-border)) / 2), var(--main-padding));
   overflow-y: auto;
   scrollbar-gutter: stable;
   background: var(--bg-0);
@@ -713,7 +713,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .browser-rows {
   --growing-columns: 7;
   --name-min: 140px;
-  --status-min: 36px;
+  --status-min: 43px;
   --proxy-min: 161px;
   --notes-min: 192px;
   --last-run-min: 128px;
@@ -725,7 +725,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .proxy-rows {
   --growing-columns: 8;
   --name-min: 160px;
-  --type-min: 80px;
+  --type-min: 92px;
   --host-min: 140px;
   --country-min: 110px;
   --profiles-min: 68px;
@@ -1678,13 +1678,22 @@ button.status-pill.status-link:active { transform: translateY(1px); }
   display: inline-flex; align-items: center; gap: 6px;
   min-width: 0;
 }
-.proxy-city {
-  display: block;
+.proxy-location-detail {
+  display: flex;
+  gap: 4px;
   max-width: 100%;
   min-width: 0;
   white-space: nowrap;
+}
+.proxy-location-detail > span {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.proxy-location-detail > .proxy-detail-separator { flex: none; }
+.proxy-location-detail > .proxy-detail-ip:not(:only-child) {
+  flex-shrink: 0;
+  max-width: 75%;
 }
 
 /* Flat 4:3 country flags. The 15px default is optically

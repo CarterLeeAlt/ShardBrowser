@@ -14,7 +14,6 @@
       {
         "create": false,
         "title": "ShardX Launcher",
-        "width": 1440,
         "height": 800,
         "minWidth": 1286,
         "minHeight": 560,
