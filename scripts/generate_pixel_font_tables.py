@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -188,7 +189,15 @@ def generate() -> str:
     lines.extend(["        _ => None,", "    }", "}", ""])
     for spec, glyphs, _ in parsed:
         lines.extend(render_font(spec, glyphs))
-    return "\n".join(lines)
+    # Use the same Rust formatting as the launcher so generation and CI agree.
+    return subprocess.run(
+        ["rustfmt", "--edition", "2021", "--emit", "stdout"],
+        input="\n".join(lines),
+        stdout=subprocess.PIPE,
+        encoding="utf-8",
+        cwd=ROOT,
+        check=True,
+    ).stdout
 
 
 def main() -> None:

@@ -445,7 +445,7 @@ async fn fetch_remote_etag(key: &str) -> Option<String> {
 }
 
 /// Fetch the remote manifest used for runtime update comparisons. Tries each
-/// source in `MANIFEST_URLS` order and returns the first parseable manifest, so
+/// source in `manifest_urls()` order and returns the first parseable manifest, so
 /// the check survives one source being unreachable. Startup integrity checks
 /// never call this function.
 async fn fetch_remote_manifest() -> Option<RemoteManifest> {
@@ -456,8 +456,15 @@ async fn fetch_remote_manifest() -> Option<RemoteManifest> {
         .user_agent("ShardBrowser-Launcher")
         .build()
         .ok()?;
-    for url in manifest_urls() {
-        let Some(text) = fetch_manifest_text(&client, &url).await else {
+    fetch_manifest_from(&client, manifest_urls()).await
+}
+
+async fn fetch_manifest_from(
+    client: &reqwest::Client,
+    urls: impl IntoIterator<Item = String>,
+) -> Option<RemoteManifest> {
+    for url in urls {
+        let Some(text) = fetch_manifest_text(client, &url).await else {
             continue;
         };
         if let Some(manifest) = parse_remote_manifest(&text) {
@@ -1961,9 +1968,55 @@ mod tests {
         assert_eq!(decode_base64_envelope(&envelope).as_deref(), Some(text));
     }
 
-    /// Live check of the manifest fallback chain. Ignored by default so unit
-    /// tests stay offline; run with `cargo test -- --ignored` on a network
-    /// where raw.githubusercontent.com may be DNS-blocked.
+    #[tokio::test]
+    async fn skips_unusable_manifest_sources_in_order() {
+        use axum::{http::StatusCode, routing::get, Json, Router};
+
+        let app = Router::new()
+            .route("/unavailable", get(|| async { StatusCode::SERVICE_UNAVAILABLE }))
+            .route(
+                "/invalid",
+                get(|| async { Json(serde_json::json!({"message": "Not a manifest"})) }),
+            )
+            .route(
+                "/mirror",
+                get(|| async {
+                    let content = base64::engine::general_purpose::STANDARD.encode(
+                        r#"{"chromium_version":"150.0.0.0","archives":{"ShardX-Windows.zip":"abc"}}"#,
+                    );
+                    Json(serde_json::json!({"encoding": "base64", "content": content}))
+                }),
+            )
+            .route(
+                "/later",
+                get(|| async {
+                    Json(serde_json::json!({"chromium_version": "151.0.0.0"}))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+
+        let invalid = ["unavailable", "invalid"].map(|source| format!("{origin}/{source}"));
+        assert!(fetch_manifest_from(&client, invalid.clone())
+            .await
+            .is_none());
+        let valid = ["mirror", "later"].map(|source| format!("{origin}/{source}"));
+        let manifest = fetch_manifest_from(&client, invalid.into_iter().chain(valid))
+            .await
+            .unwrap();
+        server.abort();
+        assert_eq!(manifest.chromium_version.as_deref(), Some("150.0.0.0"));
+        assert_eq!(manifest.archives["ShardX-Windows.zip"], "abc");
+    }
+
+    /// Live smoke test for the configured mirrors. The local test above
+    /// exercises fallback even when the first live mirror is healthy.
     #[tokio::test]
     #[ignore = "requires network"]
     async fn fetches_manifest_via_fallback_chain() {

@@ -5,6 +5,8 @@
 `scripts/generate_pixel_font_tables.py` 编译为紧凑的 Rust 表；应用从不
 解析这些 BDF 文件，也不会在运行时或构建时下载字体。
 
+生成和校验使用项目工具链中的 `rustfmt`。运行 `python -X utf8 scripts/generate_pixel_font_tables.py --check` 核对仓库中的 Rust 表；去掉 `--check` 重新生成。
+
 来源：`freedesktop-unofficial-mirror/xorg__font__misc-misc`（X.Org
 `font-misc-misc` 仓库的 GitHub 镜像），`master` 分支：
 

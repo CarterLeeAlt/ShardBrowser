@@ -107,6 +107,9 @@ jobs:
       - name: Compile Python SDK source
         run: python -m compileall -q sdks/python/shardx
 
+      - name: Check generated taskbar font tables
+        run: python -X utf8 scripts/generate_pixel_font_tables.py --check
+
       - name: Check Rust SDK formatting
         run: cargo fmt --manifest-path sdks/rust/Cargo.toml --all -- --check
 
