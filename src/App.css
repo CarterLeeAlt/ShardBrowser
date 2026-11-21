@@ -224,13 +224,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   display: flex; flex-direction: column;
   padding: 14px 10px 10px 10px;
 }
-.brand {
-  font-weight: var(--font-weight-emphasis);
-  padding: 4px 8px 14px 8px;
-  display: flex; align-items: center; gap: 10px;
-}
-.shard-logo { display: block; filter: drop-shadow(0 0 8px #8b5cf640); }
-
 .sidebar nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
 .nav-group { display: flex; flex-direction: column; gap: 1px; margin-top: 14px; }
 .nav-group:first-child { margin-top: 4px; }
@@ -340,15 +333,14 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   background: transparent;
   border: 1px solid transparent;
   color: var(--tx-1);
+  font-size: var(--text-small);
+  font-weight: var(--font-weight-emphasis);
   text-align: left;
   cursor: default;
   transition: background .12s ease, border-color .12s ease;
 }
 .version-pill:hover:not(:disabled)  { background: var(--bg-2); }
 .version-pill:disabled              { cursor: default; opacity: 0.85; }
-.version-pill-text                  { display: flex; flex-direction: column; min-width: 0; }
-.version-pill-current               { font-size: var(--text-small); font-weight: var(--font-weight-emphasis); }
-.version-pill-sub                   { font-size: var(--text-small); color: var(--tx-4); }
 
 /* ===== main ===== */
 
@@ -493,9 +485,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   pointer-events: none;
 }
 .row-sort-placeholder:focus-within .sort-placeholder-preview { border-width: 2px; }
-@media (prefers-reduced-motion: reduce) {
-  .rows > .row-wrap { transition: none !important; }
-}
 .sort-drag-label {
   display: flex;
   align-items: center;
@@ -894,9 +883,10 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .cell-status[data-state="running"] { color: var(--ok); }
 .cell-status[data-state="starting"] { color: var(--info); }
 .cell-status[data-state="busy"] { color: var(--warn); }
-@media (prefers-reduced-motion: no-preference) {
-  .cell-status[data-state="starting"] > svg { animation: shardx-spin 0.9s linear infinite; }
+.cell-status:is([data-state="running"], [data-state="starting"], [data-state="busy"]) > svg {
+  filter: drop-shadow(0 0 3px color-mix(in srgb, currentColor 55%, transparent));
 }
+.cell-status[data-state="starting"] > svg { animation: shardx-spin 0.9s linear infinite; }
 .browser-data-row .cell-proxy.cell-proxy-direct {
   grid-template-rows: 1fr;
 }

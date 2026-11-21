@@ -461,7 +461,6 @@
   "ShardX Launcher itself is excluded from update checks. Engine and Widevine updates stop running browsers first.": "更新检查仅针对运行时。更新引擎或 Widevine 前会先停止正在运行的浏览器。",
   "Running {0}": "当前运行版本：{0}",
   "Version unavailable": "无法获取版本",
-  "update checks disabled": "启动器更新检查已关闭",
   "Token regenerated": "令牌已重新生成",
   "Settings saved": "设置已保存",
   "Proxy geo checker": "代理位置查询",
