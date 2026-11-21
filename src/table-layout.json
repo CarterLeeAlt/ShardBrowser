@@ -7,7 +7,7 @@
   "dragColumn": 24,
   "selectColumn": 28,
   "browser": {
-    "columns": { "name": 119, "status": 86, "proxy": 161, "notes": 192, "lastRun": 128 },
+    "columns": { "name": 113, "status": 86, "proxy": 161, "notes": 192, "lastRun": 128 },
     "actions": 160,
     "paddingLeft": 0,
     "paddingRight": 8

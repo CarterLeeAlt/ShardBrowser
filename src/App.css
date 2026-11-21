@@ -87,9 +87,19 @@ html, body, #root {
   -webkit-font-smoothing: antialiased;
 }
 button, input, select, textarea, code, kbd, pre { font: inherit; }
-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
-  outline: 2px solid var(--accent-hi); outline-offset: 2px;
+/* Paint the focus stroke over the border instead of drawing a second frame. */
+:where(button):focus-visible,
+:where(input:not([type="checkbox"], [type="radio"], .port-input), select, textarea):focus,
+.port-list:has(> .port-input:focus),
+.cs-open > .cs-trigger {
+  outline: 2px solid var(--focus-color, var(--accent-hi));
+  outline-offset: -1px;
 }
+:where(a, input[type="checkbox"], input[type="radio"]):focus-visible {
+  outline: 2px solid var(--accent-hi);
+  outline-offset: 2px;
+}
+[aria-invalid="true"] { --focus-color: var(--err); }
 h1, h2, h3, h4, h5, h6 { font-size: inherit; }
 h1, h2, h3, h4, h5, h6, strong, b {
   font-weight: var(--font-weight-emphasis);
@@ -111,7 +121,6 @@ input, select, textarea {
 /* Checkboxes/radios must not inherit the full-width text-input sizing. */
 input[type="checkbox"], input[type="radio"] { width: auto; padding: 0; }
 input::placeholder, textarea::placeholder { color: var(--tx-4); }
-input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 select {
   appearance: none;
   background-image:
@@ -465,7 +474,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .sort-handle:focus-visible {
   color: var(--accent-hi);
   background: var(--accent-dim);
-  outline: none;
 }
 .sort-handle:active:not(:disabled) { cursor: grabbing; }
 .sort-handle:disabled { opacity: .28; cursor: not-allowed; }
@@ -567,6 +575,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 }
 .btn-primary {
   background: var(--accent-button); color: #fff; font-weight: var(--font-weight-emphasis);
+  --focus-color: #fff;
 }
 
 .btn-primary:hover { background: var(--accent-button-hover); }
@@ -596,20 +605,16 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   border-radius: var(--radius-sm);
   font-size: var(--text-small); cursor: pointer;
   transition: background .12s ease, color .12s ease, border-color .12s ease,
-              box-shadow .12s ease, transform .04s ease;
+              transform .04s ease;
 }
 .icon-btn:hover:not(:disabled) {
   background: var(--bg-2);
   color: var(--tx-1);
   border-color: var(--bd-3);
-  box-shadow: 0 1px 2px #0006, 0 0 0 3px #8b5cf612;
+  --button-glow: 0 1px 2px #0006, 0 0 0 3px #8b5cf612;
 }
 .icon-btn:active:not(:disabled) { transform: translateY(1px); }
-.icon-btn:focus-visible {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px #8b5cf633;
-}
+:is(.icon-btn, .btn-launch):not(:focus-visible) { box-shadow: var(--button-glow, none); }
 .icon-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
@@ -623,7 +628,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .icon-btn.danger:hover:not(:disabled) {
   color: var(--err);
   border-color: #fb71855e;
-  box-shadow: 0 1px 2px #0006, 0 0 0 3px #fb71851a;
+  --button-glow: 0 1px 2px #0006, 0 0 0 3px #fb71851a;
 }
 
 /* btn-ghost / btn-sm that contain an icon + label need the SVG to
@@ -646,21 +651,17 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   border: 1px solid #4ade8055;
   background: #4ade8014;
   color: var(--ok);
-  box-shadow: 0 0 0 2px #4ade800d, 0 0 12px -5px #4ade8070;
+  --focus-color: var(--ok);
+  --button-glow: 0 0 0 2px #4ade800d, 0 0 12px -5px #4ade8070;
   cursor: pointer;
-  transition: background .12s, border-color .12s, transform .04s, box-shadow .12s;
+  transition: background .12s, border-color .12s, transform .04s;
 }
 .btn-launch:hover:not(:disabled) {
   background: #4ade8024;
   border-color: #4ade80aa;
-  box-shadow: 0 0 0 3px #4ade8014, 0 0 16px -4px #4ade8066;
+  --button-glow: 0 0 0 3px #4ade8014, 0 0 16px -4px #4ade8066;
 }
 .btn-launch:active:not(:disabled) { transform: translateY(1px); }
-.btn-launch:focus-visible {
-  outline: none;
-  border-color: var(--ok);
-  box-shadow: 0 0 0 3px #4ade8033, 0 0 16px -4px #4ade8066;
-}
 .btn-launch:disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -669,18 +670,15 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   border-color: #fb718555;
   background: #fb71851a;
   color: var(--err);
-  box-shadow: 0 0 0 2px #fb71850d, 0 0 12px -5px #fb718570;
+  --focus-color: var(--err);
+  --button-glow: 0 0 0 2px #fb71850d, 0 0 12px -5px #fb718570;
 }
 /* Include the base class and disabled guard so this outranks the generic
    `.btn-launch:hover:not(:disabled)` rule instead of inheriting its green glow. */
 .btn-launch.btn-launch-stop:hover:not(:disabled) {
   background: #fb718530;
   border-color: #fb7185aa;
-  box-shadow: 0 0 0 3px #fb71851a, 0 0 16px -4px #fb718566;
-}
-.btn-launch-stop:focus-visible {
-  border-color: var(--err);
-  box-shadow: 0 0 0 3px #fb718533, 0 0 16px -4px #fb718566;
+  --button-glow: 0 0 0 3px #fb71851a, 0 0 16px -4px #fb718566;
 }
 
 /* ===== bulk bar ===== */
@@ -738,7 +736,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   color: var(--tx-1);
   width: 100%;
 }
-.inline-rename:focus { outline: none; border-color: var(--accent-hi); }
 /* The expanded editor is a sibling of the table row and uses body type. */
 .rows-head, .browser-data-row, .proxy-data-row,
 .storage-table, .assign-preview table,
@@ -1021,7 +1018,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   transition: border-color .12s, background .12s;
 }
 .cs-trigger:hover { border-color: var(--bd-2); }
-.cs.cs-open .cs-trigger { border-color: var(--accent); }
 .cs-value {
   flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1465,7 +1461,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   min-height: 36px;
   transition: border-color .12s;
 }
-.port-list:focus-within { border-color: var(--accent); }
 .port-chip {
   display: inline-flex; align-items: center; gap: 4px;
   background: var(--accent-dim);
@@ -1615,6 +1610,7 @@ button.status-pill.status-link {
 }
 button.status-pill.status-link:hover { filter: brightness(1.08); }
 button.status-pill.status-link:active { transform: translateY(1px); }
+button.status-pill.status-link:focus-visible { box-shadow: none; }
 
 .proxy-location {
   display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
@@ -1666,7 +1662,7 @@ button.status-pill.status-link:active { transform: translateY(1px); }
   background: var(--bg-2);
   border: 1px solid var(--bd-2);
   border-radius: var(--radius-lg);
-  box-shadow: 0 18px 48px #000c, 0 0 0 1px #8b5cf640;
+  box-shadow: 0 18px 48px #000c;
   overflow: hidden;
   display: flex; flex-direction: column;
   animation: fadeUp .12s ease-out;
@@ -1963,7 +1959,7 @@ button.status-pill.status-link:active { transform: translateY(1px); }
   max-height: calc(100vh - 80px);
   display: flex; flex-direction: column;
   overflow: hidden;
-  box-shadow: 0 24px 60px #000a, 0 0 0 1px #8b5cf640;
+  box-shadow: 0 24px 60px #000a;
   animation: fadeUp .14s ease-out;
 }
 @keyframes fadeUp {
@@ -1995,7 +1991,7 @@ button.status-pill.status-link:active { transform: translateY(1px); }
   border: 1px solid var(--bd-2);
   border-radius: var(--radius);
   padding: 4px;
-  box-shadow: 0 16px 40px #000a, 0 0 0 1px #0006;
+  box-shadow: 0 16px 40px #000a;
   display: flex; flex-direction: column;
   animation: fadeUp .1s ease-out;
 }
