@@ -717,6 +717,24 @@ function Sidebar({
 
   return (
     <aside className="sidebar">
+      <div className="sidebar-brand">
+        <svg className="sidebar-brand-shards" height="53" viewBox="0 0 62 53" fill="currentColor" aria-hidden="true" focusable="false">
+          <path d="M0 -2.25 2.25 0 0 2.25 -2.25 0Z" transform="translate(17 16) rotate(-19)" fillOpacity=".23" />
+          <path d="M0 -3.5 3.5 0 0 3.5 -3.5 0Z" transform="translate(36 33) rotate(12)" fillOpacity=".47" />
+          <path d="M0 -1.75 1.75 0 0 1.75 -1.75 0Z" transform="translate(52 11) rotate(24)" fillOpacity=".25" />
+        </svg>
+        <span className="sidebar-wordmark" role="img" aria-label="ShardX">
+          Shard
+          <svg width=".75em" height=".85em" viewBox="0 0 16 18" aria-hidden="true" focusable="false">
+            <path fill="currentColor" d="M.3 1h4.2l3.5 5.1L11.5 1h4.2l-5.6 8 5.6 8h-4.2L8 11.9 4.5 17H.3l5.6-8z" />
+          </svg>
+        </span>
+        <svg className="sidebar-brand-shards" height="53" viewBox="0 0 62 53" fill="currentColor" aria-hidden="true" focusable="false">
+          <path d="M0 -2 2 0 0 2 -2 0Z" transform="translate(9 35) rotate(-16)" fillOpacity=".27" />
+          <path d="M0 -3.25 3.25 0 0 3.25 -3.25 0Z" transform="translate(28 16) rotate(16)" fillOpacity=".42" />
+          <path d="M0 -1.75 1.75 0 0 1.75 -1.75 0Z" transform="translate(46 31) rotate(8)" fillOpacity=".25" />
+        </svg>
+      </div>
       <nav>
         {sections.map((sec) => (
           <div key={sec.label} className="nav-group">
@@ -4480,7 +4498,16 @@ function VersionPill() {
       disabled
       title={version ? tr("Running {0}", version) : tr("Version unavailable")}
     >
-      <ShardMini />
+      <svg width="14" height="14" viewBox="0 0 22 22" aria-hidden="true" focusable="false">
+        <defs>
+          <linearGradient id="version-pill-shard" x2="1" y2="1">
+            <stop offset="0%" stopColor="#a78bfa" />
+            <stop offset="100%" stopColor="#7c3aed" />
+          </linearGradient>
+        </defs>
+        <path d="M11 1L21 11L11 21L1 11Z" fill="url(#version-pill-shard)" />
+        <path d="M11 6L16 11L11 16L6 11Z" fill="#0c0e13" />
+      </svg>
       <span>ShardX Launcher v{version ?? "…"}</span>
     </button>
   );
