@@ -1593,8 +1593,8 @@ pub fn run() {
             {
                 use tauri::menu::{Menu, MenuItem};
                 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-                let show = MenuItem::with_id(app, "tray_show", "Show Launcher", true, None::<&str>)?;
-                let quit = MenuItem::with_id(app, "tray_quit", "Quit", true, None::<&str>)?;
+                let show = MenuItem::with_id(app, "tray_show", "显示启动器", true, None::<&str>)?;
+                let quit = MenuItem::with_id(app, "tray_quit", "退出", true, None::<&str>)?;
                 let menu = Menu::with_items(app, &[&show, &quit])?;
                 if let Some(icon) = app.default_window_icon().cloned() {
                     TrayIconBuilder::with_id("main")

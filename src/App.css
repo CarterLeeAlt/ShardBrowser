@@ -234,7 +234,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   background: transparent;
   color: var(--tx-2);
   border: 0; border-radius: var(--radius);
-  font-size: var(--text-navigation); line-height: var(--line-navigation);
+  line-height: var(--line-navigation);
   cursor: pointer; text-align: left;
   transition: background .12s, color .12s;
 }
@@ -702,9 +702,8 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 }
 .t-cols {
   min-width: var(--browser-table-min-width);
-  /* Keep the utility and action tracks fixed, then distribute only the
-     remaining room between data columns. minmax() preserves every existing
-     column floor without letting percentage tracks overrun the container. */
+  /* The proxy gets 15% of the space left by the 216px fixed tracks and
+     64px of gaps, with a 145.5px floor. The remaining columns share the rest. */
   display: grid;
   grid-template-columns:
     24px                    /* sort handle */
@@ -712,8 +711,8 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
     28px                    /* checkbox */
     minmax(140px, 1fr)      /* name */
     minmax(100px, 1fr)      /* status */
-    minmax(194px, 1fr)      /* proxy */
-    minmax(148px, 1fr)      /* notes */
+    max(145.5px, calc(15% - 42px)) /* proxy */
+    minmax(192.4px, 1fr)    /* notes */
     minmax(116px, 1fr)      /* last run */
     160px;                  /* row actions */
   gap: 8px;

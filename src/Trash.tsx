@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useStoreChanged } from "./useStoreChanged";
-import { tr, useLanguage } from "./i18n";
+import { tr } from "./i18n";
 import type { StorageViewProps } from "./Extensions";
 import { Trash } from "./assets/icons/Lucide";
 import { ListState, PageToolbar, SelectionBar } from "./Workspace";
@@ -12,7 +12,6 @@ type TrashEntry = {
 };
 
 export function TrashView({ confirm, onSuccess, onError }: StorageViewProps) {
-  const language = useLanguage();
   const [entries, setEntries] = useState<TrashEntry[]>([]);
   const [selected, setSelected] = useState(new Set<string>());
   const [busy, setBusy] = useState(false);
@@ -50,7 +49,7 @@ export function TrashView({ confirm, onSuccess, onError }: StorageViewProps) {
     } catch (e) { onError(tr(String(e))); }
     finally { setBusy(false); }
   };
-  const date = (seconds: number) => new Date(seconds * 1000).toLocaleString(language === "zh" ? "zh-CN" : "en-US");
+  const date = (seconds: number) => new Date(seconds * 1000).toLocaleString("zh-CN");
   return <section className="page">
     <PageToolbar title={tr("Recycle bin")}>
       <button className="btn-ghost danger" disabled={busy || !entries.length} onClick={() => void purge(true)}><Trash /> {tr("Empty recycle bin")}</button>

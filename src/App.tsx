@@ -50,7 +50,7 @@ import "./App.css";
 import { planAssignment } from "./proxy-assignment";
 import { useStoreChanged } from "./useStoreChanged";
 import { mergeProfileEdits } from "./profileEdit";
-import { tr, useLanguage, setLanguage, type Language } from "./i18n";
+import { tr } from "./i18n";
 import { ExtensionsView, ExtensionPicker } from "./Extensions";
 import { TrashView } from "./Trash";
 import { updateWorkspaceFolders, useWorkspaceBackup, useWorkspaceFolders, WorkspaceBackup } from "./WorkspaceBackup";
@@ -811,7 +811,6 @@ function prepareTitlebarWindowHide(button: HTMLButtonElement) {
 }
 
 export default function App() {
-  useLanguage();
   const storageViewProps = {
     confirm: async (title: string, message: string) => (await confirmModal({ title, message, danger: true })) === true,
     onSuccess: toast.ok,
@@ -3724,13 +3723,13 @@ function CountryFlag({ cc, height = 15 }: { cc: string; height?: number }) {
   return <img className="flag-rect" src={`${import.meta.env.BASE_URL}icons/flags/${code}.svg`} width={Math.round(height * 4 / 3)} height={height} alt="" />;
 }
 
-/// "@1700000000" → "May 26, 14:30" (UTC for cross-timezone consistency).
+/// Format stored Unix timestamps in the launcher's locale and local time zone.
 function fmtTs(stamp: string): string {
   if (!stamp.startsWith("@")) return stamp;
   const n = parseInt(stamp.slice(1), 10);
   if (!Number.isFinite(n)) return stamp;
   const d = new Date(n * 1000);
-  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleString("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 type BulkRowState = {
@@ -4786,7 +4785,6 @@ function VersionPill() {
 }
 
 function SettingsView({ workspaceBackup }: { workspaceBackup: ReturnType<typeof useWorkspaceBackup> }) {
-  const language = useLanguage();
   const [s, setS] = useState<Settings>({
     theme: "dark",
     geo_checker: "ipwho.is",
@@ -4836,14 +4834,6 @@ function SettingsView({ workspaceBackup }: { workspaceBackup: ReturnType<typeof 
 
       <div className="settings-card-list">
         <WorkspaceBackup {...workspaceBackup} />
-        <div className="card settings-card">
-          <h3>{tr("Interface language")}</h3>
-          <p className="muted">{tr("Language changes apply immediately and are saved on this device.")}</p>
-          <select aria-label={tr("Interface language")} value={language} onChange={(e) => setLanguage(e.target.value as Language)}>
-            <option value="zh">简体中文</option>
-            <option value="en">English</option>
-          </select>
-        </div>
         <div className="card settings-card">
           <h3>{tr("Proxy geo checker")}</h3>
           <p className="muted">{tr("Preferred free public IP-geo service for manual and scheduled proxy tests. If it times out, returns HTTP 429, or sends invalid JSON, ShardX automatically tries the next provider.")}</p>
