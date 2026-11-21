@@ -514,22 +514,22 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 }
 .sort-handle:active:not(:disabled) { cursor: grabbing; }
 .sort-handle:disabled { opacity: .28; cursor: not-allowed; }
-.row-sorting { opacity: .32; }
-.row-drop-before::before,
-.row-drop-after::after {
+.row-sort-source { opacity: .32; }
+.row-sort-placeholder { border-top-color: transparent; }
+.row-sort-placeholder > .row { opacity: 0; pointer-events: none; }
+.row-sort-placeholder::after {
   content: "";
   position: absolute;
-  z-index: 8;
-  left: 8px;
-  right: 8px;
-  height: 2px;
-  border-radius: 999px;
-  background: var(--accent-hi);
-  box-shadow: 0 0 0 1px var(--bg-1), 0 0 8px #8b5cf680;
+  inset: 4px 8px;
+  border: 1px dashed var(--accent-hi);
+  border-radius: var(--radius-sm);
+  background: var(--accent-dim);
   pointer-events: none;
 }
-.row-drop-before::before { top: -1px; }
-.row-drop-after::after { bottom: -1px; }
+.row-sort-placeholder:focus-within::after { border-width: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .rows > .row-wrap { transition: none !important; }
+}
 .sort-overlay {
   display: flex;
   align-items: center;
