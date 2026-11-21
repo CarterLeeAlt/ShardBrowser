@@ -71,6 +71,18 @@ fn reconcile_order(saved: &[String], defaults: &[String]) -> Vec<String> {
     result
 }
 
+pub(crate) fn workspace_snapshot(profiles: &[String], proxies: &[String]) -> Result<Vec<u8>> {
+    let _guard = DISPLAY_ORDER_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("display order lock poisoned"))?;
+    let current = load_unlocked()?;
+    Ok(serde_json::to_vec_pretty(&DisplayOrder {
+        version: DISPLAY_ORDER_VERSION,
+        profiles: reconcile_order(&current.profiles, profiles),
+        proxies: reconcile_order(&current.proxies, proxies),
+    })?)
+}
+
 fn move_in_order(
     saved: &[String],
     defaults: &[String],

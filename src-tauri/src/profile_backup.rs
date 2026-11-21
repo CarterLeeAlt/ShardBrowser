@@ -46,7 +46,7 @@ static BACKUP_OPERATION_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum BackupEntryKind {
+pub(crate) enum BackupEntryKind {
     File,
     Directory,
 }
@@ -82,10 +82,10 @@ pub(crate) struct ProfileBackupSummary {
     data_bytes: u64,
 }
 
-struct SourceEntry {
-    source: PathBuf,
-    relative: PathBuf,
-    kind: BackupEntryKind,
+pub(crate) struct SourceEntry {
+    pub(crate) source: PathBuf,
+    pub(crate) relative: PathBuf,
+    pub(crate) kind: BackupEntryKind,
 }
 
 struct PendingExport {
@@ -270,7 +270,7 @@ pub(crate) fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
     false
 }
 
-fn archive_relative_path(relative: &Path) -> Result<String> {
+pub(crate) fn archive_relative_path(relative: &Path) -> Result<String> {
     let mut parts = Vec::new();
     for component in relative.components() {
         let Component::Normal(value) = component else {
@@ -319,25 +319,7 @@ fn write_user_data_entries(
 
     // Chromium registers additional profile directory names in Local State.
     // Keep unregistered directories rather than guessing from their names.
-    let local_state: serde_json::Value = serde_json::from_reader(
-        File::open(source_root.join("Local State")).context("read backup Local State")?,
-    )
-    .context("parse backup Local State")?;
-    let mut profile_directories = HashSet::from(["default".to_string()]);
-    if let Some(profiles) = local_state
-        .pointer("/profile/info_cache")
-        .and_then(serde_json::Value::as_object)
-    {
-        profile_directories.extend(profiles.keys().map(|name| name.to_ascii_lowercase()));
-    }
-    let mut sources = Vec::new();
-    collect_user_data_entries(
-        source_root,
-        source_root,
-        &mut sources,
-        &profile_directories,
-        0,
-    )?;
+    let sources = user_data_sources(source_root)?;
     let mut file_count = 0usize;
     let mut total_bytes = 0u64;
     let mut buffer = vec![0u8; 1024 * 1024];
@@ -395,6 +377,32 @@ fn write_user_data_entries(
         }
     }
     Ok((file_count, total_bytes))
+}
+
+pub(crate) fn user_data_sources(root: &Path) -> Result<Vec<SourceEntry>> {
+    let mut directories = HashSet::from(["default".to_string()]);
+    let state = root.join("Local State");
+    match fs::symlink_metadata(&state) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.is_file() && !is_link_or_reparse_point(&metadata),
+                "unsafe Chromium Local State"
+            );
+            let local: serde_json::Value =
+                serde_json::from_reader(File::open(state)?).context("parse backup Local State")?;
+            if let Some(profiles) = local
+                .pointer("/profile/info_cache")
+                .and_then(serde_json::Value::as_object)
+            {
+                directories.extend(profiles.keys().map(|name| name.to_ascii_lowercase()));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let mut sources = Vec::new();
+    collect_user_data_entries(root, root, &mut sources, &directories, 0)?;
+    Ok(sources)
 }
 
 fn bound_proxy_for_profile(stored: &profile::StoredProfile) -> Result<Option<proxy::ProxyEntry>> {
@@ -1300,7 +1308,7 @@ mod tests {
             .unwrap();
             (child, endpoint)
         }
-        let _test = store::TestStore::new();
+        let test = store::TestStore::new();
         let mut source: profile::StoredProfile = serde_json::from_value(json!({"_meta":{"id":"real-cookie-source"},"name":"RealCookie","navigator":{"platform_version":"17.0.0"},"noise":{"canvas":{"enabled":true,"seed":314159}}})).unwrap();
         profile::save_raw(&mut source).unwrap();
         let directory = profile::user_data_dir(&source.meta.id).unwrap();
@@ -1358,6 +1366,31 @@ mod tests {
             assert!(cookies.iter().any(|c| c["value"] == site
                 && c["partitionKey"]["topLevelSite"] == site
                 && c["sourcePort"] == 8443));
+        }
+        crate::browser_cdp::close(&endpoint).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(20), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        let workspace_path = test
+            .root
+            .parent()
+            .unwrap()
+            .join(format!("{}.shardx-workspace", uuid::Uuid::new_v4()));
+        let summary = crate::workspace_backup::export(workspace_path.clone(), Vec::new()).unwrap();
+        crate::workspace_backup::tests::move_live_to_fixture(&test.root);
+        let restored = crate::workspace_backup::restore(workspace_path.clone(), summary.id);
+        fs::remove_file(workspace_path).unwrap();
+        assert_eq!(restored.unwrap(), summary);
+        let (mut child, endpoint) = start(&profile::user_data_dir(&source.meta.id).unwrap()).await;
+        let reopened = command(&endpoint, "Storage.getCookies", json!({})).await;
+        let cookies = reopened["cookies"].as_array().unwrap();
+        assert_eq!(cookies.len(), 2);
+        for site in ["https://first.test", "https://second.test"] {
+            assert!(cookies
+                .iter()
+                .any(|cookie| cookie["value"] == site
+                    && cookie["partitionKey"]["topLevelSite"] == site));
         }
         crate::browser_cdp::close(&endpoint).await.unwrap();
         tokio::time::timeout(Duration::from_secs(20), child.wait())

@@ -97,6 +97,10 @@ pub fn is_busy() -> bool {
 pub fn reserve_profiles(ids: &[String]) -> Result<Reservation> {
     let _guard = crate::process::lock_profile_resources()?;
     crate::profile::recover_interrupted_operations_locked()?;
+    reserve_profiles_locked(ids)
+}
+
+pub(crate) fn reserve_profiles_locked(ids: &[String]) -> Result<Reservation> {
     for id in ids {
         crate::profile::ensure_stopped(id)?;
     }

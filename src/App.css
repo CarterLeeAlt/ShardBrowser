@@ -516,7 +516,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   pointer-events: none;
 }
 /* Spin animation on the dedicated starting-state loader. */
-.btn-launch-ico.spin svg { animation: shardx-spin 0.9s linear infinite; }
+.btn-launch[aria-busy="true"] > svg { animation: shardx-spin 0.9s linear infinite; }
 @keyframes shardx-spin {
   from { transform: rotate(0deg); }
   to   { transform: rotate(360deg); }
@@ -588,6 +588,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 
 .icon-btn {
   width: 28px; height: 28px;
+  padding: 0;
   display: inline-grid; place-items: center;
   background: var(--bg-1);
   color: var(--tx-2);
@@ -664,11 +665,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   opacity: 0.45;
   cursor: not-allowed;
 }
-.btn-launch .btn-launch-ico {
-  display: inline-grid; place-items: center;
-  width: 13px; height: 13px;
-}
-.btn-launch .btn-launch-ico svg { display: block; }
 .btn-launch-stop {
   border-color: #fb718555;
   background: #fb71851a;
@@ -770,18 +766,25 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 }
 .inline-rename {
   background: var(--bg-2);
-  border: 1px solid var(--accent);
+  border: 1px solid var(--bd-2);
   border-radius: var(--radius-sm);
   padding: 4px 8px;
   font-size: var(--text-body);
   color: var(--tx-1);
   width: 100%;
-  outline: none;
 }
+.inline-rename:focus { outline: none; border-color: var(--accent-hi); }
+/* Keep emphasis tokens at the regular weight inside table content only. */
+.rows-head, .browser-data-row, .proxy-data-row,
+.storage-table, .assign-preview table,
+.bulk-preview-list, .runtime-update-list, .sort-drag-label {
+  --font-weight-emphasis: var(--font-weight-regular);
+}
+
 .rows-head, .storage-table th, .assign-preview th {
   color: var(--tx-2);
   font-size: var(--text-body);
-  font-weight: var(--font-weight-emphasis);
+  font-weight: var(--font-weight-regular);
   background: var(--bg-2);
   border-bottom: 1px solid var(--bd-1);
 }
@@ -1012,6 +1015,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   font-size: var(--text-small);
   font-weight: var(--font-weight-regular);
 }
+.browser-data-row .cell-name .profile-inline-rename { font-size: inherit; }
 .browser-data-row .proxy-detail,
 .browser-data-row .proxy-detail-text {
   height: 14px;

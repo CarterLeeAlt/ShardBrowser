@@ -65,7 +65,7 @@ export function TrashView({ confirm, onSuccess, onError }: StorageViewProps) {
         <thead><tr><th><input type="checkbox" aria-label={tr("Select all")} disabled={busy} checked={selected.size === entries.length} onChange={(e) => setSelected(new Set(e.target.checked ? entries.map((entry) => entry.id) : []))} /></th><th>{tr("Name")}</th><th>{tr("Folder")}</th><th>{tr("Deleted at")}</th><th>{tr("Expires at")}</th><th>{tr("Data size")}</th><th>{tr("Actions")}</th></tr></thead>
         <tbody>{entries.map((entry) => <tr key={entry.id}>
           <td><input type="checkbox" aria-label={entry.name} disabled={busy} checked={selected.has(entry.id)} onChange={(e) => setSelected((current) => { const next = new Set(current); if (e.target.checked) next.add(entry.id); else next.delete(entry.id); return next; })} /></td>
-          <td><strong>{entry.name}</strong><div className="muted small">{entry.profile_id}</div></td><td>{entry.folder || "—"}</td>
+          <td>{entry.name}<div className="muted small">{entry.profile_id}</div></td><td>{entry.folder || "—"}</td>
           <td>{date(entry.deleted_at)}</td><td>{date(entry.expires_at)}</td><td>{(entry.size_bytes / 1024 / 1024).toFixed(1)} MiB</td>
           <td><button className="btn-ghost btn-sm" disabled={busy || Date.now() >= entry.expires_at * 1000} onClick={() => void restore([entry.id])}>{tr("Restore")}</button></td>
         </tr>)}</tbody>

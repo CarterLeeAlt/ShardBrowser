@@ -53,6 +53,7 @@ import { mergeProfileEdits } from "./profileEdit";
 import { tr, useLanguage, setLanguage, type Language } from "./i18n";
 import { ExtensionsView, ExtensionPicker } from "./Extensions";
 import { TrashView } from "./Trash";
+import { updateWorkspaceFolders, useWorkspaceBackup, useWorkspaceFolders, WorkspaceBackup } from "./WorkspaceBackup";
 
 // Host OS of the launcher window (never spoofed) — drives default OS tab + titlebar.
 function detectHostOs(): "macOS" | "Windows" | "Linux" {
@@ -819,6 +820,13 @@ export default function App() {
     onError: toast.err,
   };
   const [section, setSection] = useState<Section>("browsers");
+  const workspaceBackup = useWorkspaceBackup(async (title, message) => {
+    setSection("settings");
+    return (await confirmModal({ title, message, buttons: [
+      { label: tr("Cancel"), value: false },
+      { label: tr("Restore"), value: true, primary: true },
+    ] })) === true;
+  });
   useEffect(() => { document.querySelector(".main")?.scrollTo({ top: 0, left: 0 }); }, [section]);
   const [theme, setTheme] = useState<Theme>(
     () => (localStorage.getItem("shardx-theme") as Theme) || "dark",
@@ -890,6 +898,7 @@ export default function App() {
           <Sidebar
             section={section}
             onSelect={setSection}
+            navigationLocked={workspaceBackup.status === "restore"}
             theme={theme}
             onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
           />
@@ -900,7 +909,7 @@ export default function App() {
               {section === "fingerprints" && <FingerprintsView />}
               {section === "extensions" && <ExtensionsView {...storageViewProps} />}
               {section === "trash" && <TrashView {...storageViewProps} />}
-              {section === "settings" && <SettingsView />}
+              {section === "settings" && <SettingsView workspaceBackup={workspaceBackup} />}
             </div>
           </main>
           <ToastHost />
@@ -912,10 +921,11 @@ export default function App() {
 }
 
 function Sidebar({
-  section, onSelect, theme, onToggleTheme,
+  section, onSelect, navigationLocked, theme, onToggleTheme,
 }: {
   section: Section;
   onSelect: (s: Section) => void;
+  navigationLocked: boolean;
   theme: "dark" | "light";
   onToggleTheme: () => void;
 }) {
@@ -974,6 +984,7 @@ function Sidebar({
                 key={it.id}
                 className={`nav-item ${section === it.id ? "active" : ""}`}
                 aria-current={section === it.id ? "page" : undefined}
+                disabled={navigationLocked && section !== it.id}
                 onClick={() => onSelect(it.id)}
               >
                 <span className="nav-icon">{it.svg}</span>
@@ -1347,29 +1358,11 @@ function BrowsersView() {
     if (renaming && (running[renaming.id] || startBusy.has(renaming.id) || backendActiveIds.has(renaming.id))) setRenaming(null);
   }, [running, startBusy, backendActiveIds, expanded, quickEdit, renaming]);
   // Empty folders persist in localStorage until a profile lands in them.
-  const [folderRegistry, setFolderRegistry] = useState<string[]>(() => {
-    try {
-      const parsed: unknown = JSON.parse(localStorage.getItem("shardx-folders") || "[]");
-      return Array.isArray(parsed) && parsed.every((item) => typeof item === "string")
-        ? [...new Set(parsed)]
-        : [];
-    }
-    catch { return []; }
-  });
+  const folderRegistry = useWorkspaceFolders();
   const [folderModal, setFolderModal] = useState<{ profileId: string | null } | null>(null);
   const sort = useListSort();
-  const rememberFolder = (f: string) =>
-    setFolderRegistry((r) => {
-      const next = r.includes(f) ? r : [...r, f];
-      localStorage.setItem("shardx-folders", JSON.stringify(next));
-      return next;
-    });
-  const forgetFolder = (f: string) =>
-    setFolderRegistry((r) => {
-      const next = r.filter((x) => x !== f);
-      localStorage.setItem("shardx-folders", JSON.stringify(next));
-      return next;
-    });
+  const rememberFolder = (f: string) => updateWorkspaceFolders((r) => r.includes(f) ? r : [...r, f]);
+  const forgetFolder = (f: string) => updateWorkspaceFolders((r) => r.filter((x) => x !== f));
   const ctx = useContextMenu();
 
   const reload = async () => {
@@ -2242,9 +2235,7 @@ function BrowsersView() {
                     aria-label={isRunning ? tr("Stop browser") : isStarting ? tr("Cancel launch") : tr("Start browser")}
                     aria-busy={isStarting}
                   >
-                    <span className={`btn-launch-ico ${isStarting ? "spin" : ""}`}>
-                      {isRunning ? <Icon.Stop size={16} /> : isStarting ? <Icon.Loader size={16} /> : <Icon.Play size={16} />}
-                    </span>
+                    {isRunning ? <Icon.Stop size={16} /> : isStarting ? <Icon.Loader size={16} /> : <Icon.Play size={16} />}
                   </button>
                   <button className="icon-btn" onClick={() => expand(p.id)} disabled={isActive} title={isActive ? tr("Stop browser before editing") : tr("Edit")}><Icon.Edit size={16} /></button>
                   <button className="icon-btn" onClick={() => cloneProfile(p.id)} disabled={isActive} title={isActive ? tr("Stop browser before cloning") : tr("Clone")}><Icon.Clone size={16} /></button>
@@ -4814,7 +4805,7 @@ function VersionPill() {
   );
 }
 
-function SettingsView() {
+function SettingsView({ workspaceBackup }: { workspaceBackup: ReturnType<typeof useWorkspaceBackup> }) {
   const language = useLanguage();
   const [s, setS] = useState<Settings>({
     theme: "dark",
@@ -4864,6 +4855,7 @@ function SettingsView() {
       </PageToolbar>
 
       <div className="settings-card-list">
+        <WorkspaceBackup {...workspaceBackup} />
         <div className="card settings-card">
           <h3>{tr("Interface language")}</h3>
           <p className="muted small">{tr("Language changes apply immediately and are saved on this device.")}</p>

@@ -706,6 +706,22 @@ pub fn list() -> Result<Vec<ProxyEntry>> {
     Ok(load()?.proxies)
 }
 
+pub(crate) fn validate_workspace_proxy_data(bytes: &[u8]) -> Result<Vec<String>> {
+    let disk: ProxyDiskStore = serde_json::from_slice(bytes)?;
+    disk.proxies
+        .into_iter()
+        .map(|stored| {
+            let proxy = entry_from_disk(stored)?;
+            anyhow::ensure!(
+                !proxy.credentials_unavailable,
+                "A proxy credential cannot be unlocked by this Windows user"
+            );
+            anyhow::ensure!(!proxy.id.is_empty(), "Missing proxy ID");
+            Ok(proxy.id)
+        })
+        .collect()
+}
+
 pub fn restore_store_snapshot_unlocked(snapshot: Option<&[u8]>) -> Result<()> {
     let path = store::proxies_path()?;
     match snapshot {

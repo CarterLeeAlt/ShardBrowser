@@ -27,6 +27,7 @@ mod startup_path;
 mod store;
 mod taskbar_icon;
 mod trash;
+mod workspace_backup;
 
 pub(crate) use fingerprint_identity::randomize_platform_version;
 use serde_json::Value;
@@ -1324,6 +1325,38 @@ async fn profile_backup_import(
 // ---- Settings ----
 
 #[tauri::command]
+async fn workspace_backup_export(
+    path: std::path::PathBuf,
+    folders: Vec<String>,
+) -> Result<workspace_backup::Summary, String> {
+    tokio::task::spawn_blocking(move || workspace_backup::export(path, folders))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn workspace_backup_inspect(
+    path: std::path::PathBuf,
+) -> Result<workspace_backup::Summary, String> {
+    tokio::task::spawn_blocking(move || workspace_backup::inspect(path))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn workspace_backup_restore(
+    path: std::path::PathBuf,
+    id: uuid::Uuid,
+) -> Result<workspace_backup::Summary, String> {
+    tokio::task::spawn_blocking(move || workspace_backup::restore(path, id))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
 fn settings_get() -> Result<settings::Settings, String> {
     settings::load().map_err(|e| e.to_string())
 }
@@ -1506,6 +1539,9 @@ pub fn run() {
             api_regenerate_token,
             profile_backup_export,
             profile_backup_import,
+            workspace_backup_export,
+            workspace_backup_inspect,
+            workspace_backup_restore,
             mcp_download,
             runtime::runtime_apply_updates,
             runtime::runtime_check_updates,
@@ -1638,6 +1674,9 @@ pub fn run() {
                 Ok(n) if n > 0 => eprintln!("[launcher] removed {n} stale backup staging artifact(s)"),
                 Ok(_) => {}
                 Err(e) => eprintln!("[launcher] backup staging cleanup failed: {e}"),
+            }
+            if let Err(error) = workspace_backup::cleanup_interrupted_stage() {
+                eprintln!("[launcher] workspace restore staging cleanup failed: {error:#}");
             }
 
             // Keep stored proxy information fresh while the launcher remains

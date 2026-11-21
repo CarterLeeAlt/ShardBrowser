@@ -12,6 +12,7 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
     "dialog:allow-open",
+    "dialog:allow-save",
     "opener:allow-open-url",
     "opener:allow-default-urls"
   ]
