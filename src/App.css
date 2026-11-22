@@ -496,46 +496,17 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .sort-handle:disabled { opacity: .28; cursor: not-allowed; }
 .row-sort-source { opacity: .32; }
 .row-sort-placeholder { border-top-color: transparent; }
-.row-sort-placeholder > .row { opacity: 0; pointer-events: none; }
-.sort-placeholder-preview {
-  position: absolute;
-  inset: 4px 8px;
-  display: flex;
-  align-items: center;
-  padding-inline: 10px;
-  border: 1px dashed var(--accent-hi);
-  border-radius: var(--radius-sm);
+.row-sort-placeholder > .row,
+.sort-overlay > .row {
+  outline: 1px dashed var(--accent-hi);
+  outline-offset: -1px;
   background: var(--accent-dim);
-  color: var(--accent-hi);
   pointer-events: none;
 }
-.row-sort-placeholder:focus-within .sort-placeholder-preview { border-width: 2px; }
-.sort-drag-label {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  max-width: 260px;
-}
-.sort-drag-label > svg { flex: none; }
-.sort-drag-label > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.sort-placeholder-preview .sort-drag-label {
-  position: sticky;
-  left: 12px;
-  max-width: min(260px, calc(100cqw - 36px));
-}
+.row-sort-placeholder:focus-within > .row { outline-width: 2px; outline-offset: -2px; }
 .sort-overlay {
-  width: fit-content;
-  max-width: 260px;
-  padding: 7px 11px;
-  border: 1px solid #a78bfaaa;
-  border-radius: 999px;
-  color: #fff;
-  background: #7c3aedee;
-  box-shadow: 0 8px 24px #0006;
+  container-type: inline-size;
+  background: var(--bg-1);
   pointer-events: none;
 }
 /* Spin animation on the dedicated starting-state loader. */
@@ -753,7 +724,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 /* The expanded editor is a sibling of the table row and uses body type. */
 .rows-head, .browser-data-row, .proxy-data-row,
 .storage-table, .assign-preview table,
-.bulk-preview-list, .bulk-preview-head, .runtime-update-list, .sort-drag-label {
+.bulk-preview-list, .bulk-preview-head, .runtime-update-list {
   font-size: var(--text-small);
   line-height: var(--line-small);
   font-weight: var(--font-weight-regular);

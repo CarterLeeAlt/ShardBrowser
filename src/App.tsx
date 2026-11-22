@@ -909,19 +909,32 @@ function listDrop<T extends { id: string }>(event: DragEndEvent, items: T[], kin
   return { id, anchorId, placement };
 }
 
-function SortDragLabel({ label }: { label: string }) {
-  return <span className="sort-drag-label"><Icon.Grip size={16} /><span>{label}</span></span>;
-}
-
 function ListSortOverlay() {
   const { active, over } = useDndContext();
-  const label = active?.data.current?.label;
-  // Keep the overlay mounted for dnd-kit's row measurement. Only show a
-  // floating label when there is no row placeholder to carry it.
+  const row = active?.data.current;
+  // Keep the overlay mounted for measurement; the actual row shows the insertion point.
   return (
-    <DragOverlay dropAnimation={null} style={{ pointerEvents: "none" }}>
-      {label && over?.data.current?.type !== "sortable-row" && (
-        <div className="sort-overlay" aria-hidden="true"><SortDragLabel label={label} /></div>
+    <DragOverlay
+      dropAnimation={null}
+      style={{ pointerEvents: "none" }}
+      modifiers={[
+        ({ transform, activeNodeRect, over }) => ({
+          ...transform,
+          x: 0,
+          // Keep the highlighted folder above the full-width preview.
+          y: over?.data.current?.type === "profile-folder" && activeNodeRect
+            ? Math.max(transform.y, over.rect.bottom - activeNodeRect.top + 4)
+            : transform.y,
+        }),
+      ]}
+    >
+      {row?.type === "sortable-row" && over?.data.current?.type !== "sortable-row" && (
+        <div className={`sort-overlay ${row.kind === "profile" ? "browser-rows" : "proxy-rows"}`} inert>
+          <div className={row.rowClassName}>
+            <div className="sort-handle-cell"><span className="sort-handle"><Icon.Grip size={16} /></span></div>
+            {row.children}
+          </div>
+        </div>
       )}
     </DragOverlay>
   );
@@ -930,7 +943,6 @@ function ListSortOverlay() {
 function SortableRow({
   id,
   kind,
-  name,
   disabledReason,
   className,
   rowClassName,
@@ -940,7 +952,6 @@ function SortableRow({
 }: {
   id: string;
   kind: SortKind;
-  name: string;
   disabledReason?: string;
   className: string;
   rowClassName: string;
@@ -949,7 +960,6 @@ function SortableRow({
   footer?: ReactNode;
 }) {
   const disabled = !!disabledReason;
-  const label = name || id.slice(0, 8);
   const {
     attributes,
     listeners,
@@ -962,7 +972,7 @@ function SortableRow({
   } = useSortable({
     id,
     disabled,
-    data: { type: "sortable-row", kind, label },
+    data: { type: "sortable-row", kind, rowClassName, children },
   });
   const placeholder = isDragging && overIndex >= 0;
   const style: CSSProperties = {
@@ -994,9 +1004,6 @@ function SortableRow({
         {children}
       </div>
       {footer}
-      {placeholder && (
-        <div className="sort-placeholder-preview" aria-hidden="true"><SortDragLabel label={label} /></div>
-      )}
     </div>
   );
 }
@@ -1845,7 +1852,6 @@ function BrowsersView() {
               key={p.id}
               id={p.id}
               kind="profile"
-              name={p.name}
               className={`row-wrap${isExpanded ? " row-expanded" : ""}`}
               rowClassName="row t-cols browser-data-row"
               disabledReason={isActive ? tr("Stop the browser before reordering this profile") : search.trim() ? tr("Clear search to reorder profiles") : isExpanded ? tr("Close the editor before reordering") : undefined}
@@ -3166,7 +3172,6 @@ function ProxiesView() {
               key={p.id}
               id={p.id}
               kind="proxy"
-              name={p.name}
               className="row-wrap"
               rowClassName="row p-cols proxy-data-row"
               disabledReason={isLocked ? tr("Stop the browser using this proxy before reordering") : search.trim() ? tr("Clear search to reorder proxies") : renaming?.id === p.id ? tr("Finish renaming before reordering") : undefined}
