@@ -312,7 +312,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   width: 100%; padding: 6px 8px;
   background: var(--accent-dim); color: var(--accent-hi);
   border: 1px solid transparent; border-radius: 6px;
-  font-size: var(--text-small); font-weight: var(--font-weight-emphasis); cursor: pointer;
+  font-size: var(--text-small); cursor: pointer;
   transition: background .12s, border-color .12s;
 }
 .side-auto-btn:hover { border-color: var(--accent); }
@@ -448,7 +448,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 .tab-count {
   background: var(--bg-3); color: var(--tx-2);
   font-size: var(--text-small); padding: 1px 6px; border-radius: 10px;
-  font-weight: var(--font-weight-emphasis);
 }
 .folder-tab.active .tab-count { background: var(--accent-dim); color: var(--accent-hi); }
 .folder-tab-add {
@@ -559,7 +558,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   transition: background .12s, color .12s, transform .04s, border-color .12s;
 }
 .btn-primary {
-  background: var(--accent-button); color: #fff; font-weight: var(--font-weight-emphasis);
+  background: var(--accent-button); color: #fff;
   --focus-color: #fff;
 }
 
@@ -707,7 +706,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 28px;
   padding: 2px 8px;
-  font-size: var(--text-small); font-weight: var(--font-weight-emphasis);
+  font-size: var(--text-small);
   font-feature-settings: "tnum";
   color: var(--tx-2);
   background: var(--bg-3);
@@ -728,7 +727,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   font-size: var(--text-small);
   line-height: var(--line-small);
   font-weight: var(--font-weight-regular);
-  --font-weight-emphasis: var(--font-weight-regular);
 }
 
 .table-detail {
@@ -762,7 +760,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   overflow: hidden;
 }
 .cell-name .name-main {
-  font-weight: var(--font-weight-emphasis); color: var(--tx-1);
+  color: var(--tx-1);
   transition: color .12s;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -793,7 +791,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 }
 .flag {
   display: inline-block;
-  font-size: var(--text-small); font-weight: var(--font-weight-emphasis);
+  font-size: var(--text-small);
   padding: 2px 6px;
   background: var(--bg-3);
   color: var(--tx-2);
@@ -803,7 +801,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 
 .badge {
   display: inline-block;
-  font-size: var(--text-small); font-weight: var(--font-weight-emphasis);
+  font-size: var(--text-small);
 
   padding: 2px 7px;
   border-radius: 4px;
@@ -1530,8 +1528,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   gap: 4px;
   padding: 3px 10px;
   font-size: var(--text-small);
-  font-weight: var(--font-weight-emphasis);
-
   border-radius: 4px;
   border: 1px solid transparent;
   background: var(--bg-3);
@@ -1590,7 +1586,6 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 button.status-pill.status-link {
   appearance: none;
   cursor: pointer;
-  font: inherit;
   line-height: inherit;
   transition: filter .12s ease, transform .12s ease;
 }
@@ -1679,6 +1674,10 @@ button.status-pill.status-link:focus-visible { box-shadow: none; }
 }
 .pop-pill.ok { color: var(--ok); border-color: #4ade8055; background: #4ade8014; }
 .pop-pill.err { color: var(--err); border-color: #fb718555; background: #fb71851a; }
+
+.badge, .flag, .status-pill, .pop-pill, .tab-count, .profile-count, .lib-group-count {
+  font-weight: var(--font-weight-emphasis);
+}
 
 .popover-divider {
   position: relative;
