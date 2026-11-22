@@ -395,9 +395,7 @@ type ProfileMeta = {
   last_launched_at: string | null;
   created_at: string | null;
   folder: string;
-  /// Cumulative engine uptime in ms across every launch.  Increased when
-  /// the engine exits — for the currently-running session add `running[id]`
-  /// (Date.now() - sessionStartTs) on top.
+  /// Cumulative engine uptime in ms across completed runs.
   total_runtime_ms: number;
 };
 type ProxyEntry = {
@@ -1045,6 +1043,8 @@ function FolderDropTab({
 
 // ---- Browsers view ----
 
+type LauncherProcessState = { running: string[]; starting: string[]; stopping: string[] };
+
 function BrowsersView() {
   const [profiles, setProfiles] = useState<ProfileMeta[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1075,21 +1075,19 @@ function BrowsersView() {
     catch (e) { toast.err(String(e)); }
     finally { await refreshRecovery(); setRecovering(false); }
   };
-  // Value = epoch ms at which the engine was first observed running. Used
-  // both as a truthy flag (any number = running) and as the anchor for the
-  // ticking uptime display in the Status column.
-  const [running, setRunning] = useState<Record<string, number>>({});
-  const [backendActiveIds, setBackendActiveIds] = useState<Set<string>>(new Set());
+  const [processState, setProcessState] = useState<LauncherProcessState | null>(null);
+  const running = useMemo(() => new Set(processState?.running), [processState]);
+  const backendStarting = useMemo(() => new Set(processState?.starting), [processState]);
+  const backendStopping = useMemo(() => new Set(processState?.stopping), [processState]);
   const processPollRevision = useRef(0);
-  // Re-render trigger so the uptime label ticks every second without
-  // re-fetching the process list (which polls every 2s).
-  const [, setUptimeTick] = useState(0);
-  useEffect(() => {
-    if (Object.keys(running).length === 0) return;
-    const h = setInterval(() => setUptimeTick((t) => t + 1), 1000);
-    return () => clearInterval(h);
-  }, [running]);
+  const processPollApplied = useRef(0);
   const [startBusy, setStartBusy] = useState<Set<string>>(new Set());
+  const [stopBusy, setStopBusy] = useState<Set<string>>(new Set());
+  const stopRequests = useRef(new Set<string>());
+  const [bulkStopping, setBulkStopping] = useState(false);
+  const isStartingProfile = (id: string) => !running.has(id) && (startBusy.has(id) || backendStarting.has(id));
+  const isStoppingProfile = (id: string) => stopBusy.has(id) || backendStopping.has(id);
+  const activeIds = useMemo(() => new Set([...running, ...backendStarting, ...startBusy, ...stopBusy]), [running, backendStarting, startBusy, stopBusy]);
   const queuedLaunches = useRef(new Set<string>());
   const [assigning, setAssigning] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -1100,13 +1098,13 @@ function BrowsersView() {
   // Close stale editors as soon as launch starts; the backend guard remains
   // authoritative for launches initiated outside this view.
   useEffect(() => {
-    if (expanded && expanded !== "__new__" && (running[expanded] || startBusy.has(expanded) || backendActiveIds.has(expanded))) {
+    if (expanded && expanded !== "__new__" && activeIds.has(expanded)) {
       setExpanded(null);
       setDraft(null);
     }
-    if (quickEdit && (running[quickEdit.profile.id] || startBusy.has(quickEdit.profile.id) || backendActiveIds.has(quickEdit.profile.id))) setQuickEdit(null);
-    if (renaming && (running[renaming.id] || startBusy.has(renaming.id) || backendActiveIds.has(renaming.id))) setRenaming(null);
-  }, [running, startBusy, backendActiveIds, expanded, quickEdit, renaming]);
+    if (quickEdit && activeIds.has(quickEdit.profile.id)) setQuickEdit(null);
+    if (renaming && activeIds.has(renaming.id)) setRenaming(null);
+  }, [activeIds, expanded, quickEdit, renaming]);
   // Empty folders persist in localStorage until a profile lands in them.
   const folderRegistry = useWorkspaceFolders();
   const [folderModal, setFolderModal] = useState<{ profileId: string | null } | null>(null);
@@ -1146,48 +1144,30 @@ function BrowsersView() {
     return () => clearTimeout(t);
   }, [expanded]);
 
-  // 2s poll for real child status; not optimistic UI state.  Uptime is
-  // anchored to the moment the engine actually started (now - uptime_ms),
-  // preserved across polls so the displayed clock doesn't jitter.  When a
-  // profile transitions running → not-running, the backend has just bumped
-  // its persisted `total_runtime_ms` — re-fetch profile_list so the Time
-  // column reflects the new total (otherwise it shows whatever was on
-  // disk before this session started, looking like a "reset").
+  const previousRunning = useRef<string[]>([]);
+  const refreshProcessState = async () => {
+    const revision = ++processPollRevision.current;
+    const [processResult, operationResult] = await Promise.allSettled([
+      invoke<LauncherProcessState>("launcher_process_state"),
+      invoke<typeof operations>("operation_status"),
+    ]);
+    if (revision <= processPollApplied.current) return;
+    processPollApplied.current = revision;
+    if (operationResult.status === "fulfilled") setOperations(operationResult.value);
+    if (processResult.status === "rejected" || operationResult.status === "rejected") {
+      setProcessState(null);
+      return;
+    }
+    const next = processResult.value;
+    const exited = previousRunning.current.some((id) => !next.running.includes(id));
+    previousRunning.current = next.running;
+    setProcessState(next);
+    if (exited) void reload();
+  };
   useEffect(() => {
-    let cancelled = false;
-    const tick = async () => {
-      const revision = processPollRevision.current;
-      try {
-        const [list, activeIds, operationState] = await Promise.all([
-          invoke<{ profile_id: string; pid: number; uptime_ms: number }[]>("process_list"),
-          invoke<string[]>("profile_active_ids"),
-          invoke<typeof operations>("operation_status"),
-        ]);
-        if (cancelled || revision !== processPollRevision.current) return;
-        setBackendActiveIds(new Set(activeIds));
-        setOperations(operationState);
-        const now = Date.now();
-        setRunning((prev) => {
-          const next: Record<string, number> = {};
-          for (const r of list) {
-            next[r.profile_id] = prev[r.profile_id] ?? (now - r.uptime_ms);
-          }
-          // Detect any profile that was running on the previous tick but
-          // dropped off this one — those need a profile_list refresh so
-          // the freshly-accumulated total_runtime_ms appears in the UI.
-          const justExited = Object.keys(prev).some((id) => !(id in next));
-          if (justExited) {
-            // Defer to next tick so React commits `next` before reload()
-            // races against it.
-            setTimeout(() => { if (!cancelled) reload(); }, 0);
-          }
-          return next;
-        });
-      } catch {}
-    };
-    tick();
-    const handle = setInterval(tick, 2000);
-    return () => { cancelled = true; clearInterval(handle); };
+    void refreshProcessState();
+    const handle = setInterval(refreshProcessState, 2000);
+    return () => { processPollApplied.current = processPollRevision.current; clearInterval(handle); };
   }, []);
 
   const proxyMap = useMemo(() => Object.fromEntries(proxies.map((p) => [p.id, p])), [proxies]);
@@ -1228,21 +1208,11 @@ function BrowsersView() {
     if (folder !== "all" && !folders.includes(folder)) setFolder("all");
   }, [folders, folder]);
 
-  const runningCount = Object.values(running).filter(Boolean).length;
-  const selectedHasRunning = [...selected].some((id) => !!running[id]);
-  const selectedHasStarting = [...selected].some((id) => startBusy.has(id) || (backendActiveIds.has(id) && !running[id]));
-  const selectedHasActive = selectedHasRunning || selectedHasStarting || operations.runtime || !!recovery?.incomplete || [...selected].some(id => operations.profiles.includes(id));
-
-  const clearFailedLaunch = (id: string) => {
-    // Discard polls started before the failure, which can still report the
-    // released backend reservation as active.
-    processPollRevision.current += 1;
-    setBackendActiveIds((current) => {
-      const next = new Set(current);
-      next.delete(id);
-      return next;
-    });
-  };
+  const runningCount = running.size;
+  const selectedCanStop = [...selected].some((id) => running.has(id) && !isStoppingProfile(id));
+  const selectedHasRunning = [...selected].some((id) => running.has(id));
+  const selectedHasStarting = [...selected].some(isStartingProfile);
+  const selectedHasActive = !processState || operations.runtime || !!recovery?.incomplete || [...selected].some(id => activeIds.has(id) || operations.profiles.includes(id));
 
   const cancelStart = async (id: string) => {
     if (queuedLaunches.current.delete(id)) {
@@ -1257,31 +1227,42 @@ function BrowsersView() {
     } catch (e) { toast.err(String(e)); }
   };
 
-  // Keep the launch busy until the backend returns; failures unlock immediately.
+  const stopProfile = async (id: string) => {
+    if (stopRequests.current.has(id)) return false;
+    stopRequests.current.add(id);
+    setStopBusy((ids) => new Set([...ids, id]));
+    try { await invoke<boolean>("process_kill", { profileId: id }); return true; }
+    finally {
+      await refreshProcessState();
+      stopRequests.current.delete(id);
+      setStopBusy((ids) => new Set([...ids].filter((value) => value !== id)));
+    }
+  };
+
   const startStop = async (p: ProfileMeta) => {
-    if (running[p.id]) {
+    if (isStoppingProfile(p.id)) return;
+    if (running.has(p.id)) {
       try {
-        await invoke<boolean>("process_kill", { profileId: p.id });
+        await stopProfile(p.id);
       } catch (e) {
         toast.err(String(e));
       }
       return;
     }
-    if (startBusy.has(p.id) || backendActiveIds.has(p.id)) {
+    if (isStartingProfile(p.id)) {
       await cancelStart(p.id);
       return;
     }
+    if (!processState) return;
     setStartBusy((s) => new Set([...s, p.id]));
     try {
       const res = await invoke<{ pid: number; warnings: string[] }>("launch", { profileId: p.id });
       for (const warning of res.warnings ?? []) toast.warn(warning);
-      // Don't optimistically flip `running` here; the 2s poll above picks
-      // up the new child immediately and anchors the uptime clock.
     } catch (e) {
-      clearFailedLaunch(p.id);
       if (String(e) === "Launch cancelled") toast.info(tr("Launch cancelled"));
       else toast.err(String(e));
     } finally {
+      await refreshProcessState();
       setStartBusy((s) => {
         const n = new Set(s);
         n.delete(p.id);
@@ -1291,7 +1272,7 @@ function BrowsersView() {
   };
 
   const remove = async (id: string) => {
-    if (running[id] || startBusy.has(id) || backendActiveIds.has(id)) {
+    if (activeIds.has(id)) {
       toast.err(tr("Stop the browser before deleting this profile"));
       return;
     }
@@ -1308,7 +1289,7 @@ function BrowsersView() {
   };
 
   const cloneProfile = async (id: string) => {
-    if (running[id] || startBusy.has(id) || backendActiveIds.has(id)) {
+    if (activeIds.has(id)) {
       toast.err(tr("Stop the browser before cloning this profile"));
       return;
     }
@@ -1321,9 +1302,9 @@ function BrowsersView() {
   const exportProfiles = async (ids: string[]) => {
     if (backupInFlight.current) return;
     if (ids.length === 0) return;
-    const activeIds = ids.filter((id) => running[id] || startBusy.has(id) || backendActiveIds.has(id));
-    if (activeIds.length > 0) {
-      toast.err(tr("Stop the {0} active browser{1} before exporting", activeIds.length, activeIds.length === 1 ? "" : "s"));
+    const activeCount = ids.filter((id) => activeIds.has(id)).length;
+    if (activeCount > 0) {
+      toast.err(tr("Stop the {0} active browser{1} before exporting", activeCount, activeCount === 1 ? "" : "s"));
       return;
     }
     backupInFlight.current = true;
@@ -1345,7 +1326,7 @@ function BrowsersView() {
 
   // Per-profile action menu shared by right-click and ⋮ button.
   const profileMenu = (p: ProfileMeta) => [
-    { label: running[p.id] ? tr("Stop") : startBusy.has(p.id) || backendActiveIds.has(p.id) ? tr("Cancel launch") : tr("Launch"), onClick: () => startStop(p) },
+    { label: tr("Launch"), onClick: () => startStop(p) },
     { label: tr("Edit"), onClick: () => expand(p.id) },
     { label: tr("Clone"), onClick: () => cloneProfile(p.id) },
     { sep: true, label: "", onClick: () => {} },
@@ -1364,7 +1345,7 @@ function BrowsersView() {
   ];
 
   const beginRename = (p: ProfileMeta) => {
-    if (running[p.id] || startBusy.has(p.id) || backendActiveIds.has(p.id)) return;
+    if (activeIds.has(p.id)) return;
     if (expanded === p.id) {
       setExpanded(null);
       setDraft(null);
@@ -1379,7 +1360,7 @@ function BrowsersView() {
       closeEditor();
       return;
     }
-    if (running[id] || startBusy.has(id) || backendActiveIds.has(id)) {
+    if (activeIds.has(id)) {
       closeEditor();
       toast.err(tr("Stop the browser or wait for it to finish starting before renaming"));
       return;
@@ -1405,7 +1386,7 @@ function BrowsersView() {
     // Dropping a profile onto the folder it already lives in is a no-op —
     // tell the user instead of silently doing nothing.
     const p = profiles.find((x) => x.id === id);
-    if (running[id] || startBusy.has(id) || backendActiveIds.has(id)) {
+    if (activeIds.has(id)) {
       toast.err(tr("Stop the browser before moving this profile"));
       return;
     }
@@ -1423,7 +1404,7 @@ function BrowsersView() {
 
   const deleteFolder = async (f: string) => {
     const count = profiles.filter((p) => p.folder === f).length;
-    const runningCount = profiles.filter((p) => p.folder === f && running[p.id]).length;
+    const runningCount = profiles.filter((p) => p.folder === f && running.has(p.id)).length;
     if (runningCount > 0) {
       toast.err(tr("Stop the {0} running browser{1} in this folder first", runningCount, runningCount === 1 ? "" : "s"));
       return;
@@ -1475,12 +1456,12 @@ function BrowsersView() {
   const bulkLaunch = async () => {
     const ids = [...selected];
     if (ids.length === 0) return;
-    const runningIds = ids.filter((id) => !!running[id]);
+    const runningIds = ids.filter((id) => running.has(id));
     if (runningIds.length > 0) {
       toast.err(tr("Stop the {0} selected running browser{1} before launching", runningIds.length, runningIds.length === 1 ? "" : "s"));
       return;
     }
-    const startingIds = ids.filter((id) => startBusy.has(id) || (backendActiveIds.has(id) && !running[id]));
+    const startingIds = ids.filter(isStartingProfile);
     if (startingIds.length > 0) {
       toast.err(tr("Wait for the selected browser to finish starting"));
       return;
@@ -1494,10 +1475,10 @@ function BrowsersView() {
         const res = await invoke<{ pid: number; warnings: string[] }>("launch", { profileId: id });
         for (const warning of res.warnings ?? []) toast.warn(warning);
       } catch (e) {
-        clearFailedLaunch(id);
         if (String(e) === "Launch cancelled") toast.info(tr("Launch cancelled"));
         else toast.err(tr("Failed to launch {0}: {1}", id.slice(0, 8), e));
       } finally {
+        await refreshProcessState();
         setStartBusy((state) => {
           const next = new Set(state);
           next.delete(id);
@@ -1509,13 +1490,13 @@ function BrowsersView() {
   };
 
   const bulkStop = async () => {
-    const ids = [...selected];
+    const ids = [...selected].filter((id) => running.has(id) && !isStoppingProfile(id));
     if (ids.length === 0) return;
+    setBulkStopping(true);
     const stopped = new Set<string>();
     for (const id of ids) {
       try {
-        await invoke<boolean>("process_kill", { profileId: id });
-        stopped.add(id);
+        if (await stopProfile(id)) stopped.add(id);
       } catch (e) {
         toast.err(tr("Failed to stop {0}: {1}", id.slice(0, 8), e));
       }
@@ -1523,14 +1504,15 @@ function BrowsersView() {
     // Keep profiles that failed to stop selected so the batch context
     // survives; the 2s poll keeps showing their real running state.
     setSelected((prev) => new Set([...prev].filter((id) => !stopped.has(id))));
+    setBulkStopping(false);
   };
 
   const bulkDelete = async () => {
     const ids = [...selected];
     if (ids.length === 0) return;
-    const activeIds = ids.filter((id) => !!running[id] || startBusy.has(id) || backendActiveIds.has(id));
-    if (activeIds.length > 0) {
-      toast.err(tr("Stop the {0} selected active browser{1} first", activeIds.length, activeIds.length === 1 ? "" : "s"));
+    const activeCount = ids.filter((id) => activeIds.has(id)).length;
+    if (activeCount > 0) {
+      toast.err(tr("Stop the {0} selected active browser{1} first", activeCount, activeCount === 1 ? "" : "s"));
       return;
     }
     if ((await confirmModal({ title: tr("Move to recycle bin"), message: tr("Move {0} profiles and their browser data to the recycle bin for 7 days?", ids.length), danger: true })) !== true) return;
@@ -1565,7 +1547,7 @@ function BrowsersView() {
   };
 
   const expand = async (id: string) => {
-    if (running[id]) {
+    if (activeIds.has(id)) {
       toast.err(tr("Stop the browser before editing this profile"));
       return;
     }
@@ -1667,7 +1649,7 @@ function BrowsersView() {
 
       <dl className="metric-strip">
         <Metric label={tr("Profiles")} value={String(profiles.length)} accent />
-        <Metric label={tr("Running")} value={String(runningCount)} running={runningCount > 0} />
+        <Metric label={tr("Running")} value={processState ? String(runningCount) : "—"} running={runningCount > 0} />
         <Metric label={tr("Proxies")} value={String(proxies.length)} />
         <Metric label={tr("Fingerprints")} value={String(fingerprints.length)} />
       </dl>
@@ -1719,9 +1701,11 @@ function BrowsersView() {
             disabled={selectedHasActive}
             title={selectedHasRunning ? tr("Stop selected running browsers before launching") : selectedHasStarting ? tr("Wait for selected browsers to finish starting") : tr("Launch selected profiles")}
           ><Icon.Play size={16} /> {tr("Launch")}</button>
-          <button className="btn-ghost btn-sm" onClick={bulkStop}><Icon.Stop size={16} /> {tr("Stop")}</button>
+          <button className="btn-ghost btn-sm" onClick={bulkStop} disabled={!selectedCanStop || bulkStopping}>
+            {bulkStopping ? <Icon.Loader size={16} className="status-spinner" /> : <Icon.Stop size={16} />} {tr(bulkStopping ? "Stopping…" : "Stop")}
+          </button>
           {selectedHasStarting && <button className="btn-ghost btn-sm" onClick={() => {
-            for (const id of selected) if (startBusy.has(id) || (backendActiveIds.has(id) && !running[id])) void cancelStart(id);
+            for (const id of selected) if (isStartingProfile(id)) void cancelStart(id);
           }}>{tr("Cancel launch")}</button>}
           <button className="btn-ghost btn-sm" disabled={selectedHasActive} onClick={() => setAssigning(true)}>{tr("Assign proxies")}</button>
           <button
@@ -1763,7 +1747,7 @@ function BrowsersView() {
 
       {assigning && <AssignProxiesDialog
         profiles={profiles} proxies={proxies} selected={selected}
-        activeIds={new Set([...backendActiveIds, ...startBusy, ...Object.keys(running).filter((id) => running[id])])}
+        activeIds={activeIds}
         onClose={() => setAssigning(false)} onSaved={reload}
       />}
       <div className="rows browser-rows">
@@ -1814,12 +1798,14 @@ function BrowsersView() {
           const px = p.proxy_id ? proxyMap[p.proxy_id] : null;
           const proxySnapshot = px ? measuredProxyExit(px) : null;
           const proxyCountry = proxySnapshot?.country_code.trim().toUpperCase() || "";
-          const isRunning = !!running[p.id];
-          const isStarting = !isRunning && (startBusy.has(p.id) || backendActiveIds.has(p.id));
+          const isRunning = running.has(p.id);
+          const isStarting = isStartingProfile(p.id);
+          const isStopping = isStoppingProfile(p.id);
           const isReserved = operations.runtime || !!recovery?.incomplete || operations.profiles.includes(p.id);
-          const isActive = isRunning || isStarting || isReserved;
-          const status = isRunning ? "running" : isReserved ? "busy" : isStarting ? "starting" : "idle";
-          const statusLabel = tr({ running: "Running", busy: "Busy", starting: "Starting…", idle: "Idle" }[status]);
+          const isActive = !processState || activeIds.has(p.id) || isReserved;
+          const status = isStopping ? "stopping" : isRunning ? "running" : isStarting ? "starting" : isReserved ? "busy" : !processState ? "unknown" : "idle";
+          const statusLabel = tr({ running: "Running", busy: "Busy", starting: "Starting…", stopping: "Stopping…", unknown: "Browser status unavailable", idle: "Idle" }[status]);
+          const launchLabel = status === "running" ? tr("Stop browser") : status === "starting" ? tr("Cancel launch") : status === "idle" ? tr("Start browser") : statusLabel;
           const isExpanded = expanded === p.id;
           const isSel = selected.has(p.id);
           const edit = renaming?.id === p.id ? renaming : null;
@@ -1876,7 +1862,7 @@ function BrowsersView() {
                   <div className="name-sub table-detail">{p.id.slice(0, 8)}</div>
                 </div>
                 <div className="cell-status" data-state={status} role="img" aria-label={statusLabel} title={statusLabel}>
-                  {status === "starting" ? <Icon.Loader size={14} /> : status === "busy" ? <Clock size={14} /> : (
+                  {isStarting || isStopping ? <Icon.Loader size={14} className="status-spinner" /> : status === "busy" ? <Clock size={14} /> : status === "unknown" ? <Icon.Info size={14} /> : (
                     <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" focusable="false">
                       <path d="M7 1.5 12.5 7 7 12.5 1.5 7Z" fill={isRunning ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.25" />
                     </svg>
@@ -1914,20 +1900,15 @@ function BrowsersView() {
                 <div className="cell-lastrun"><span className="muted">{p.last_launched_at ? fmtTs(p.last_launched_at) : tr("never")}</span></div>
                 <div className="row-actions">
                   <button
-                    className={`btn-launch ${isRunning ? "btn-launch-stop" : ""}`}
+                    className="icon-btn btn-launch"
+                    data-state={status}
                     onClick={() => startStop(p)}
-                    disabled={isReserved && !isRunning}
-                    title={
-                      isRunning
-                        ? tr("Stop browser")
-                        : isStarting
-                          ? tr("Cancel launch")
-                          : tr("Start browser")
-                    }
-                    aria-label={isRunning ? tr("Stop browser") : isStarting ? tr("Cancel launch") : tr("Start browser")}
-                    aria-busy={isStarting}
+                    disabled={isStopping || status === "busy" || status === "unknown"}
+                    title={launchLabel}
+                    aria-label={launchLabel}
+                    aria-busy={isStarting || isStopping}
                   >
-                    {isRunning ? <Icon.Stop size={16} /> : isStarting ? <Icon.Loader size={16} /> : <Icon.Play size={16} />}
+                    {isStarting || isStopping ? <Icon.Loader size={16} className="status-spinner" /> : isRunning ? <Icon.Stop size={16} /> : status === "busy" ? <Clock size={16} /> : status === "unknown" ? <Icon.Info size={16} /> : <Icon.Play size={16} />}
                   </button>
                   <button className="icon-btn" onClick={() => expand(p.id)} disabled={isActive} title={isActive ? tr("Stop browser before editing") : tr("Edit")}><Icon.Edit size={16} /></button>
                   <button className="icon-btn" onClick={() => cloneProfile(p.id)} disabled={isActive} title={isActive ? tr("Stop browser before cloning") : tr("Clone")}><Icon.Clone size={16} /></button>
@@ -3256,7 +3237,9 @@ function ProxiesView() {
                     onClick={(e) => setInfoFor({ id: p.id, anchor: { x: e.clientX, y: e.clientY } })}
                     title={tr("Details + history")}
                   ><Icon.Info size={16} /></button>
-                  <button className="icon-btn" onClick={() => fullTest(p)} disabled={isBusy} title={tr("Test TCP + UDP + geo")}><Icon.Refresh size={16} /></button>
+                  <button className="icon-btn" onClick={() => fullTest(p)} disabled={isBusy} aria-busy={isBusy} title={isBusy ? tr("Testing…") : tr("Test TCP + UDP + geo")}>
+                    {isBusy ? <Icon.Loader size={16} className="status-spinner" /> : <Icon.Refresh size={16} />}
+                  </button>
                   <button
                     className="icon-btn"
                     onClick={() => setEditing(p)}

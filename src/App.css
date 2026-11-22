@@ -509,7 +509,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   pointer-events: none;
 }
 /* Spin animation on the dedicated starting-state loader. */
-.btn-launch[aria-busy="true"] > svg { animation: shardx-spin 0.9s linear infinite; }
+.status-spinner { animation: shardx-spin 0.9s linear infinite; }
 @keyframes shardx-spin {
   from { transform: rotate(0deg); }
   to   { transform: rotate(360deg); }
@@ -598,7 +598,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   --button-glow: 0 1px 2px #0006, 0 0 0 3px #8b5cf612;
 }
 .icon-btn:active:not(:disabled) { transform: translateY(1px); }
-:is(.icon-btn, .btn-launch):not(:focus-visible) { box-shadow: var(--button-glow, none); }
+.icon-btn:not(:focus-visible) { box-shadow: var(--button-glow, none); }
 .icon-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
@@ -626,44 +626,22 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   padding: 0;
   display: inline-grid; place-items: center;
 }
-/* Fixed icon-only Start/Stop control; matches the adjacent 28px action buttons. */
-.btn-launch {
-  width: 28px; height: 28px; min-width: 28px; flex: 0 0 28px;
-  display: inline-grid; place-items: center;
-  padding: 0;
-  border-radius: var(--radius-sm);
-  border: 1px solid #4ade8055;
-  background: #4ade8014;
-  color: var(--ok);
-  --focus-color: var(--ok);
-  --button-glow: 0 0 0 2px #4ade800d, 0 0 12px -5px #4ade8070;
-  cursor: pointer;
-  transition: background .12s, border-color .12s, transform .04s;
-}
-.btn-launch:hover:not(:disabled) {
-  background: #4ade8024;
-  border-color: #4ade80aa;
-  --button-glow: 0 0 0 3px #4ade8014, 0 0 16px -4px #4ade8066;
-}
-.btn-launch:active:not(:disabled) { transform: translateY(1px); }
-.btn-launch:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-.btn-launch-stop {
+.btn-launch { flex: 0 0 28px; }
+.btn-launch[data-state="running"] {
   border-color: #fb718555;
   background: #fb71851a;
   color: var(--err);
   --focus-color: var(--err);
   --button-glow: 0 0 0 2px #fb71850d, 0 0 12px -5px #fb718570;
 }
-/* Include the base class and disabled guard so this outranks the generic
-   `.btn-launch:hover:not(:disabled)` rule instead of inheriting its green glow. */
-.btn-launch.btn-launch-stop:hover:not(:disabled) {
+.btn-launch[data-state="running"]:hover:not(:disabled) {
+  color: var(--err);
   background: #fb718530;
   border-color: #fb7185aa;
   --button-glow: 0 0 0 3px #fb71851a, 0 0 16px -4px #fb718566;
 }
+.btn-launch:is([data-state="starting"], [data-state="stopping"]),
+.btn-launch:is([data-state="starting"], [data-state="stopping"]):hover { color: var(--info); }
 
 /* ===== bulk bar ===== */
 .bulk-bar {
@@ -880,12 +858,11 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   color: var(--tx-4);
 }
 .cell-status[data-state="running"] { color: var(--ok); }
-.cell-status[data-state="starting"] { color: var(--info); }
+.cell-status:is([data-state="starting"], [data-state="stopping"]) { color: var(--info); }
 .cell-status[data-state="busy"] { color: var(--warn); }
-.cell-status:is([data-state="running"], [data-state="starting"], [data-state="busy"]) > svg {
+.cell-status:is([data-state="running"], [data-state="starting"], [data-state="stopping"], [data-state="busy"]) > svg {
   filter: drop-shadow(0 0 3px color-mix(in srgb, currentColor 55%, transparent));
 }
-.cell-status[data-state="starting"] > svg { animation: shardx-spin 0.9s linear infinite; }
 .browser-data-row .cell-proxy.cell-proxy-direct {
   grid-template-rows: 1fr;
 }
@@ -1527,9 +1504,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   white-space: nowrap;
 }
 
-/* Pills sized to fit inline in the row, same green-tint-bordered
-   aesthetic as `.btn-launch` so the dashboard reads as one design
-   language: bold border, soft-tinted fill, optional outer glow. */
+/* Compact pills for measured proxy results. */
 .status-pill {
   display: inline-flex; align-items: center; justify-content: center;
   gap: 4px;

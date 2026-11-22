@@ -551,6 +551,30 @@ impl Tracker {
             .collect()
     }
 
+    pub fn launcher_state(&self) -> Result<LauncherProcessState> {
+        let entries = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("process tracker lock poisoned"))?;
+        let launching = self
+            .launching
+            .lock()
+            .map_err(|_| anyhow::anyhow!("launch reservation lock poisoned"))?;
+        Ok(LauncherProcessState {
+            running: entries.keys().cloned().collect(),
+            starting: launching
+                .keys()
+                .filter(|id| !entries.contains_key(*id))
+                .cloned()
+                .collect(),
+            stopping: entries
+                .iter()
+                .filter(|(_, entry)| entry.closing)
+                .map(|(id, _)| id.clone())
+                .collect(),
+        })
+    }
+
     pub fn is_running_pid(&self, pid: u32) -> bool {
         self.inner
             .lock()
@@ -1538,6 +1562,9 @@ mod tests {
             } else {
                 Tracker::shared().track(id.into(), child, &executable, &directory, false);
             }
+            let state = Tracker::shared().launcher_state().unwrap();
+            assert_eq!(state.running, [id]);
+            assert!(state.starting.is_empty() && state.stopping.is_empty());
             let running = Tracker::shared().running_with_cdp().await;
             assert_eq!(
                 running
@@ -1556,6 +1583,8 @@ mod tests {
             }
             assert!(inspect_process(pid).unwrap().is_none());
             assert!(!Tracker::shared().is_running_profile(id));
+            let state = Tracker::shared().launcher_state().unwrap();
+            assert!(state.running.is_empty() && state.starting.is_empty() && state.stopping.is_empty());
             let saved: LeaseFile =
                 crate::store::load_json_with_backup(&crate::store::process_leases_path().unwrap())
                     .unwrap();
@@ -1572,6 +1601,9 @@ mod tests {
 
         assert!(tracker.is_profile_active("profile-1"));
         assert!(tracker.reserve_launch("profile-1").is_err());
+        let state = tracker.launcher_state().unwrap();
+        assert_eq!(state.starting, ["profile-1"]);
+        assert!(state.running.is_empty() && state.stopping.is_empty());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1614,6 +1646,7 @@ mod tests {
         assert!(tracker.is_profile_active("profile-1"));
         drop(reservation);
         assert!(!tracker.is_profile_active("profile-1"));
+        assert!(tracker.launcher_state().unwrap().starting.is_empty());
         let next = tracker.reserve_launch("profile-1").unwrap();
         next.commit().unwrap();
         assert!(!tracker.cancel_launch("profile-1").unwrap());
@@ -1732,6 +1765,13 @@ mod tests {
         };
         assert!(!super::lease_matches_process(&lease, &reused_pid));
     }
+}
+
+#[derive(serde::Serialize)]
+pub struct LauncherProcessState {
+    pub running: Vec<String>,
+    pub starting: Vec<String>,
+    pub stopping: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

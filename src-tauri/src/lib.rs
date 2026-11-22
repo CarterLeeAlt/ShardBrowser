@@ -1076,13 +1076,10 @@ fn open_exports_dir(app: tauri::AppHandle) -> Result<(), String> {
 // ---- Process tracker ----
 
 #[tauri::command]
-fn process_list() -> Vec<process::RunningProfile> {
-    process::Tracker::shared().running()
-}
-
-#[tauri::command]
-fn profile_active_ids() -> Vec<String> {
-    process::Tracker::shared().active_profile_ids()
+fn launcher_process_state() -> Result<process::LauncherProcessState, String> {
+    process::Tracker::shared()
+        .launcher_state()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1499,8 +1496,7 @@ pub fn run() {
             fingerprint_delete,
             open_fingerprint_dir,
             open_exports_dir,
-            process_list,
-            profile_active_ids,
+            launcher_process_state,
             operation_status,
             process_recovery_status,
             process_recovery_retry,

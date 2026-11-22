@@ -9,6 +9,8 @@
   "Profile backup in progress. Keep the launcher open until it finishes.": "正在备份或恢复环境，请保持启动器开启，等待操作完成。",
   "Busy": "处理中",
   "Starting…": "正在启动…",
+  "Stopping…": "正在停止…",
+  "Browser status unavailable": "无法确认浏览器状态",
   "Saving…": "正在保存…",
   "Listening on port {0}": "正在监听端口 {0}",
   "API could not start: {0}": "API 启动失败：{0}",
