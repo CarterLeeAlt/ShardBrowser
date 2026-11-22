@@ -139,6 +139,19 @@ fn installed_engine_version() -> Option<String> {
     engine_version_in(&runtime_dir().ok()?.join(engine_root_dir())).ok()
 }
 
+pub(crate) fn is_engine_installed() -> bool {
+    installed_engine_version().is_some()
+}
+
+/// Version reported to extension update checks. Falls back to the pinned
+/// bundle so a portable first launch can fetch extensions before the engine
+/// is on disk.
+pub(crate) fn engine_version_for_downloads() -> String {
+    installed_engine_version()
+        .or_else(|| bundled_manifest().chromium_version)
+        .unwrap_or_else(|| "158.0.0.0".into())
+}
+
 fn engine_version_in(dir: &Path) -> Result<String> {
     let mut versions = Vec::new();
     for entry in fs::read_dir(dir)? {
@@ -1048,6 +1061,7 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
     }
     let repair_fingerprints = !fingerprints_are_installed(&local);
     if !(need_browser || repair_widevine || repair_fingerprints) {
+        crate::spawn_extension_sync(false);
         return Ok(local_status(&local));
     }
     let manifest = repair_manifest(&local)?;
@@ -1067,6 +1081,7 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
 
     let _ = window.emit("runtime:done", ());
     schedule_update_check();
+    crate::spawn_extension_sync(false);
     runtime_local_status()
 }
 
@@ -1124,6 +1139,7 @@ pub async fn runtime_apply_updates(
 
     let _ = window.emit("runtime:done", ());
     schedule_update_check();
+    crate::spawn_extension_sync(false);
     runtime_local_status()
 }
 
@@ -1401,10 +1417,12 @@ async fn download_and_extract(
             "percent": 0,
         }),
     );
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .read_timeout(std::time::Duration::from_secs(60))
-        .build()?;
+    let settings = crate::settings::load()?;
+    let client = crate::download::client(
+        &settings,
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(60),
+    )?;
     let mut resp = client.get(&url).send().await?.error_for_status()?;
     let total = resp.content_length().unwrap_or(0);
     if total > MAX_RUNTIME_ARCHIVE_BYTES {

@@ -357,10 +357,19 @@ browserscan.net、fp.haru.gay、antcpt 的 reCAPTCHA 得分检测器 — 通常�
 "Sync runtime archive" 工作流上传快照，发布门禁再分别验证自包含包启动和
 便携 EXE 首次安装。应用内的运行时更新只安装该 Launcher 配套的快照。
 
-自用便携工作区可在 `shardx-launcher/default-extensions.json` 中用 JSON 数组
-列出已导入扩展的 ID。新建时会预选这些扩展；HTTP API 和 MCP 创建时省略
-`extensions` 也会使用这份默认值，显式传 `[]` 则不启用任何扩展。已有环境、
-克隆和恢复仍使用各自保存的扩展列表。删除默认扩展前，先从这份默认列表移除它。
+启动器会在启动后从官方 Chrome 应用商店检查 AdGuard 和 Tampermonkey 的更新
+（自动检查最多每 6 小时一次，扩展库的“同步默认扩展”可立即检查）：
+版本、大小、SHA-256 和下载地址都取自官方更新响应，代码里只固定扩展 ID。
+库内同版本跳过；新版本会在所有使用它的浏览器关闭后替换，环境引用继续有效。
+导入成功后写入 `shardx-launcher/default-extensions.json`，新建环境自动预选；
+HTTP API 和 MCP 创建时省略 `extensions` 也会使用这份默认值，显式传 `[]` 则
+不启用任何扩展。已有环境会在首次同步时补上缺的 ID，浏览器正在运行的留到
+下次启动；此后环境自己的选择不会被覆盖。删除默认扩展前，先从默认列表移除它。
+
+启动器自身的下载使用 `settings.json` 的 `download_proxy`：`system`（默认，
+读 Windows 系统代理）、`direct` 或 `http://`、`https://`、`socks5://` 代理地址。
+它只作用于便携运行时和扩展下载，不设置代理环境变量；启动的浏览器仍按环境
+设置直连或使用绑定代理。
 
 发行版未做 Authenticode 签名。若 SmartScreen 提示 *"Windows 已保护你的
 电脑"*，点击**更多信息** → **仍要运行**。重复启动不会再次提示。

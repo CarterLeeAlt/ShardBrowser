@@ -19,6 +19,10 @@ pub struct Settings {
     pub api_enabled: bool,
     #[serde(default = "default_api_port")]
     pub api_port: u16,
+    /// `system`, `direct`, or an explicit proxy URL. Used only by the
+    /// launcher's own downloads; launched browsers never inherit it.
+    #[serde(default = "default_download_proxy")]
+    pub download_proxy: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -34,6 +38,8 @@ struct SettingsDisk {
     api_enabled: bool,
     #[serde(default = "default_api_port")]
     api_port: u16,
+    #[serde(default = "default_download_proxy")]
+    download_proxy: String,
     #[serde(default)]
     api_secret: Option<String>,
     #[serde(default)]
@@ -49,6 +55,7 @@ struct ProtectedSettingsDisk {
     minimize_to_tray: bool,
     api_enabled: bool,
     api_port: u16,
+    download_proxy: String,
     api_secret_protected: protected_data::ProtectedBlob,
 }
 
@@ -79,6 +86,10 @@ fn default_api_port() -> u16 {
     30325
 }
 
+fn default_download_proxy() -> String {
+    crate::download::SYSTEM.into()
+}
+
 impl Default for SettingsDisk {
     fn default() -> Self {
         Self {
@@ -88,6 +99,7 @@ impl Default for SettingsDisk {
             minimize_to_tray: default_minimize_to_tray(),
             api_enabled: default_api_enabled(),
             api_port: default_api_port(),
+            download_proxy: default_download_proxy(),
             api_secret: None,
             api_secret_protected: None,
         }
@@ -108,6 +120,9 @@ fn normalize(mut settings: Settings) -> Settings {
     ) {
         settings.geo_checker = Some("ipwho.is".into());
     }
+    // Keep an invalid saved proxy visible so the settings page can report it;
+    // only the blank/legacy value falls back to the documented default.
+    settings.download_proxy = crate::download::canonical(&settings.download_proxy);
     settings
 }
 
@@ -119,6 +134,7 @@ fn public(disk: &SettingsDisk) -> Settings {
         minimize_to_tray: disk.minimize_to_tray,
         api_enabled: disk.api_enabled,
         api_port: disk.api_port,
+        download_proxy: disk.download_proxy.clone(),
     })
 }
 
@@ -132,13 +148,14 @@ fn generate_secret() -> String {
 
 fn protected_disk(public: Settings, secret: &str) -> Result<ProtectedSettingsDisk> {
     Ok(ProtectedSettingsDisk {
-        schema_version: 1,
+        schema_version: 2,
         theme: public.theme,
         geo_checker: public.geo_checker,
         screen_resolution_mode: public.screen_resolution_mode,
         minimize_to_tray: public.minimize_to_tray,
         api_enabled: public.api_enabled,
         api_port: public.api_port,
+        download_proxy: public.download_proxy,
         api_secret_protected: protected_data::protect(API_SECRET_PURPOSE, secret.as_bytes())?,
     })
 }
@@ -159,6 +176,7 @@ fn load_unlocked() -> Result<LoadedSettings> {
             minimize_to_tray: default_minimize_to_tray(),
             api_enabled: default_api_enabled(),
             api_port: default_api_port(),
+            download_proxy: default_download_proxy(),
         };
         let secret = generate_secret();
         persist(public.clone(), &secret)?;
@@ -215,8 +233,11 @@ pub fn save(public: &Settings) -> Result<()> {
     let _guard = settings_lock()
         .lock()
         .map_err(|_| anyhow::anyhow!("settings lock poisoned"))?;
+    let mut public = public.clone();
+    public.download_proxy =
+        crate::download::normalize(&public.download_proxy).map_err(anyhow::Error::msg)?;
     let loaded = load_unlocked()?;
-    persist(public.clone(), &loaded.api_secret)
+    persist(public, &loaded.api_secret)
 }
 
 pub fn rotate_secret() -> Result<LoadedSettings> {
@@ -253,7 +274,19 @@ mod tests {
             minimize_to_tray: false,
             api_enabled: true,
             api_port: 1,
+            download_proxy: "system".into(),
         });
         assert_eq!(normalized.geo_checker.as_deref(), Some("ipwho.is"));
+    }
+
+    #[test]
+    fn download_proxy_defaults_to_system_and_keeps_a_saved_route() {
+        let defaults: SettingsDisk = serde_json::from_str("{}").unwrap();
+        assert_eq!(public(&defaults).download_proxy, "system");
+        let saved: SettingsDisk =
+            serde_json::from_str(r#"{"download_proxy":"http://127.0.0.1:7897"}"#).unwrap();
+        assert_eq!(public(&saved).download_proxy, "http://127.0.0.1:7897");
+        let legacy: SettingsDisk = serde_json::from_str(r#"{"download_proxy":"  "}"#).unwrap();
+        assert_eq!(public(&legacy).download_proxy, "system");
     }
 }

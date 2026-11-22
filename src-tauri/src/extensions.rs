@@ -11,7 +11,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-const MAX_PACKAGE_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_PACKAGE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_FILES: usize = 20_000;
 const DEFAULT_SELECTION_FILE: &str = "default-extensions.json";
 
@@ -370,6 +370,47 @@ pub(crate) fn read_entry(id: &str, root: &Path) -> Result<ExtensionEntry> {
     })
 }
 
+fn import_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// Unpack a package into `stage`, pin its identity into the manifest, and
+/// return the validated entry plus the directory that should become the
+/// library entry.
+fn stage_package(source: &Path, stage: &Path) -> Result<(ExtensionEntry, PathBuf)> {
+    let header_key = unpack(source, stage)?;
+    let root = manifest_root(stage)?;
+    let mut manifest = read_manifest(&root)?;
+    let declared = manifest_key(&manifest)?;
+    if let (Some(header), Some(declared)) = (&header_key, &declared) {
+        ensure!(
+            header == declared,
+            "CRX public key conflicts with manifest key"
+        );
+    }
+    let key = header_key
+        .or(declared)
+        .map(Ok)
+        .unwrap_or_else(new_public_key)?;
+    let id = id_from_key(&key);
+    manifest["key"] = Value::String(base64::engine::general_purpose::STANDARD.encode(key));
+    fs::write(
+        root.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest)?,
+    )?;
+    let entry = read_entry(&id, &root)?;
+    tree_files(&root)?;
+    Ok((entry, root))
+}
+
+fn prepare_stage() -> Result<PathBuf> {
+    let lib = store::extensions_dir()?;
+    let stage = lib.join(format!(".import-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&stage)?;
+    Ok(stage)
+}
+
 pub fn import(source: &Path) -> Result<ExtensionEntry> {
     ensure!(
         source.try_exists()?,
@@ -378,8 +419,7 @@ pub fn import(source: &Path) -> Result<ExtensionEntry> {
             source.display()
         ))
     );
-    static IMPORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _import = IMPORT_LOCK
+    let _import = import_lock()
         .try_lock()
         .map_err(|_| crate::errors::conflict("Extension import is in progress"))?;
     let _activity = crate::operations::activity();
@@ -388,34 +428,11 @@ pub fn import(source: &Path) -> Result<ExtensionEntry> {
         profile::recover_interrupted_operations_locked()?;
         cleanup_staging_locked()?;
     }
-    let lib = store::extensions_dir()?;
-    let stage = lib.join(format!(".import-{}", uuid::Uuid::new_v4()));
-    fs::create_dir(&stage)?;
+    let stage = prepare_stage()?;
     let result = (|| {
-        let header_key = unpack(source, &stage)?;
-        let root = manifest_root(&stage)?;
-        let mut manifest = read_manifest(&root)?;
-        let declared = manifest_key(&manifest)?;
-        if let (Some(header), Some(declared)) = (&header_key, &declared) {
-            ensure!(
-                header == declared,
-                "CRX public key conflicts with manifest key"
-            );
-        }
-        let key = header_key
-            .or(declared)
-            .map(Ok)
-            .unwrap_or_else(new_public_key)?;
-        let id = id_from_key(&key);
-        manifest["key"] = Value::String(base64::engine::general_purpose::STANDARD.encode(key));
-        fs::write(
-            root.join("manifest.json"),
-            serde_json::to_vec_pretty(&manifest)?,
-        )?;
-        let entry = read_entry(&id, &root)?;
-        tree_files(&root)?;
+        let (entry, root) = stage_package(source, &stage)?;
         let _guard = crate::process::lock_profile_resources()?;
-        let destination = path_for(&id)?;
+        let destination = path_for(&entry.id)?;
         ensure!(
             !destination.exists(),
             crate::errors::conflict("Extension already exists in the library; remove its references before replacing it")
@@ -427,6 +444,196 @@ pub fn import(source: &Path) -> Result<ExtensionEntry> {
         fs::remove_dir_all(&stage)?;
     }
     result
+}
+
+#[derive(Debug)]
+pub(crate) enum UpsertOutcome {
+    Installed(String),
+    Unchanged(String),
+    Replaced { from: String, to: String },
+}
+
+/// Install or update the extension identified by `expected_id` from an official
+/// package. The extension ID travels in the manifest key, so a replacement
+/// keeps every profile reference valid without rewriting profile files.
+pub(crate) fn upsert(expected_id: &str, source: &Path) -> Result<UpsertOutcome> {
+    ensure!(
+        source.try_exists()?,
+        crate::errors::Failure::NotFound(format!(
+            "Extension source does not exist: {}",
+            source.display()
+        ))
+    );
+    validate_id(expected_id)?;
+    let _import = import_lock()
+        .try_lock()
+        .map_err(|_| crate::errors::conflict("Extension import is in progress"))?;
+    let _activity = crate::operations::activity();
+    {
+        let _guard = crate::process::lock_profile_resources()?;
+        profile::recover_interrupted_operations_locked()?;
+        cleanup_staging_locked()?;
+    }
+    let stage = prepare_stage()?;
+    let result = (|| {
+        let (entry, root) = stage_package(source, &stage)?;
+        ensure!(
+            entry.id == expected_id,
+            "Downloaded extension identity does not match the requested extension"
+        );
+        let _guard = crate::process::lock_profile_resources()?;
+        let destination = path_for(expected_id)?;
+        if !destination.exists() {
+            fs::rename(&root, &destination)?;
+            return Ok(UpsertOutcome::Installed(entry.version));
+        }
+        let current = read_entry(expected_id, &destination)?;
+        if current.version == entry.version {
+            return Ok(UpsertOutcome::Unchanged(current.version));
+        }
+        ensure_no_active_profile_uses(expected_id)?;
+        let previous = store::extensions_dir()?.join(format!(".replace-{}", uuid::Uuid::new_v4()));
+        fs::rename(&destination, &previous)?;
+        if let Err(error) = fs::rename(&root, &destination) {
+            let _ = fs::rename(&previous, &destination);
+            return Err(error.into());
+        }
+        if let Err(error) = fs::remove_dir_all(&previous) {
+            eprintln!(
+                "[extensions] previous version cleanup remains pending at {}: {error}",
+                previous.display()
+            );
+        }
+        Ok(UpsertOutcome::Replaced {
+            from: current.version,
+            to: entry.version,
+        })
+    })();
+    if stage.exists() {
+        fs::remove_dir_all(&stage)?;
+    }
+    result
+}
+
+fn ensure_no_active_profile_uses(id: &str) -> Result<()> {
+    for entry in fs::read_dir(store::profiles_dir()?)? {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let stored: profile::StoredProfile = store::load_json_with_backup(&path)?;
+        if !stored.meta.extensions.iter().any(|selected| selected == id) {
+            continue;
+        }
+        if crate::is_profile_active(&stored.meta.id) {
+            let name = stored
+                .config
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(&stored.meta.id);
+            anyhow::bail!(crate::errors::conflict(format!(
+                "Close the browser for \"{name}\" before updating this extension"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn installed_version(id: &str) -> Result<Option<String>> {
+    let path = path_for(id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(read_entry(id, &path)?.version))
+}
+
+/// Add every ID to the default selection file, preserving entries the user
+/// added and the existing order. Returns whether the file changed.
+pub(crate) fn ensure_default_selection(ids: &[String]) -> Result<bool> {
+    for id in ids {
+        validate_id(id)?;
+    }
+    let path = store::config_root()?.join(DEFAULT_SELECTION_FILE);
+    let mut selection: Vec<String> = match fs::read(&path) {
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).with_context(|| format!("Read {}", path.display()))?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error).with_context(|| format!("Read {}", path.display())),
+    };
+    let original = selection.clone();
+    for id in ids {
+        if !selection.iter().any(|selected| selected == id) {
+            selection.push(id.clone());
+        }
+    }
+    if selection == original && path.exists() {
+        return Ok(false);
+    }
+    let mut bytes = serde_json::to_vec_pretty(&selection)?;
+    bytes.push(b'\n');
+    store::atomic_write(&path, &bytes)?;
+    Ok(true)
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Backfill {
+    pub updated: usize,
+    pub pending: Vec<String>,
+}
+
+/// Give existing profiles the default extension IDs once. `only` limits the
+/// pass to profiles that a previous run could not edit because their browser
+/// was running. Profiles already listing the IDs are never modified, so a
+/// later manual selection is preserved.
+pub(crate) fn backfill_profiles(ids: &[String], only: Option<&[String]>) -> Result<Backfill> {
+    let mut outcome = Backfill::default();
+    if ids.is_empty() {
+        return Ok(outcome);
+    }
+    let _activity = crate::operations::activity();
+    let _guard = crate::process::lock_profile_resources()?;
+    profile::recover_interrupted_operations_locked()?;
+    for entry in fs::read_dir(store::profiles_dir()?)? {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let mut stored: profile::StoredProfile = match store::load_json_with_backup(&path) {
+            Ok(stored) => stored,
+            Err(error) => {
+                eprintln!(
+                    "[extensions] skipped unreadable profile {}: {error:#}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        if stored.meta.temporary {
+            continue;
+        }
+        if let Some(only) = only {
+            if !only.iter().any(|id| id == &stored.meta.id) {
+                continue;
+            }
+        }
+        let missing: Vec<String> = ids
+            .iter()
+            .filter(|id| !stored.meta.extensions.contains(id))
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            continue;
+        }
+        if profile::ensure_stopped(&stored.meta.id).is_err() {
+            outcome.pending.push(stored.meta.id.clone());
+            continue;
+        }
+        stored.meta.extensions.extend(missing);
+        profile::save_raw(&mut stored)?;
+        outcome.updated += 1;
+    }
+    Ok(outcome)
 }
 
 pub(crate) fn references(id: &str) -> Result<Vec<String>> {
@@ -533,6 +740,8 @@ fn cleanup_staging_locked() -> Result<()> {
     for entry in fs::read_dir(store::extensions_dir()?)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
+        // `.replace-*` backups are only removed after the new version is in
+        // place, so a failed restore never loses the last usable copy.
         if [".import-", ".restore-", ".delete-"]
             .iter()
             .any(|prefix| name.starts_with(prefix))
@@ -672,6 +881,152 @@ pub(crate) mod tests {
             .unwrap_err()
             .to_string()
             .contains("Manifest V3"));
+    }
+
+    #[test]
+    fn upsert_replaces_only_the_same_identity_and_keeps_references_valid() {
+        let test = store::TestStore::new();
+        let entry = fixture(&test.root.join("v1"));
+        let installed = path_for(&entry.id).unwrap();
+        let key = read_manifest(&installed).unwrap()["key"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let source = test.root.join("v2");
+        fs::create_dir(&source).unwrap();
+        fs::write(
+            source.join("manifest.json"),
+            serde_json::json!({
+                "manifest_version": 3,
+                "name": "StorageFixture",
+                "version": "2.0",
+                "key": key,
+                "permissions": ["storage"],
+                "background": {"service_worker": "worker.js"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(source.join("worker.js"), "// v2").unwrap();
+        let package = test.root.join("v2.zip");
+        fs::write(&package, zip_bytes(&source)).unwrap();
+
+        match upsert(&entry.id, &package).unwrap() {
+            UpsertOutcome::Replaced { from, to } => {
+                assert_eq!(from, "1.0");
+                assert_eq!(to, "2.0");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        assert_eq!(
+            installed_version(&entry.id).unwrap().as_deref(),
+            Some("2.0")
+        );
+        assert_eq!(read_manifest(&installed).unwrap()["key"], key);
+        assert!(matches!(
+            upsert(&entry.id, &package).unwrap(),
+            UpsertOutcome::Unchanged(version) if version == "2.0"
+        ));
+
+        let foreign = test.root.join("foreign");
+        fs::create_dir(&foreign).unwrap();
+        fs::write(
+            foreign.join("manifest.json"),
+            serde_json::json!({
+                "manifest_version": 3,
+                "name": "Foreign",
+                "version": "3.0"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let foreign_package = test.root.join("foreign.zip");
+        fs::write(&foreign_package, zip_bytes(&foreign)).unwrap();
+        assert!(upsert(&entry.id, &foreign_package).is_err());
+        assert_eq!(
+            installed_version(&entry.id).unwrap().as_deref(),
+            Some("2.0")
+        );
+    }
+
+    #[test]
+    fn default_selection_merges_without_reordering_or_duplicating() {
+        let _test = store::TestStore::new();
+        let first = "a".repeat(32);
+        let second = "b".repeat(32);
+        assert!(ensure_default_selection(std::slice::from_ref(&first)).unwrap());
+        assert!(!ensure_default_selection(std::slice::from_ref(&first)).unwrap());
+        assert!(ensure_default_selection(std::slice::from_ref(&second)).unwrap());
+        assert_eq!(default_selection().unwrap(), vec![first, second]);
+        assert!(ensure_default_selection(&["invalid".into()]).is_err());
+    }
+
+    #[test]
+    fn backfill_adds_defaults_once_and_respects_later_selections() {
+        let _test = store::TestStore::new();
+        let create = |name: &str| {
+            crate::save_profile_core(
+                None,
+                serde_json::json!({
+                    "name": name,
+                    "noise": {
+                        "canvas": {"enabled": true, "seed": 0},
+                        "webgl": {"enabled": true, "seed": 0, "intensity": 0.0005}
+                    },
+                    "_meta": {"id": "", "extensions": []}
+                }),
+                false,
+            )
+            .unwrap()
+        };
+        let first = create("Legacy one");
+        let second = create("Legacy two");
+        let first_id = "a".repeat(32);
+        let second_id = "b".repeat(32);
+
+        let outcome = backfill_profiles(std::slice::from_ref(&first_id), None).unwrap();
+        assert_eq!(outcome.updated, 2);
+        assert!(outcome.pending.is_empty());
+        for id in [&first.id, &second.id] {
+            assert_eq!(
+                profile::load_raw(id).unwrap().meta.extensions,
+                vec![first_id.clone()]
+            );
+        }
+
+        // A deliberate removal stays removed on the next pass.
+        let mut stored = profile::load_raw(&first.id).unwrap();
+        stored.meta.extensions.clear();
+        profile::save_raw(&mut stored).unwrap();
+        // The sync passes only the pending list after the first workspace pass.
+        assert_eq!(
+            backfill_profiles(std::slice::from_ref(&first_id), Some(&[]))
+                .unwrap()
+                .updated,
+            0
+        );
+        assert!(profile::load_raw(&first.id)
+            .unwrap()
+            .meta
+            .extensions
+            .is_empty());
+
+        // A pending pass only touches the listed profile.
+        let mut second_stored = profile::load_raw(&second.id).unwrap();
+        second_stored.meta.extensions.clear();
+        profile::save_raw(&mut second_stored).unwrap();
+        let pending = [second.id.clone()];
+        assert_eq!(
+            backfill_profiles(std::slice::from_ref(&second_id), Some(&pending))
+                .unwrap()
+                .updated,
+            1
+        );
+        assert_eq!(
+            profile::load_raw(&second.id).unwrap().meta.extensions,
+            [second_id]
+        );
     }
 
     #[test]

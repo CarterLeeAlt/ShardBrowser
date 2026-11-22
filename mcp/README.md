@@ -73,8 +73,10 @@ MCP_HTTP_PORT=40326 SHARDX_API=http://127.0.0.1:30325 SHARDX_TOKEN=… node inde
 - `list_extensions`, `import_extension(path)`, `delete_extension(id)`
 - `list_trash`, `restore_trash(id)`, `purge_trash(id)`, `empty_trash`
 
-创建、临时创建和编辑环境均接受 `extensions: string[]`，对应扩展库 ID；扩展导入要求
-Manifest V3。删除普通环境会整份移入应用回收站并保留 7 天；临时环境直接删除。
+创建、临时创建和编辑环境均接受 `extensions: string[]`，对应扩展库 ID；创建时省略
+该字段会使用 `shardx-launcher/default-extensions.json` 的默认扩展，显式传 `[]`
+表示不启用扩展。扩展导入要求 Manifest V3。删除普通环境会整份移入应用回收站并保留
+7 天；临时环境直接删除。
 `purge_trash` 和 `empty_trash` 会永久删除数据。回收站操作的 `id` 是回收站条目 ID。
 Cookie 导入替换停止环境的全部 Cookie，保留分区和来源字段，返回实际数据库记录数。
 

@@ -52,7 +52,7 @@ import { useStoreChanged } from "./useStoreChanged";
 import { mergeProfileEdits } from "./profileEdit";
 import { AUTO_LANG, AUTO_TZ, defaultForm, fromStored, toStored, type GeoMode, type NoiseMode, type ProfileForm, type WebRtcMode } from "./profileForm";
 import { tr } from "./i18n";
-import { ExtensionsView, ExtensionPicker } from "./Extensions";
+import { ExtensionsView, ExtensionPicker, type ExtensionSyncStatus } from "./Extensions";
 import { TrashView } from "./Trash";
 import { updateWorkspaceFolders, useWorkspaceBackup, useWorkspaceFolders, WorkspaceBackup } from "./WorkspaceBackup";
 
@@ -433,6 +433,7 @@ type Settings = {
   minimize_to_tray?: boolean;
   api_enabled?: boolean;
   api_port?: number;
+  download_proxy?: string;
 };
 type ApiInfo = {
   enabled: boolean;
@@ -587,6 +588,26 @@ export default function App() {
         message: payload.busy ? tr("Wait for storage or runtime operations to finish, and resolve incomplete browser recovery before exiting.") : tr("ShardX cannot exit while {0} launched {1} still running. Close {2} first, then try again.", count, plural, count === 1 ? "it" : "them"),
         buttons: [{ label: tr("OK"), value: true, primary: true }],
       });
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: undefined | (() => void);
+    listen<ExtensionSyncStatus>("extensions:sync", ({ payload }) => {
+      if (disposed || payload.throttled) return;
+      if (payload.failures.length) {
+        toast.err(tr("Extension sync failed: {0}", payload.failures.join("; ")));
+      } else {
+        const changed = [...payload.installed, ...payload.updated];
+        if (changed.length) toast.ok(tr("Extensions updated: {0}", changed.join("; ")));
+      }
     }).then((fn) => {
       if (disposed) fn();
       else unlisten = fn;
@@ -4481,6 +4502,7 @@ function SettingsView({ workspaceBackup }: { workspaceBackup: ReturnType<typeof 
     screen_resolution_mode: "fingerprint",
     api_enabled: true,
     api_port: defaultApiPort,
+    download_proxy: "system",
   });
   const [api, setApi] = useState<ApiInfo | null>(null);
   const refreshApi = () => invoke<ApiInfo>("api_info").then(setApi).catch(e => toast.err(String(e)));
@@ -4554,6 +4576,36 @@ function SettingsView({ workspaceBackup }: { workspaceBackup: ReturnType<typeof 
             <option value="real">{tr("Real (host monitor)")}</option>
           </select>
         </label>
+      </div>
+
+      <div className="card settings-card">
+        <h3>{tr("Download proxy")}</h3>
+        <p className="muted">{tr("Used only for the launcher's own downloads (portable runtime and default extensions). Launched browsers keep their direct connection or bound proxy and never follow the Windows system proxy.")}</p>
+        <label>
+          <span className="lbl">{tr("Mode")}</span>
+          <select
+            value={s.download_proxy === "direct" ? "direct" : s.download_proxy === "system" || !s.download_proxy ? "system" : "custom"}
+            onChange={(e) => {
+              const mode = e.target.value;
+              const custom = s.download_proxy && s.download_proxy !== "system" && s.download_proxy !== "direct" ? s.download_proxy : "";
+              setS({ ...s, download_proxy: mode === "custom" ? custom : mode });
+            }}
+          >
+            <option value="system">{tr("Follow Windows system proxy")}</option>
+            <option value="direct">{tr("Direct connection")}</option>
+            <option value="custom">{tr("Custom proxy")}</option>
+          </select>
+        </label>
+        {s.download_proxy !== "system" && s.download_proxy !== "direct" && (
+          <label>
+            <span className="lbl">{tr("Proxy URL")}</span>
+            <input
+              value={s.download_proxy ?? ""}
+              placeholder="http://host:port"
+              onChange={(e) => setS({ ...s, download_proxy: e.target.value })}
+            />
+          </label>
+        )}
       </div>
 
       <div className="card settings-card">

@@ -441,7 +441,8 @@ async fn create_temporary(Json(body): Json<TempReq>) -> ApiResult {
     let profile_name = cfg.get("name").and_then(|v| v.as_str()).unwrap_or("");
     crate::display_name::normalize(profile_name)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
-    let mut meta = json!({ "id": "", "folder": body.folder.unwrap_or_default(), "temporary": true });
+    let mut meta =
+        json!({ "id": "", "folder": body.folder.unwrap_or_default(), "temporary": true });
     if let Some(extensions) = body.extensions {
         meta["extensions"] = json!(extensions);
     }
@@ -954,8 +955,13 @@ mod tests {
         .is_err());
 
         std::fs::write(&defaults, b"{").unwrap();
-        assert!(create_profile(create("Malformed defaults", None)).await.is_err());
-        assert!(stored_ids(create_profile(create("Explicit opt out", Some(json!([])))).await).is_empty());
+        assert!(create_profile(create("Malformed defaults", None))
+            .await
+            .is_err());
+        assert!(
+            stored_ids(create_profile(create("Explicit opt out", Some(json!([])))).await)
+                .is_empty()
+        );
     }
 
     #[tokio::test]

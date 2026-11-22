@@ -8,7 +8,9 @@ mod browser_cdp;
 mod cookies;
 mod display_name;
 mod display_order;
+mod download;
 mod errors;
+mod extension_sync;
 mod extensions;
 mod fingerprint_identity;
 mod fingerprints;
@@ -680,6 +682,34 @@ async fn trash_empty() -> Result<usize, String> {
 #[tauri::command]
 fn extension_defaults() -> Result<Vec<String>, String> {
     extensions::default_selection().map_err(|error| format!("{error:#}"))
+}
+
+/// Run the default-extension sync now; background startup runs share the same
+/// lock, so a manual click never races the automatic check.
+#[tauri::command]
+async fn extension_sync_now(app: tauri::AppHandle) -> extension_sync::SyncStatus {
+    use tauri::Emitter;
+    let status = extension_sync::sync(true).await;
+    let _ = app.emit("extensions:sync", &status);
+    status
+}
+
+#[tauri::command]
+fn extension_sync_status() -> Option<extension_sync::SyncStatus> {
+    extension_sync::last_status()
+}
+
+/// Background entry point used at startup and after the portable runtime is
+/// installed. The launcher's download client (not the browser) owns the proxy.
+pub(crate) fn spawn_extension_sync(force: bool) {
+    use tauri::Emitter;
+    let Some(app) = APP_HANDLE.get().cloned() else {
+        return;
+    };
+    tauri::async_runtime::spawn(async move {
+        let status = extension_sync::sync(force).await;
+        let _ = app.emit("extensions:sync", &status);
+    });
 }
 
 #[tauri::command]
@@ -1489,6 +1519,8 @@ pub fn run() {
             trash_empty,
             extension_list,
             extension_defaults,
+            extension_sync_now,
+            extension_sync_status,
             extension_import,
             extension_delete,
             profile_bind_proxy,
@@ -1676,6 +1708,15 @@ pub fn run() {
             // Compare runtime metadata in the background now and every hour.
             // This never downloads or installs a runtime component.
             start_runtime_update_check_loop();
+
+            // Fetch the two default extensions from their official store
+            // entries. Portable first launches run this after the runtime is
+            // installed instead of competing with that download.
+            if runtime::is_engine_installed() {
+                spawn_extension_sync(false);
+            } else {
+                eprintln!("[extensions] default extension sync waits for the portable runtime");
+            }
             tauri::async_runtime::spawn(async {
                 loop {
                     match tauri::async_runtime::spawn_blocking(trash::purge_expired).await {

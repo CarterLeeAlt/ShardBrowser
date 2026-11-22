@@ -12,6 +12,17 @@ export type ExtensionEntry = {
   error: string | null; usage_error: string | null;
 };
 
+export type ExtensionSyncStatus = {
+  checked_at: number | null;
+  throttled: boolean;
+  installed: string[];
+  updated: string[];
+  unchanged: string[];
+  failures: string[];
+  profiles_updated: number;
+  profiles_pending: number;
+};
+
 function useExtensions() {
   const [entries, setEntries] = useState<ExtensionEntry[]>([]);
   const [error, setError] = useState("");
@@ -55,8 +66,23 @@ export type StorageViewProps = {
 };
 
 export function ExtensionsView({ confirm, onSuccess, onError }: StorageViewProps) {
-  const { entries, error, loading } = useExtensions();
+  const { entries, error, loading, reload } = useExtensions();
   const [busy, setBusy] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const syncNow = async () => {
+    if (syncing) return;
+    setSyncing(true);
+    try {
+      const status = await invoke<ExtensionSyncStatus>("extension_sync_now");
+      if (status.failures.length) onError(tr("Extension sync failed: {0}", status.failures.join("; ")));
+      else {
+        const changed = [...status.installed, ...status.updated];
+        onSuccess(changed.length ? tr("Extensions updated: {0}", changed.join("; ")) : tr("Default extensions are up to date"));
+      }
+      await reload();
+    } catch (e) { onError(String(e)); }
+    finally { setSyncing(false); }
+  };
   const importLocal = async (directory: boolean) => {
     if (busy) return;
     setBusy(true);
@@ -83,7 +109,8 @@ export function ExtensionsView({ confirm, onSuccess, onError }: StorageViewProps
   };
   return <section className="page">
     <PageToolbar title={tr("Extension Library")}>
-      <button className="btn-ghost" disabled={busy} onClick={() => void importLocal(true)}><FolderOpen /> {tr("Import folder")}</button>
+      <button className="btn-ghost" disabled={syncing || busy} onClick={() => void syncNow()}>{syncing ? tr("Syncing…") : tr("Sync default extensions")}</button>
+      <button className="btn-ghost" disabled={busy || syncing} onClick={() => void importLocal(true)}><FolderOpen /> {tr("Import folder")}</button>
       <button className="btn-primary" disabled={busy} onClick={() => void importLocal(false)}><FileUp /> {busy ? tr("Importing…") : tr("Import CRX / ZIP")}</button>
     </PageToolbar>
     {error && <ListState kind="error" text={tr("Unable to load extensions: {0}", error)} />}
