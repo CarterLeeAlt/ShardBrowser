@@ -50,12 +50,7 @@ pub fn main_window() -> Option<tauri::WebviewWindow> {
         .or_else(|| app.webview_windows().into_values().next())
 }
 
-/// Tell any open UI window that the on-disk store changed out-of-band — i.e. a
-/// profile/proxy created or removed through the automation API or MCP, which
-/// writes straight to disk without the React state ever knowing.  The view
-/// listens for `store-changed` and reloads, so the new items appear without an
-/// app restart.  `kind` ("profiles" | "proxies") is informational; the UI
-/// reloads both lists regardless.  No-op when headless (no window).
+/// Invalidate the relevant UI data after a persisted store change.
 pub fn notify_store_changed(kind: &str) {
     use tauri::Emitter;
     if let Some(w) = main_window() {
@@ -1110,10 +1105,7 @@ async fn test_proxies_in_background(requests: Vec<proxy::PreparedProxyTest>, max
     }
 
     let total = requests.len();
-    let results = proxy::full_test_batch_background_with_progress(requests, max_attempts, |_| {
-        notify_store_changed("proxies");
-    })
-    .await;
+    let results = proxy::full_test_batch_background(requests, max_attempts).await;
     let incomplete = results
         .iter()
         .filter(|result| {
@@ -1172,11 +1164,8 @@ fn start_runtime_update_check_loop() {
 }
 
 #[tauri::command]
-fn proxy_list() -> Result<Vec<proxy::ProxyMetadata>, String> {
-    // Credentials never cross the Tauri boundary; metadata keeps rows editable.
-    let list = proxy::list().map_err(|e| e.to_string())?;
-    let sorted = display_order::sort_proxies(list).map_err(|e| e.to_string())?;
-    Ok(sorted.into_iter().map(Into::into).collect())
+fn proxy_list() -> Result<Vec<proxy::ProxyCatalogEntry>, String> {
+    proxy::catalog().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1223,11 +1212,6 @@ async fn proxy_full_test(entry: proxy::ProxyEntry) -> Result<proxy::TestSnapshot
 #[tauri::command]
 fn proxy_history(id: String) -> Result<Vec<proxy::TestSnapshot>, String> {
     proxy::history(&id).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn proxy_last_test(id: String) -> Option<proxy::TestSnapshot> {
-    proxy::latest_test(&id)
 }
 
 #[tauri::command]
@@ -1528,7 +1512,6 @@ pub fn run() {
             proxy_delete,
             proxy_full_test,
             proxy_history,
-            proxy_last_test,
             proxy_bulk_import,
             proxy_bulk_parse,
             proxy_bulk_save,

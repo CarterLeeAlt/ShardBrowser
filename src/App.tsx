@@ -413,6 +413,7 @@ type ProxyEntry = {
   country: string;
   notes: string;
 };
+type CatalogProxy = ProxyEntry & { latest_test: ProxyTestSnapshot | null };
 type ProxyCredentialsUpdate =
   | { mode: "keep" }
   | { mode: "replace"; username: string; password: string }
@@ -1048,8 +1049,7 @@ function BrowsersView() {
   const [profiles, setProfiles] = useState<ProfileMeta[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [proxies, setProxies] = useState<ProxyEntry[]>([]);
-  const [proxySnapshots, setProxySnapshots] = useState<Record<string, ProxyTestSnapshot>>({});
+  const [proxies, setProxies] = useState<CatalogProxy[]>([]);
   const [search, setSearch] = useState("");
   const [folder, setFolder] = useState("all");
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -1115,14 +1115,19 @@ function BrowsersView() {
   const forgetFolder = (f: string) => updateWorkspaceFolders((r) => r.filter((x) => x !== f));
   const ctx = useContextMenu();
 
+  const listRequest = useRef(0);
   const reload = async () => {
-    try {
-      setProfiles(await invoke<ProfileMeta[]>("profile_list"));
-      setProxies(await invoke<ProxyEntry[]>("proxy_list"));
-      setLoadError(null);
-    } catch (e) {
-      setLoadError(String(e));
-    } finally { setLoading(false); }
+    const request = ++listRequest.current;
+    const [browserResult, proxyResult] = await Promise.allSettled([
+      invoke<ProfileMeta[]>("profile_list"),
+      invoke<CatalogProxy[]>("proxy_list"),
+    ]);
+    if (request !== listRequest.current) return;
+    if (browserResult.status === "fulfilled") setProfiles(browserResult.value);
+    if (proxyResult.status === "fulfilled") setProxies(proxyResult.value);
+    const failure = [browserResult, proxyResult].find((result) => result.status === "rejected");
+    setLoadError(failure ? String(failure.reason) : null);
+    setLoading(false);
   };
   useEffect(() => { reload(); }, []);
   // Pick up profiles/proxies created via the automation API or MCP live.
@@ -1217,35 +1222,6 @@ function BrowsersView() {
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
-
-  // Reuse the most recent persisted test for every saved proxy. Browser rows
-  // consume their bound proxy's snapshot, while the bind-proxy dialog can
-  // enrich every option with its exit IP and real location. This only reads
-  // local history; opening the page never contacts a geo service.
-  useEffect(() => {
-    if (proxies.length === 0) {
-      setProxySnapshots({});
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      const entries = await Promise.all(
-        proxies.map(async ({ id }) => {
-          try {
-            const snap = await invoke<ProxyTestSnapshot | null>("proxy_last_test", { id });
-            return [id, snap] as const;
-          } catch {
-            return [id, null] as const;
-          }
-        }),
-      );
-      if (cancelled) return;
-      const next: Record<string, ProxyTestSnapshot> = {};
-      for (const [id, snap] of entries) if (snap) next[id] = snap;
-      setProxySnapshots(next);
-    })();
-    return () => { cancelled = true; };
-  }, [proxies]);
 
   // Fall back to "all" when the active folder tab becomes empty.
   useEffect(() => {
@@ -1836,8 +1812,8 @@ function BrowsersView() {
         <SortableContext items={visible.map((profile) => profile.id)} strategy={verticalListSortingStrategy}>
         {visible.map((p) => {
           const px = p.proxy_id ? proxyMap[p.proxy_id] : null;
-          const proxySnapshot = px ? proxySnapshots[px.id] : undefined;
-          const proxyCountry = (proxySnapshot?.country_code || px?.country || "").trim().toUpperCase();
+          const proxySnapshot = px ? measuredProxyExit(px) : null;
+          const proxyCountry = proxySnapshot?.country_code.trim().toUpperCase() || "";
           const isRunning = !!running[p.id];
           const isStarting = !isRunning && (startBusy.has(p.id) || backendActiveIds.has(p.id));
           const isReserved = operations.runtime || !!recovery?.incomplete || operations.profiles.includes(p.id);
@@ -1915,16 +1891,18 @@ function BrowsersView() {
                     <>
                       <div className="proxy-main">
                         <span className={`badge badge-${px.kind}`}>{px.kind}</span>
-                        {proxyCountry && (
+                        {proxyCountry ? (
                           <>
                             <CountryFlag cc={proxyCountry} />
                             <span className="flag">{proxyCountry}</span>
                           </>
-                        )}
+                        ) : proxySnapshot?.country.trim() ? <span className="flag">{proxySnapshot.country.trim()}</span> : null}
                       </div>
-                      <ProxyLocationDetail city={proxySnapshot?.city} ip={proxySnapshot?.ip} />
+                      {proxySnapshot
+                        ? <ProxyLocationDetail city={proxySnapshot.city} ip={proxySnapshot.ip} />
+                        : <span className="muted table-detail">{proxyResultLabel(px)}</span>}
                     </>
-                  ) : <span className="muted">{tr("— direct —")}</span>}
+                  ) : <span className="muted">{tr(p.proxy_id ? "Proxy not found" : "— direct —")}</span>}
                 </div>
                 <div
                   className={`cell-notes cell-click ${isActive ? "cell-locked" : ""} ${(p.notes || "").includes("\n") ? "notes-multi" : ""}`}
@@ -1975,7 +1953,6 @@ function BrowsersView() {
           kind={quickEdit.kind}
           profile={quickEdit.profile}
           proxies={proxies}
-          proxySnapshots={proxySnapshots}
           onClose={() => setQuickEdit(null)}
           onSaved={() => { setQuickEdit(null); reload(); }}
         />
@@ -1999,11 +1976,10 @@ function ProxyLocationDetail({ city, ip }: { city?: string; ip?: string }) {
   );
 }
 
-function proxyBindingLabel(proxy: ProxyEntry, snapshot?: ProxyTestSnapshot) {
-  const primary = proxy.name || `${proxy.host}:${proxy.port}`;
-  const fallbackTag = proxy.country || proxy.kind;
-  if (!snapshot) return `${primary} · ${fallbackTag}`;
-
+function proxyBindingOption(proxy: CatalogProxy): CSOption<string> {
+  const label = proxy.name || `${proxy.host}:${proxy.port}`;
+  const snapshot = measuredProxyExit(proxy);
+  if (!snapshot) return { value: proxy.id, label, detail: proxyResultLabel(proxy) };
   const locationParts = [
     snapshot.city,
     snapshot.region,
@@ -2014,16 +1990,16 @@ function proxyBindingLabel(proxy: ProxyEntry, snapshot?: ProxyTestSnapshot) {
       !!part
       && all.findIndex((value) => value.toLowerCase() === part.toLowerCase()) === index
     ));
-  const location = locationParts.join(", ") || fallbackTag;
-  const exitIp = (snapshot.ip || "").trim();
+  const location = locationParts.join(", ") || tr("Exit location unknown");
+  return { value: proxy.id, label, detail: `${location} · IP ${snapshot.ip.trim()}` };
+}
 
-  return [primary, location, exitIp ? `IP ${exitIp}` : ""]
-    .filter(Boolean)
-    .join(" · ");
+function optionText(option: CSOption<string | number>) {
+  return option.detail ? `${option.label} · ${option.detail}` : option.label;
 }
 
 function AssignProxiesDialog({ profiles, proxies, selected, activeIds, onClose, onSaved }: {
-  profiles: ProfileMeta[]; proxies: ProxyEntry[]; selected: Set<string>; activeIds: Set<string>;
+  profiles: ProfileMeta[]; proxies: CatalogProxy[]; selected: Set<string>; activeIds: Set<string>;
   onClose: () => void; onSaved: () => void | Promise<void>;
 }) {
   const [chosen, setChosen] = useState(new Set<string>());
@@ -2036,8 +2012,9 @@ function AssignProxiesDialog({ profiles, proxies, selected, activeIds, onClose, 
   const plan = planAssignment(targets.map((p) => p.id), proxies.filter((p) => chosen.has(p.id)).map((p) => p.id), sharing, usedBy);
   const blocked = targets.some((p) => activeIds.has(p.id));
   const proxyName = (id: string | null) => {
+    if (!id) return tr("Direct connection");
     const p = proxies.find((p) => p.id === id);
-    return p ? p.name || `${p.host}:${p.port}` : tr("Direct connection");
+    return p ? optionText(proxyBindingOption(p)) : tr("Proxy not found");
   };
   const apply = async () => {
     setBusy(true);
@@ -2071,7 +2048,7 @@ function AssignProxiesDialog({ profiles, proxies, selected, activeIds, onClose, 
               <input type="checkbox" checked={chosen.has(p.id)} disabled={busy} onChange={(event) => {
                 setChosen((current) => { const next = new Set(current); if (event.target.checked) next.add(p.id); else next.delete(p.id); return next; });
               }} />
-              <span>{p.name || `${p.host}:${p.port}`}</span>
+              <span>{optionText(proxyBindingOption(p))}</span>
               <span className="muted small">{p.kind} · {usedBy[p.id]?.length ?? 0}  {tr("bindings")}</span>
             </label>)}
           </div>
@@ -2102,17 +2079,18 @@ function AssignProxiesDialog({ profiles, proxies, selected, activeIds, onClose, 
 }
 
 function QuickEditDialog({
-  kind, profile, proxies, proxySnapshots, onClose, onSaved,
+  kind, profile, proxies, onClose, onSaved,
 }: {
   kind: "proxy" | "notes";
   profile: ProfileMeta;
-  proxies: ProxyEntry[];
-  proxySnapshots: Record<string, ProxyTestSnapshot>;
+  proxies: CatalogProxy[];
   onClose: () => void;
   onSaved: () => void;
 }) {
   const [proxyId, setProxyId] = useState<string | null>(profile.proxy_id);
   const [notes, setNotes] = useState(profile.notes);
+  const proxyOptions = proxies.map(proxyBindingOption);
+  const currentProxy = proxyOptions.find((option) => option.value === proxyId);
 
   const saveProxy = async () => {
     try {
@@ -2144,12 +2122,11 @@ function QuickEditDialog({
           {kind === "proxy" ? (
             <label>
               <span className="lbl">{tr("Proxy")}</span>
-              <select value={proxyId ?? ""} onChange={(e) => setProxyId(e.target.value || null)}>
+              <select value={proxyId ?? ""} title={currentProxy && optionText(currentProxy)} onChange={(e) => setProxyId(e.target.value || null)}>
                 <option value="">{tr("— direct connection —")}</option>
-                {proxies.map((px) => (
-                  <option key={px.id} value={px.id}>
-                    {proxyBindingLabel(px, proxySnapshots[px.id])}
-                  </option>
+                {proxyId && !currentProxy && <option value={proxyId} disabled>{tr("Proxy not found")}</option>}
+                {proxyOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{optionText(option)}</option>
                 ))}
               </select>
             </label>
@@ -2185,7 +2162,7 @@ function InlineEditor({
   draft: ProfileForm;
   nameError: string | null;
   setDraft: (f: ProfileForm) => void;
-  proxies: ProxyEntry[];
+  proxies: CatalogProxy[];
   fingerprints: FingerprintEntry[];
   onSave: () => void;
   onCancel: () => void;
@@ -2410,12 +2387,10 @@ function InlineEditor({
             <CSSelect
               value={f.proxy_id ?? ""}
               onChange={(v) => u("proxy_id", v ? v : null)}
+              placeholder={tr("Proxy not found")}
               options={[
                 { value: "", label: tr("— direct connection —") },
-                ...proxies.map((px) => ({
-                  value: px.id,
-                  label: `${px.name || `${px.host}:${px.port}`} · ${px.country || px.kind}`,
-                })),
+                ...proxies.map(proxyBindingOption),
               ]}
             />
           </label>
@@ -2650,7 +2625,7 @@ function PortList({
   );
 }
 
-type CSOption<T> = { value: T; label: string };
+type CSOption<T> = { value: T; label: string; detail?: string };
 
 /// Themed dropdown replacing the native select inside the profile editor.
 function CSSelect<T extends string | number>({
@@ -2665,20 +2640,23 @@ function CSSelect<T extends string | number>({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   // Body portal so ancestor overflow:hidden can't clip the menu.
-  const [anchor, setAnchor] = useState<{ left: number; top: number; width: number; up: boolean } | null>(null);
+  const [anchor, setAnchor] = useState<CSSProperties | null>(null);
 
   const place = () => {
     const el = triggerRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
-    const menuH = Math.min(280, options.length * 38 + 10);
-    // Flip up if no room below.
-    const up = r.bottom + menuH + 8 > window.innerHeight && r.top - menuH - 8 > 0;
+    const menuH = Math.min(280, options.reduce((height, option) => height + (option.detail ? 54 : 38), 10));
+    const titlebarBottom = document.querySelector(".titlebar")?.getBoundingClientRect().bottom ?? 0;
+    const above = Math.max(0, r.top - titlebarBottom - 8);
+    const below = Math.max(0, window.innerHeight - r.bottom - 8);
+    const up = below < menuH && above > below;
     setAnchor({
       left: r.left,
-      top: up ? r.top - menuH - 4 : r.bottom + 4,
+      top: up ? undefined : r.bottom + 4,
+      bottom: up ? window.innerHeight - r.top + 4 : undefined,
       width: r.width,
-      up,
+      maxHeight: Math.min(280, up ? above : below),
     });
   };
 
@@ -2716,7 +2694,7 @@ function CSSelect<T extends string | number>({
   return (
     <div className={`cs ${open ? "cs-open" : ""}`}>
       <button ref={triggerRef} type="button" className="cs-trigger" onClick={toggle}>
-        <span className="cs-value">{current?.label ?? placeholder ?? ""}</span>
+        <span className="cs-value" title={current?.detail ? optionText(current) : undefined}>{current ? optionText(current) : placeholder ?? ""}</span>
         <span className="cs-caret" aria-hidden>▾</span>
       </button>
       {open && anchor && createPortal(
@@ -2724,7 +2702,7 @@ function CSSelect<T extends string | number>({
           ref={menuRef}
           className="cs-menu"
           role="listbox"
-          style={{ left: anchor.left, top: anchor.top, width: anchor.width }}
+          style={anchor}
         >
           {options.map((o) => (
             <div
@@ -2734,7 +2712,7 @@ function CSSelect<T extends string | number>({
               className={`cs-opt ${o.value === value ? "active" : ""}`}
               onClick={() => { onChange(o.value); setOpen(false); }}
             >
-              {o.label}
+              {o.detail ? <><span className="cs-opt-label">{o.label}</span><span className="cs-opt-detail">{o.detail}</span></> : o.label}
             </div>
           ))}
         </div>,
@@ -2806,6 +2784,16 @@ function proxyTestFailureReason(snapshot: ProxyTestSnapshot): string | null {
   return null;
 }
 
+function measuredProxyExit(proxy: CatalogProxy): ProxyTestSnapshot | null {
+  const snapshot = proxy.latest_test;
+  return snapshot && proxyTestFailureReason(snapshot) == null ? snapshot : null;
+}
+
+function proxyResultLabel(proxy: CatalogProxy) {
+  if (!proxy.latest_test) return tr("not tested");
+  return tr("Proxy test failed");
+}
+
 function proxyTestIsActive(snapshot: ProxyTestSnapshot): boolean {
   return proxyTestFailureReason(snapshot) == null;
 }
@@ -2841,14 +2829,14 @@ async function testProxiesIncrementally(
 }
 
 function ProxiesView() {
-  const [proxies, setProxies] = useState<ProxyEntry[]>([]);
+  const [proxies, setProxies] = useState<CatalogProxy[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<ProxyEntry | null>(null);
   const [bulkOpen, setBulkOpen] = useState(false);
-  const [snapshots, setSnapshots] = useState<Record<string, ProxyTestSnapshot>>({});
   const [busy, setBusy] = useState<Record<string, boolean>>({});
-  const [infoFor, setInfoFor] = useState<{ proxy: ProxyEntry; anchor: { x: number; y: number } } | null>(null);
+  const [infoFor, setInfoFor] = useState<{ id: string; anchor: { x: number; y: number } } | null>(null);
+  const infoProxy = infoFor && proxies.find((p) => p.id === infoFor.id);
   const [proxySel, setProxySel] = useState<Set<string>>(new Set());
   const [renaming, setRenaming] = useState<{ id: string; draft: string } | null>(null);
   const [profiles, setProfiles] = useState<ProfileMeta[]>([]);
@@ -2857,29 +2845,18 @@ function ProxiesView() {
   const sort = useListSort();
   const ctx = useContextMenu();
 
-  // Search filter: matches name / host / port / country tag / notes / username
-  // *and* the exit IP from the latest snapshot (so the user can find a proxy
-  // by "last seen exiting at X.X.X.X").  Whitespace-trimmed, case-insensitive.
+  // Match connection metadata and measured exit information; the saved
+  // country tag is not a measurement and never drives the location filter.
   const filteredProxies = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return proxies;
     return proxies.filter((p) => {
-      const ip = (snapshots[p.id]?.ip ?? "").toLowerCase();
-      const city = (snapshots[p.id]?.city ?? "").toLowerCase();
-      const isp = (snapshots[p.id]?.isp ?? "").toLowerCase();
-      return (
-        p.name.toLowerCase().includes(q) ||
-        p.host.toLowerCase().includes(q) ||
-        String(p.port).includes(q) ||
-        p.country.toLowerCase().includes(q) ||
-        p.notes.toLowerCase().includes(q) ||
-        (p.username ?? "").toLowerCase().includes(q) ||
-        ip.includes(q) ||
-        city.includes(q) ||
-        isp.includes(q)
-      );
+      const exit = measuredProxyExit(p);
+      return [p.name, p.host, String(p.port), p.notes, p.username, exit?.ip,
+        exit?.country_code, exit?.country, exit?.region, exit?.city, exit?.isp]
+        .some((part) => part?.toLowerCase().includes(q));
     });
-  }, [proxies, snapshots, search]);
+  }, [proxies, search]);
 
   const selectedHasLockedProxy = [...proxySel].some((id) => lockedProxyIds.has(id));
 
@@ -2921,14 +2898,20 @@ function ProxiesView() {
     } catch (e) { toast.err(String(e)); }
   };
 
+  const listRequest = useRef(0);
   const reload = async () => {
+    const request = ++listRequest.current;
     try {
-      setProxies(await invoke<ProxyEntry[]>("proxy_list"));
-      // Profile list powers the per-proxy bound-count column.
-      setProfiles(await invoke<ProfileMeta[]>("profile_list"));
+      const [entries, boundProfiles] = await Promise.all([
+        invoke<CatalogProxy[]>("proxy_list"),
+        invoke<ProfileMeta[]>("profile_list"),
+      ]);
+      if (request !== listRequest.current) return;
+      setProxies(entries);
+      setProfiles(boundProfiles);
       setLoadError(null);
-    } catch (e) { setLoadError(String(e)); }
-    finally { setLoading(false); }
+    } catch (e) { if (request === listRequest.current) setLoadError(String(e)); }
+    finally { if (request === listRequest.current) setLoading(false); }
   };
   useEffect(() => { reload(); }, []);
   // Pick up proxies/profiles added via the automation API or MCP live.
@@ -2955,36 +2938,11 @@ function ProxiesView() {
     return out;
   }, [profiles]);
 
-  // Fetch latest snapshot per proxy so rows survive a launcher restart.
-  useEffect(() => {
-    if (proxies.length === 0) return;
-    let cancelled = false;
-    (async () => {
-      const entries = await Promise.all(
-        proxies.map(async (p) => {
-          try {
-            const snap = await invoke<ProxyTestSnapshot | null>("proxy_last_test", { id: p.id });
-            return [p.id, snap] as const;
-          } catch {
-            return [p.id, null] as const;
-          }
-        }),
-      );
-      if (cancelled) return;
-      const next: Record<string, ProxyTestSnapshot> = {};
-      for (const [id, snap] of entries) if (snap) next[id] = snap;
-      setSnapshots(next);
-    })();
-    return () => { cancelled = true; };
-  }, [proxies]);
-
   const fullTest = async (p: ProxyEntry) => {
     setBusy((s) => ({ ...s, [p.id]: true }));
     try {
-      const snap = await invoke<ProxyTestSnapshot>("proxy_full_test", { entry: p });
-      setSnapshots((s) => ({ ...s, [p.id]: snap }));
-      // Refresh: backend may have just populated the country tag.
-      reload();
+      await invoke<ProxyTestSnapshot>("proxy_full_test", { entry: p });
+      await reload();
     } catch (e) {
       toast.err(`${p.name || p.host}: ${e}`);
     } finally {
@@ -3018,10 +2976,6 @@ function ProxiesView() {
       const results = await testProxiesIncrementally(targets, (result) => {
         const target = targets[result.index];
         if (!target) return;
-        const snapshot = result.snapshot;
-        if (snapshot) {
-          setSnapshots((state) => ({ ...state, [target.id]: snapshot }));
-        }
         setBusy((state) => ({ ...state, [target.id]: false }));
       });
       let passed = 0;
@@ -3098,12 +3052,11 @@ function ProxiesView() {
   const handleProxyDragEnd = async (event: DragEndEvent) => {
     const drop = listDrop(event, filteredProxies, "proxy");
     if (!drop) return;
-    const previous = proxies;
     setProxies(moveByAnchor(proxies, drop.id, drop.anchorId, drop.placement));
     try {
       await invoke("proxy_move_order", drop);
     } catch (error) {
-      setProxies(previous);
+      await reload();
       toast.err(tr("Could not save proxy order: {0}", String(error)));
     }
   };
@@ -3156,15 +3109,16 @@ function ProxiesView() {
               }}
             />
           </div>
-          <div>{tr("Name")}</div><div>{tr("Type")}</div><div>{tr("Host:Port")}</div><div>{tr("Country")}</div><div>{tr("Profiles")}</div><div>{tr("Test result")}</div><div className="head-actions">{tr("Actions")}</div>
+          <div>{tr("Name")}</div><div>{tr("Type")}</div><div>{tr("Host:Port")}</div><div>{tr("Exit location")}</div><div>{tr("Profiles")}</div><div>{tr("Test result")}</div><div className="head-actions">{tr("Actions")}</div>
         </div>
         <SortableContext items={filteredProxies.map((proxy) => proxy.id)} strategy={verticalListSortingStrategy}>
         {filteredProxies.map((p) => {
-          const r = snapshots[p.id];
+          const r = p.latest_test;
           const testFailure = r ? proxyTestFailureReason(r) : null;
           const isActive = !!r && testFailure == null;
           const isBusy = !!busy[p.id];
-          const cc = r?.country_code || p.country || "";
+          const exit = measuredProxyExit(p);
+          const cc = exit?.country_code.trim().toUpperCase() || "";
           const isSel = proxySel.has(p.id);
           const isLocked = lockedProxyIds.has(p.id);
           return (
@@ -3178,7 +3132,7 @@ function ProxiesView() {
               onContextMenu={(e) =>
                 ctx.open(e, [
                   { label: tr("Test (TCP/UDP/geo)"), onClick: () => fullTest(p) },
-                  { label: tr("View details"), onClick: () => setInfoFor({ proxy: p, anchor: { x: e.clientX, y: e.clientY } }) },
+                  { label: tr("View details"), onClick: () => setInfoFor({ id: p.id, anchor: { x: e.clientX, y: e.clientY } }) },
                   {
                     label: tr("Edit"),
                     onClick: () => setEditing(p),
@@ -3248,8 +3202,8 @@ function ProxiesView() {
                       <CountryFlag cc={cc} />
                       <span className="flag">{cc}</span>
                     </span>
-                  ) : <span className="muted">—</span>}
-                  <ProxyLocationDetail city={r?.city} />
+                  ) : <span className="muted">{exit?.country.trim() || tr("unknown")}</span>}
+                  {exit?.city.trim() && <ProxyLocationDetail city={exit.city} />}
                 </div>
                 <div>
                   <span className="profile-count" title={tr("{0} profile(s) bound to this proxy", profileCountByProxy[p.id] ?? 0)}>
@@ -3299,7 +3253,7 @@ function ProxiesView() {
                 <div className="row-actions">
                   <button
                     className="icon-btn"
-                    onClick={(e) => setInfoFor({ proxy: p, anchor: { x: e.clientX, y: e.clientY } })}
+                    onClick={(e) => setInfoFor({ id: p.id, anchor: { x: e.clientX, y: e.clientY } })}
                     title={tr("Details + history")}
                   ><Icon.Info size={16} /></button>
                   <button className="icon-btn" onClick={() => fullTest(p)} disabled={isBusy} title={tr("Test TCP + UDP + geo")}><Icon.Refresh size={16} /></button>
@@ -3326,11 +3280,10 @@ function ProxiesView() {
       </div>
       {editing && <ProxyEditor initial={editing} onClose={() => { setEditing(null); reload(); }} />}
       {bulkOpen && <ProxyBulkImporter onClose={() => { setBulkOpen(false); reload(); }} />}
-      {infoFor && (
+      {infoFor && infoProxy && (
         <ProxyInfoPopover
-          proxy={infoFor.proxy}
+          proxy={infoProxy}
           anchor={infoFor.anchor}
-          latest={snapshots[infoFor.proxy.id]}
           onClose={() => setInfoFor(null)}
         />
       )}
@@ -3343,19 +3296,22 @@ function ProxiesView() {
 
 /// Proxy detail popover: latest IP/geo + UDP + IP-change history.
 function ProxyInfoPopover({
-  proxy, anchor, latest, onClose,
+  proxy, anchor, onClose,
 }: {
-  proxy: ProxyEntry;
+  proxy: CatalogProxy;
   anchor: { x: number; y: number };
-  latest?: ProxyTestSnapshot;
   onClose: () => void;
 }) {
+  const latest = proxy.latest_test;
+  const exit = measuredProxyExit(proxy);
   const [history, setHistory] = useState<ProxyTestSnapshot[]>([]);
   useEffect(() => {
+    let cancelled = false;
     invoke<ProxyTestSnapshot[]>("proxy_history", { id: proxy.id })
-      .then((h) => setHistory([...h].reverse()))
-      .catch((e) => toast.err(String(e)));
-  }, [proxy.id]);
+      .then((h) => { if (!cancelled) setHistory([...h].reverse()); })
+      .catch((e) => { if (!cancelled) toast.err(String(e)); });
+    return () => { cancelled = true; };
+  }, [proxy.id, latest?.last_seen]);
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
       const t = e.target as HTMLElement;
@@ -3375,28 +3331,28 @@ function ProxyInfoPopover({
       <div className="popover-section">
         {latest ? (
           <>
-            {latest.ip && (
+            {exit && (
               <>
                 <div className="pop-row">
                   <span className="pop-ico"><Icon.Globe size={16} /></span>
-                  <span className="mono">{latest.ip}</span>
+                  <span className="mono">{exit.ip}</span>
                 </div>
                 <div className="pop-row">
-                  <span className="pop-ico">{latest.country_code ? <CountryFlag cc={latest.country_code} height={14} /> : <Icon.Globe size={16} />}</span>
-                  <span>{[latest.region, latest.city].filter(Boolean).join(", ") || latest.country || "—"}</span>
+                  <span className="pop-ico">{exit.country_code ? <CountryFlag cc={exit.country_code} height={14} /> : <Icon.Globe size={16} />}</span>
+                  <span>{[exit.region, exit.city].filter(Boolean).join(", ") || exit.country || tr("unknown")}</span>
                 </div>
               </>
             )}
-            {latest.timezone && (
+            {exit?.timezone && (
               <div className="pop-row">
                 <span className="pop-ico"><Icon.Clock size={16} /></span>
-                <span>{latest.timezone}</span>
+                <span>{exit.timezone}</span>
               </div>
             )}
-            {latest.isp && (
+            {exit?.isp && (
               <div className="pop-row">
                 <span className="pop-ico"><Icon.Building size={16} /></span>
-                <span className="muted small">{latest.isp}</span>
+                <span className="muted small">{exit.isp}</span>
               </div>
             )}
             <div className="pop-row pop-row-split">

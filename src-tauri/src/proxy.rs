@@ -122,6 +122,13 @@ pub struct ProxyMetadata {
     pub notes: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ProxyCatalogEntry {
+    #[serde(flatten)]
+    pub metadata: ProxyMetadata,
+    pub latest_test: Option<TestSnapshot>,
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum ProxyCredentialsUpdate {
@@ -2358,7 +2365,6 @@ pub struct TestSnapshot {
 
 #[derive(Debug, Serialize)]
 pub struct BatchTestResult {
-    pub index: usize,
     pub snapshot: Option<TestSnapshot>,
     pub error: Option<String>,
 }
@@ -2449,6 +2455,31 @@ pub fn latest_test(proxy_id: &str) -> Option<TestSnapshot> {
         .and_then(|hs| hs.by_proxy.get(proxy_id).and_then(|v| v.last().cloned()))
 }
 
+pub fn catalog() -> Result<Vec<ProxyCatalogEntry>> {
+    // Read both stores in the same lock order as test persistence and deletion.
+    let (proxies, history) = {
+        let _history_guard = PROXY_HISTORY_LOCK
+            .read()
+            .map_err(|_| anyhow::anyhow!("proxy history lock poisoned"))?;
+        (list()?, load_history_unlocked()?)
+    };
+    let sorted = crate::display_order::sort_proxies(proxies)?;
+    Ok(join_catalog(sorted, history))
+}
+
+fn join_catalog(proxies: Vec<ProxyEntry>, mut history: HistoryStore) -> Vec<ProxyCatalogEntry> {
+    proxies
+        .into_iter()
+        .map(|proxy| ProxyCatalogEntry {
+            latest_test: history
+                .by_proxy
+                .remove(&proxy.id)
+                .and_then(|mut entries| entries.pop()),
+            metadata: proxy.into(),
+        })
+        .collect()
+}
+
 /// Most recent test that produced usable identity data (a public IP and an
 /// IANA timezone). Failed probes are persisted too, so `latest_test` can
 /// return an empty snapshot; callers that need real geo data must skip those.
@@ -2505,6 +2536,11 @@ fn persist_test_result(
                 save(&store_data)?;
             }
         }
+    }
+    drop(_store_guard);
+    drop(_history_guard);
+    if !entry.id.is_empty() {
+        crate::notify_store_changed("proxies");
     }
     Ok(recorded)
 }
@@ -2748,15 +2784,10 @@ pub async fn full_test_background(entry: &ProxyEntry) -> Result<TestSnapshot> {
     full_test_with_retry_in_lane(request, 1, TestLane::Background).await
 }
 
-async fn full_test_batch_in_lane<F>(
+pub async fn full_test_batch_background(
     requests: Vec<PreparedProxyTest>,
-    lane: TestLane,
     max_attempts: usize,
-    mut on_result: F,
-) -> Vec<BatchTestResult>
-where
-    F: FnMut(&BatchTestResult) + Send,
-{
+) -> Vec<BatchTestResult> {
     let count = requests.len();
     let mut queue: VecDeque<(usize, PreparedProxyTest)> =
         requests.into_iter().enumerate().collect();
@@ -2768,7 +2799,7 @@ where
         tasks.spawn(async move {
             (
                 index,
-                full_test_with_retry_in_lane(request, max_attempts, lane).await,
+                full_test_with_retry_in_lane(request, max_attempts, TestLane::Background).await,
             )
         });
     }
@@ -2778,17 +2809,14 @@ where
         if let Ok((index, result)) = joined {
             let result = match result {
                 Ok(snapshot) => BatchTestResult {
-                    index,
                     snapshot: Some(snapshot),
                     error: None,
                 },
                 Err(error) => BatchTestResult {
-                    index,
                     snapshot: None,
                     error: Some(error.to_string()),
                 },
             };
-            on_result(&result);
             results[index] = Some(result);
         }
         while tasks.len() < BULK_TEST_CONCURRENCY {
@@ -2798,7 +2826,7 @@ where
             tasks.spawn(async move {
                 (
                     index,
-                    full_test_with_retry_in_lane(request, max_attempts, lane).await,
+                    full_test_with_retry_in_lane(request, max_attempts, TestLane::Background).await,
                 )
             });
         }
@@ -2806,32 +2834,13 @@ where
 
     results
         .into_iter()
-        .enumerate()
-        .map(|(index, result)| {
-            result.unwrap_or_else(|| {
-                let result = BatchTestResult {
-                    index,
-                    snapshot: None,
-                    error: Some("proxy test task did not complete".to_string()),
-                };
-                on_result(&result);
-                result
+        .map(|result| {
+            result.unwrap_or_else(|| BatchTestResult {
+                snapshot: None,
+                error: Some("proxy test task did not complete".to_string()),
             })
         })
         .collect()
-}
-
-/// Run automatic tests and report each result immediately after its persisted
-/// test finishes, without waiting for slower proxies in the same batch.
-pub async fn full_test_batch_background_with_progress<F>(
-    requests: Vec<PreparedProxyTest>,
-    max_attempts: usize,
-    on_result: F,
-) -> Vec<BatchTestResult>
-where
-    F: FnMut(&BatchTestResult) + Send,
-{
-    full_test_batch_in_lane(requests, TestLane::Background, max_attempts, on_result).await
 }
 
 /// Fallback country → IANA timezone for providers that omit timezone.
@@ -2886,7 +2895,8 @@ pub fn country_to_timezone(cc: &str) -> &'static str {
 #[cfg(test)]
 mod snapshot_tests {
     use super::{
-        consider_geo_result, latest_successful_in, update_test_history, GeoInfo, TestSnapshot,
+        consider_geo_result, join_catalog, latest_successful_in, update_test_history, GeoInfo,
+        HistoryStore, ProxyEntry, ProxyKind, TestSnapshot,
     };
 
     fn snap(ip: &str, timezone: &str) -> TestSnapshot {
@@ -2907,6 +2917,48 @@ mod snapshot_tests {
             udp_error: None,
             provider: "test".into(),
         }
+    }
+
+    #[test]
+    fn catalog_joins_latest_result_by_id_without_replacing_configuration() {
+        let proxy = |id: &str| ProxyEntry {
+            id: id.into(),
+            name: id.into(),
+            kind: ProxyKind::Socks5,
+            host: "127.0.0.1".into(),
+            port: 1080,
+            country: "CN".into(),
+            username: "private-user".into(),
+            password: "private-password".into(),
+            credentials_unavailable: false,
+            protected_credentials: None,
+            notes: String::new(),
+        };
+        let success = snap("203.0.113.7", "America/Los_Angeles");
+        let history = HistoryStore {
+            by_proxy: [
+                ("other".into(), vec![success.clone()]),
+                ("failed".into(), vec![success.clone(), snap("", "")]),
+                ("tested".into(), vec![success]),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let catalog = join_catalog(
+            vec![proxy("tested"), proxy("new"), proxy("failed")],
+            history,
+        );
+        let json = serde_json::to_value(catalog).unwrap();
+        assert_eq!(json.as_array().unwrap().len(), 3);
+        assert_eq!(json[0]["id"], "tested");
+        assert_eq!(json[0]["country"], "CN");
+        assert_eq!(json[0]["latest_test"]["country_code"], "US");
+        assert_eq!(json[0]["latest_test"]["ip"], "203.0.113.7");
+        assert_eq!(json[0]["credentials_configured"], true);
+        assert!(json[0].get("username").is_none() && json[0].get("password").is_none());
+        assert_eq!(json[1]["id"], "new");
+        assert!(json[1]["latest_test"].is_null());
+        assert_eq!(json[2]["latest_test"]["ip"], "");
     }
 
     #[test]
