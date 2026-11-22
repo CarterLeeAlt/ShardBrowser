@@ -86,16 +86,29 @@ fn resolve(value: &str) -> Result<Endpoint> {
 }
 
 fn windows_system_proxy() -> Result<Option<String>> {
-    if registry_dword("ProxyEnable").unwrap_or(0) == 0 {
-        if registry_string("AutoConfigURL").is_some_and(|value| !value.trim().is_empty()) {
+    decide_system_proxy(
+        registry_dword("ProxyEnable").unwrap_or(0),
+        registry_string("ProxyServer"),
+        registry_string("AutoConfigURL"),
+    )
+}
+
+fn decide_system_proxy(
+    proxy_enable: u32,
+    proxy_server: Option<String>,
+    auto_config_url: Option<String>,
+) -> Result<Option<String>> {
+    if proxy_enable == 0 {
+        if auto_config_url.is_some_and(|value| !value.trim().is_empty()) {
             bail!("Windows uses an automatic proxy script; set a download proxy URL explicitly");
         }
         return Ok(None);
     }
-    let server = registry_string("ProxyServer")
-        .context("Windows ProxyEnable is on but ProxyServer cannot be read")?;
-    let selected = pick_proxy(&server).context("Windows ProxyServer has no usable address")?;
-    Ok(Some(selected))
+    let server =
+        proxy_server.context("Windows ProxyEnable is on but ProxyServer cannot be read")?;
+    Ok(Some(
+        pick_proxy(&server).context("Windows ProxyServer has no usable address")?,
+    ))
 }
 
 /// Windows stores either `host:port` or a per-protocol list such as
@@ -256,6 +269,19 @@ mod tests {
         );
         assert_eq!(pick_proxy("  "), None);
         assert_eq!(pick_proxy("http="), None);
+    }
+
+    #[test]
+    fn system_proxy_decisions_cover_direct_pac_and_missing_server() {
+        assert_eq!(decide_system_proxy(0, None, None).unwrap(), None);
+        assert!(decide_system_proxy(0, None, Some("http://pac.test/proxy.pac".into())).is_err());
+        assert!(decide_system_proxy(1, None, None).is_err());
+        assert_eq!(
+            decide_system_proxy(1, Some("127.0.0.1:7897".into()), None)
+                .unwrap()
+                .as_deref(),
+            Some("http://127.0.0.1:7897")
+        );
     }
 
     #[test]
