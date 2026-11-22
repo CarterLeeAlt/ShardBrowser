@@ -23,7 +23,8 @@ struct TableLayout {
     drag_column: u32,
     select_column: u32,
     actions_column: u32,
-    table_inline_padding: u32,
+    table_padding_start: u32,
+    table_padding_end: u32,
     browser: Table,
     proxy: Table,
 }
@@ -41,7 +42,8 @@ impl TableLayout {
                 + self.select_column
                 + table.columns.values().sum::<u32>()
                 + self.actions_column
-                + 2 * self.table_inline_padding
+                + self.table_padding_start
+                + self.table_padding_end
                 + (table.columns.len() as u32 + 2) * self.column_gap
         };
         table_width(&self.browser).max(table_width(&self.proxy))
@@ -192,23 +194,23 @@ mod tests {
         let mut layout: TableLayout = serde_json::from_value(serde_json::json!({
             "sidebarWidth": 200, "minimumSidePadding": 10, "scrollbarWidth": 10,
             "tableBorder": 1, "columnGap": 8, "dragColumn": 24, "selectColumn": 28,
-            "actionsColumn": 60, "tableInlinePadding": 8,
+            "actionsColumn": 60, "tablePaddingStart": 8, "tablePaddingEnd": 15,
             "browser": {"columns": {"name": 100, "status": 40}},
             "proxy": {"columns": {"name": 100, "type": 80}}
         }))
         .unwrap();
-        // The proxy table needs 340 pixels; window chrome adds 232.
-        assert_eq!(layout.minimum_window_width(), 572);
+        // The proxy table needs 347 pixels; window chrome adds 232.
+        assert_eq!(layout.minimum_window_width(), 579);
         *layout.proxy.columns.get_mut("type").unwrap() += 20;
-        assert_eq!(layout.minimum_window_width(), 592);
+        assert_eq!(layout.minimum_window_width(), 599);
         *layout.browser.columns.get_mut("status").unwrap() += 80;
-        assert_eq!(layout.minimum_window_width(), 612);
+        assert_eq!(layout.minimum_window_width(), 619);
     }
 
     #[test]
-    fn production_layout_reserves_both_fixed_columns_and_symmetric_padding() {
+    fn production_layout_reserves_both_fixed_columns_and_edge_padding() {
         let layout: TableLayout =
             serde_json::from_str(include_str!("../../src/table-layout.json")).unwrap();
-        assert_eq!(layout.minimum_window_width(), 1286);
+        assert_eq!(layout.minimum_window_width(), 1293);
     }
 }

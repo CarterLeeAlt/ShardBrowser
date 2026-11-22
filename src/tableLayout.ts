@@ -2,7 +2,7 @@ import layout from "./table-layout.json";
 
 export function applyTableLayout() {
   const tables = [["browser", "t-cols"], ["proxy", "p-cols"]] as const;
-  const fixedWidth = layout.dragColumn + layout.actionsColumn + 2 * layout.tableInlinePadding;
+  const fixedWidth = layout.dragColumn + layout.actionsColumn + layout.tablePaddingStart + layout.tablePaddingEnd;
   const styles = tables.map(([name, grid]) => {
     const columns = [layout.selectColumn, ...Object.values(layout[name].columns)];
     const minimum = columns.reduce((sum, width) => sum + width, fixedWidth + (columns.length + 1) * layout.columnGap);
@@ -17,7 +17,8 @@ export function applyTableLayout() {
     --column-gap: ${layout.columnGap}px;
     --table-drag-column: ${layout.dragColumn}px;
     --table-actions-column: ${layout.actionsColumn}px;
-    --table-inline-padding: ${layout.tableInlinePadding}px;
+    --table-padding-start: ${layout.tablePaddingStart}px;
+    --table-padding-end: ${layout.tablePaddingEnd}px;
     --table-min-width: ${Math.max(...styles.map(({ minimum }) => minimum))}px;
   }
   ${styles.map(({ name, grid, columns, minimum }) => {

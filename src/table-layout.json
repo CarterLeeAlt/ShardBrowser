@@ -7,7 +7,8 @@
   "dragColumn": 22,
   "selectColumn": 28,
   "actionsColumn": 160,
-  "tableInlinePadding": 8,
+  "tablePaddingStart": 8,
+  "tablePaddingEnd": 15,
   "browser": {
     "columns": { "name": 113, "status": 86, "proxy": 161, "notes": 192, "lastRun": 128 }
   },
