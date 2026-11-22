@@ -193,7 +193,7 @@ pub fn load_json_with_backup<T: DeserializeOwned>(path: &Path) -> Result<T> {
     }
 }
 
-fn publish_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn publish_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .context("persistent file has no parent directory")?;

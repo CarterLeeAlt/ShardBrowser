@@ -244,30 +244,6 @@ enum TransferPhase {
     RollbackCleanup,
 }
 
-fn rollback_moves(moves: &[FileMove], completed: usize) -> Result<()> {
-    anyhow::ensure!(
-        completed <= moves.len(),
-        "Invalid profile transfer progress"
-    );
-    for index in (0..moves.len().min(completed + 1)).rev() {
-        let item = &moves[index];
-        // The next rename can have completed just before a crash, without its
-        // progress record. If its source still exists, it did not happen.
-        if index == completed && item.from.exists() {
-            continue;
-        }
-        match (item.from.exists(), item.to.exists()) {
-            (false, true) => fs::rename(&item.to, &item.from)?,
-            (true, false) => {}
-            _ => anyhow::bail!(
-                "profile transfer rollback conflict: {}",
-                item.from.display()
-            ),
-        }
-    }
-    Ok(())
-}
-
 fn cleanup_transfer_paths(paths: &[PathBuf]) -> Result<()> {
     for path in paths {
         if path.is_dir() {
@@ -287,15 +263,24 @@ pub(crate) fn transfer_files(
     cleanup_after: Vec<PathBuf>,
     cleanup_rollback: Vec<PathBuf>,
 ) -> Result<()> {
+    let mut planned = HashMap::new();
     for item in &moves {
+        let from_exists = *planned
+            .entry(item.from.clone())
+            .or_insert_with(|| item.from.exists());
+        let to_exists = *planned
+            .entry(item.to.clone())
+            .or_insert_with(|| item.to.exists());
         anyhow::ensure!(
-            item.from.exists() && !item.to.exists(),
+            from_exists && !to_exists,
             "profile transfer destination conflict: {}",
             item.to.display()
         );
         if let Some(parent) = item.to.parent() {
             fs::create_dir_all(parent)?;
         }
+        planned.insert(item.from.clone(), false);
+        planned.insert(item.to.clone(), true);
     }
     let mut operation = ProfileOperation::Transfer {
         moves,
@@ -335,10 +320,6 @@ pub(crate) fn transfer_files(
         persist_operation(&operation)
     })();
     if let Err(error) = result {
-        if let ProfileOperation::Transfer { phase, .. } = &mut operation {
-            *phase = TransferPhase::RollingBack;
-        }
-        persist_operation(&operation)?;
         recover_interrupted_operations_locked()
             .with_context(|| format!("{error}; transfer rollback incomplete"))?;
         return Err(error);
@@ -554,13 +535,45 @@ pub(crate) fn recover_interrupted_operations_locked() -> Result<()> {
         for id in profile_ids {
             ensure_stopped(id)?;
         }
-        match phase {
-            TransferPhase::Applying | TransferPhase::RollingBack => {
-                rollback_moves(moves, *completed)?;
-                *phase = TransferPhase::RollbackCleanup;
+        anyhow::ensure!(
+            *completed <= moves.len(),
+            "Invalid profile transfer progress"
+        );
+        if matches!(phase, TransferPhase::Applying) {
+            // The next rename can finish before its progress record is written.
+            if let Some(next) = moves.get(*completed) {
+                if !next.from.try_exists()? && next.to.try_exists()? {
+                    *completed += 1;
+                }
             }
-            _ => {}
+            *phase = TransferPhase::RollingBack;
+            persist_operation(&operation)?;
         }
+    }
+    while let ProfileOperation::Transfer {
+        moves,
+        phase: phase @ TransferPhase::RollingBack,
+        completed,
+        ..
+    } = &mut operation
+    {
+        if *completed == 0 {
+            *phase = TransferPhase::RollbackCleanup;
+            persist_operation(&operation)?;
+            break;
+        }
+        let item = &moves[*completed - 1];
+        match (item.from.try_exists()?, item.to.try_exists()?) {
+            (false, true) => fs::rename(&item.to, &item.from)?,
+            (true, false) => {}
+            _ => anyhow::bail!(
+                "profile transfer rollback conflict: {}",
+                item.from.display()
+            ),
+        }
+        // Checkpoint each reverse rename before restoring an earlier move that
+        // may reuse the same live path.
+        *completed -= 1;
         persist_operation(&operation)?;
     }
     match &operation {
@@ -722,13 +735,50 @@ pub fn purge_temporary() -> Result<usize> {
     Ok(n)
 }
 
+pub(crate) fn normalize_browser_settings(stored: &mut StoredProfile) -> Result<bool> {
+    use serde_json::Value;
+    let mut changed = false;
+    if let Some(dnt) = stored
+        .config
+        .get_mut("navigator")
+        .and_then(|nav| nav.get_mut("do_not_track"))
+    {
+        if !dnt.is_boolean() {
+            let enabled = match dnt {
+                Value::String(s) if s == "1" => true,
+                Value::String(s) if s == "0" => false,
+                Value::Null => false,
+                _ => anyhow::bail!("Invalid navigator.do_not_track; expected a boolean"),
+            };
+            *dnt = enabled.into();
+            changed = true;
+        }
+    }
+    if let Some(legacy) = stored.config.remove("blocked_ports") {
+        let network = stored
+            .config
+            .entry("network")
+            .or_insert_with(|| serde_json::json!({}));
+        let network = network
+            .as_object_mut()
+            .context("Invalid fingerprint network settings")?;
+        if let Some(current) = network.get("blocked_ports") {
+            anyhow::ensure!(*current == legacy, "Conflicting blocked port settings in profile {}; keep only network.blocked_ports after resolving the values", stored.meta.id);
+        } else {
+            network.insert("blocked_ports".into(), legacy);
+        }
+        changed = true;
+    }
+    Ok(changed)
+}
+
 pub fn load_raw(id: &str) -> Result<StoredProfile> {
     let path = path_for(id)?;
     anyhow::ensure!(
         path.try_exists()?,
         crate::errors::Failure::NotFound(format!("Profile {id} does not exist"))
     );
-    let stored: StoredProfile = store::load_json_with_backup(&path)
+    let mut stored: StoredProfile = store::load_json_with_backup(&path)
         .with_context(|| format!("load profile {}", path.display()))?;
     let has_legacy_inline_credentials = std::fs::read(&path)
         .ok()
@@ -736,7 +786,7 @@ pub fn load_raw(id: &str) -> Result<StoredProfile> {
         .and_then(|value| value.pointer("/_meta/inline_proxy").cloned())
         .and_then(|value| value.as_object().cloned())
         .is_some_and(|inline| inline.contains_key("username") || inline.contains_key("password"));
-    if has_legacy_inline_credentials {
+    if normalize_browser_settings(&mut stored)? || has_legacy_inline_credentials {
         let body = serde_json::to_vec_pretty(&stored)?;
         store::atomic_write_sensitive(&path, &body)?;
     }
@@ -1188,6 +1238,7 @@ pub fn enforce_session_network_identity(
 }
 
 pub fn save_raw(stored: &mut StoredProfile) -> Result<()> {
+    normalize_browser_settings(stored)?;
     let is_new = stored.meta.id.is_empty();
     if is_new {
         stored.meta.id = uuid::Uuid::new_v4().to_string();
@@ -1266,6 +1317,7 @@ pub fn delete(id: &str) -> Result<()> {
 /// noise seeds: a profile backup must retain the source browser's exact
 /// canvas/audio/WebGL identity.
 pub fn save_restored(stored: &mut StoredProfile) -> Result<()> {
+    normalize_browser_settings(stored)?;
     if stored.meta.id.is_empty() {
         anyhow::bail!("restored profile id is required");
     }
@@ -1719,6 +1771,93 @@ mod tests {
         assert!(!crate::store::profile_operation_journal_path()
             .unwrap()
             .exists());
+    }
+
+    #[test]
+    fn transfer_replacement_recovers_at_each_rename_checkpoint() {
+        use super::{FileMove, ProfileOperation, TransferPhase};
+        let test = crate::store::TestStore::new();
+        for (index, phase, completed, reversed) in [
+            (0, TransferPhase::Applying, 0, false),
+            (1, TransferPhase::Applying, 0, false),
+            (2, TransferPhase::Applying, 1, false),
+            (2, TransferPhase::RollingBack, 2, true),
+            (2, TransferPhase::CommitCleanup, 2, false),
+        ] {
+            let case = test.root.join(uuid::Uuid::new_v4().simple().to_string());
+            let stage = case.join("stage");
+            std::fs::create_dir_all(&stage).unwrap();
+            let live = case.join("runtime.json");
+            let backup = stage.join("previous.json");
+            let new = stage.join("runtime.json");
+            std::fs::write(&live, b"old").unwrap();
+            std::fs::write(&new, b"new").unwrap();
+            let moves = vec![
+                FileMove {
+                    from: live.clone(),
+                    to: backup,
+                },
+                FileMove {
+                    from: new,
+                    to: live.clone(),
+                },
+            ];
+            for item in moves.iter().take(index) {
+                std::fs::rename(&item.from, &item.to).unwrap();
+            }
+            if reversed {
+                std::fs::rename(&moves[1].to, &moves[1].from).unwrap();
+            }
+            let expected: &[u8] = if matches!(phase, TransferPhase::CommitCleanup) {
+                b"new"
+            } else {
+                b"old"
+            };
+            super::persist_operation(&ProfileOperation::Transfer {
+                moves,
+                profile_ids: Vec::new(),
+                cleanup_after: vec![stage.clone()],
+                cleanup_rollback: vec![stage.clone()],
+                phase,
+                completed,
+            })
+            .unwrap();
+            super::recover_interrupted_operations().unwrap();
+            assert_eq!(std::fs::read(&live).unwrap(), expected);
+            assert!(!stage.exists());
+        }
+    }
+
+    #[test]
+    fn stored_browser_settings_normalize_without_discarding_conflicts() {
+        let _test = crate::store::TestStore::new();
+        let path = super::path_for("browser-settings").unwrap();
+        let mut old = json!({"_meta":{"id":"browser-settings"},"name":"Browser settings",
+            "navigator":{"do_not_track":"1","language":"en-US"},"blocked_ports":[8443],"network":{"sentinel":7}});
+        std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let updated = super::load_raw("browser-settings").unwrap();
+        assert_eq!(
+            updated.config["navigator"],
+            json!({"do_not_track":true,"language":"en-US"})
+        );
+        assert_eq!(
+            updated.config["network"],
+            json!({"blocked_ports":[8443],"sentinel":7})
+        );
+        assert!(!updated.config.contains_key("blocked_ports"));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            std::fs::read(crate::store::backup_path(&path).unwrap()).unwrap()
+        );
+
+        old["network"]["blocked_ports"] = json!([9443]);
+        let conflicting = serde_json::to_vec(&old).unwrap();
+        std::fs::write(&path, &conflicting).unwrap();
+        assert!(super::load_raw("browser-settings")
+            .unwrap_err()
+            .to_string()
+            .contains("Conflicting blocked port settings"));
+        assert_eq!(std::fs::read(&path).unwrap(), conflicting);
     }
 
     fn identity(country_code: &str, timezone: &str) -> SessionNetworkIdentity {

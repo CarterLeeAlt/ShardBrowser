@@ -4015,6 +4015,7 @@ type RtStatus = {
   fingerprints_installed: boolean;
   widevine_installed: boolean;
   migration_pending: boolean;
+  repair_requires_upgrade: boolean;
 };
 type RtProgress = {
   label: string;
@@ -4025,7 +4026,7 @@ type RtProgress = {
 };
 
 type RtGatePhase = "checking" | "repair-required" | "installing" | "ready";
-type RtInstallMode = "setup" | "repair";
+type RtInstallMode = "setup" | "repair" | "upgrade";
 
 function FirstRunGate({ children }: { children: ReactNode }) {
   const [phase, setPhase] = useState<RtGatePhase>("checking");
@@ -4065,7 +4066,9 @@ function FirstRunGate({ children }: { children: ReactNode }) {
         });
         if (cancelled) return;
 
-        const result = await invoke<RtStatus>("runtime_install", { force });
+        const result = mode === "upgrade"
+          ? await invoke<RtStatus>("runtime_apply_updates", { component: "chromium" })
+          : await invoke<RtStatus>("runtime_install", { force });
         if (cancelled) return;
         if (!result.installed || !result.fingerprints_installed || !result.widevine_installed) {
           throw new Error(tr("Browser runtime installation did not complete"));
@@ -4116,12 +4119,13 @@ function FirstRunGate({ children }: { children: ReactNode }) {
 
       // Only a genuinely new installation starts downloading automatically.
       // A previously initialized but damaged runtime waits for explicit repair.
+      const repairMode = status.repair_requires_upgrade ? "upgrade" : "repair";
       if (!status.initialized && !status.installed) {
         await installRuntime("setup", false);
       } else if (repairAttempt > 0) {
-        await installRuntime("repair", true);
+        await installRuntime(repairMode, true);
       } else {
-        setInstallMode("repair");
+        setInstallMode(repairMode);
         setPhase("repair-required");
       }
     })();
@@ -4146,8 +4150,15 @@ function FirstRunGate({ children }: { children: ReactNode }) {
     : phase === "repair-required"
       ? {
           title: tr("Browser runtime needs repair"),
-          description: tr("Required local files are missing or incomplete. Nothing will be downloaded until you choose Repair."),
+          description: installMode === "upgrade"
+            ? tr("The installed runtime snapshot is unavailable for repair.")
+            : tr("Required local files are missing or incomplete. Nothing will be downloaded until you choose Repair."),
         }
+      : installMode === "upgrade"
+        ? {
+            title: tr("Updating ShardX browser"),
+            description: tr("Installing this launcher's pinned runtime."),
+          }
       : installMode === "repair"
         ? {
             title: tr("Repairing ShardX browser"),
@@ -4192,7 +4203,9 @@ function FirstRunGate({ children }: { children: ReactNode }) {
         )}
         {phase === "repair-required" && (
           <button className="btn-primary runtime-repair-btn" onClick={() => setRepairAttempt((attempt) => attempt + 1)}>
-            <Icon.Refresh size={16} /> {err ? tr("Retry browser runtime repair") : tr("Repair browser runtime")}
+            <Icon.Refresh size={16} /> {installMode === "upgrade"
+              ? tr("Update to pinned runtime")
+              : err ? tr("Retry browser runtime repair") : tr("Repair browser runtime")}
           </button>
         )}
       </div>
@@ -4350,7 +4363,7 @@ function RuntimeUpdateCard() {
     ? result.chromium_installed
       ? tr("Installed {0} · Latest {1}", result.chromium_installed_version ?? "unknown", result.chromium_latest_version ?? "unknown")
       : tr("The local Chromium runtime is incomplete.")
-    : tr("Compare the installed browser engine with the latest runtime manifest.");
+    : tr("Compare the installed browser engine with the runtime pinned to this launcher.");
   const lastAttempt = snapshot?.last_attempt_at ?? null;
   const lastSuccess = snapshot?.last_success_at ?? null;
   const checkError = snapshot?.error ?? null;
@@ -4361,7 +4374,7 @@ function RuntimeUpdateCard() {
         <div className="settings-card-heading">
           <h3>{tr("Runtime update check")}</h3>
           <p className="muted">
-             {tr("Checks run automatically at startup and every hour. Updates download and install only when you click Update.")} </p>
+             {tr("The launcher installs only its pinned runtime when you click Update.")} </p>
           <p className="runtime-update-last-check">
             {lastAttempt
               ? tr("Last checked {0}", fmtTs(lastAttempt))
@@ -4458,12 +4471,13 @@ function VersionPill() {
 }
 
 function SettingsView({ workspaceBackup }: { workspaceBackup: ReturnType<typeof useWorkspaceBackup> }) {
+  const defaultApiPort = 30325;
   const [s, setS] = useState<Settings>({
     theme: "dark",
     geo_checker: "ipwho.is",
     screen_resolution_mode: "fingerprint",
     api_enabled: true,
-    api_port: 40325,
+    api_port: defaultApiPort,
   });
   const [api, setApi] = useState<ApiInfo | null>(null);
   const refreshApi = () => invoke<ApiInfo>("api_info").then(setApi).catch(e => toast.err(String(e)));
@@ -4564,8 +4578,8 @@ function SettingsView({ workspaceBackup }: { workspaceBackup: ReturnType<typeof 
           <span className="lbl">{tr("Port")}</span>
           <input
             type="number"
-            value={s.api_port ?? 40325}
-            onChange={(e) => setS({ ...s, api_port: Number(e.target.value) || 40325 })}
+            value={s.api_port ?? defaultApiPort}
+            onChange={(e) => setS({ ...s, api_port: Number(e.target.value) || defaultApiPort })}
           />
         </label>
         {api && (

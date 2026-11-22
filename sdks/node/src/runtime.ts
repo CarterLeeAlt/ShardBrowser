@@ -85,10 +85,10 @@ interface Manifest {
   browser_etag?: string;
   widevine_etag?: string;
   fingerprints_etag?: string;
-  /** Chromium version of the engine binary last extracted on disk. The update
-   *  is detected by comparing this (or the on-disk version) to the manifest's
-   *  chromium version — robust where the etag check failed. */
+  /** Version recorded for the installed archives. */
   installed_chromium_version?: string;
+  grease_brand?: string;
+  grease_version?: string;
 }
 
 export class Runtime {
@@ -142,11 +142,11 @@ export class Runtime {
 
   /** Chromium version of the engine actually on disk (mac Framework
    *  `Versions/<ver>/`, win `<ver>.manifest`), or undefined on Linux. */
-  private installedEngineVersion(): string | undefined {
+  private installedEngineVersion(root = this.root): string | undefined {
     try {
       const plat = osPlatform();
       if (plat === "darwin") {
-        const versions = join(this.root, "ShardX-Mac-arm64", "ShardX.app", "Contents",
+        const versions = join(root, "ShardX-Mac-arm64", "ShardX.app", "Contents",
           "Frameworks", "ShardX Framework.framework", "Versions");
         const v = readdirSync(versions).find((n) => n !== "Current" && /^\d/.test(n));
         return v;
@@ -154,21 +154,18 @@ export class Runtime {
       if (plat === "win32") {
         // Only accept a `<version>.manifest` whose stem parses as a version,
         // so a stray/leftover manifest can't feed a bogus version.
-        return readdirSync(join(this.root, "ShardX-Windows"))
+        return readdirSync(join(root, "ShardX-Windows"))
           .filter((f) => f.endsWith(".manifest"))
           .map((f) => f.replace(/\.manifest$/, ""))
-          .find((s) => /^\d/.test(s) && s.includes("."));
+          .find((s) => /^\d+\.\d+\.\d+\.\d+$/.test(s));
       }
       return undefined; // linux: no on-disk version marker
     } catch { return undefined; }
   }
 
-  /** Effective installed version. Trusts the version recorded at install time
-   *  (authoritative — written only after a successful extract) over re-reading
-   *  it off disk, which can carry stale files from a previous version. On-disk
-   *  detection is the fallback for legacy installs with no recorded version. */
+  /** Prefer the installed engine's version marker where the platform has one. */
   private effectiveInstalledVersion(local: Manifest): string | undefined {
-    return local.installed_chromium_version ?? this.installedEngineVersion();
+    return this.installedEngineVersion() ?? local.installed_chromium_version;
   }
 
   // ---- manifest ----
@@ -194,45 +191,29 @@ export class Runtime {
     if (this._checkedInProcess && !force) return;
     this.recoverInterruptedSwaps();
     const local = this.loadManifest();
+    if (this.installed && !force) {
+      const version = this.effectiveInstalledVersion(local);
+      if (!version) throw new Error("Cannot identify the installed ShardX runtime. Explicitly reinstall it before launching.");
+      this._chromiumVersion = version;
+      if (version === local.installed_chromium_version) {
+        this._greaseBrand = local.grease_brand;
+        this._greaseVersion = local.grease_version;
+      }
+      this._checkedInProcess = true;
+      return;
+    }
     const remote = await this.fetchManifest();
-    // Remember the engine version + grease so launch can normalise profiles.
-    this._chromiumVersion = remote.chromiumVersion ?? CHROMIUM_VERSION;
-    this._greaseBrand = remote.greaseBrand;
-    this._greaseVersion = remote.greaseVersion;
-
-    // Re-download the engine when its on-disk version differs from the
-    // manifest's chromium version — VERSION-based, not etag, so it fires for
-    // users who updated the SDK but whose stored etag already matched. Manifest
-    // unreachable (undefined) → don't force a re-download when installed.
-    let needBrowser = force || !this.installed;
-    if (!needBrowser && remote.chromiumVersion !== undefined) {
-      needBrowser = this.effectiveInstalledVersion(local) !== remote.chromiumVersion;
-    }
-    if (needBrowser) {
-      const installed = await this.installCompleteRuntime();
-      local.browser_etag = installed.browserEtag;
-      local.widevine_etag = installed.widevineEtag;
-    } else if (this.spec.widevine && !local.widevine_etag) {
-      local.widevine_etag = await this.installWidevine();
-    }
+    if (!remote.chromiumVersion) throw new Error("Cannot install the SDK runtime without version metadata.");
     const remoteFp = remote.archives[FINGERPRINTS_ARCHIVE.key];
     const fpDirHasJson = readdirSync(this.fingerprintsDir).some((f) => f.endsWith(".json"));
-    if (force || !fpDirHasJson || (remoteFp !== undefined && local.fingerprints_etag !== remoteFp)) {
-      await this.installFingerprints();
-      if (remoteFp !== undefined) local.fingerprints_etag = remoteFp;
-    }
-    // Authoritative: we just extracted exactly this version (old tree wiped
-    // first). Recording the known value beats re-reading it off disk.
-    local.installed_chromium_version = this._chromiumVersion;
-    this.saveManifest(local);
-
-    // Linux/mac archives produced on Windows lose every Unix exec bit;
-    // restore +x on every ELF/Mach-O file under the engine tree (not
-    // just the main binary — chrome spawns chrome_crashpad_handler,
-    // chrome_sandbox, etc., and they need the exec bit too).
-    if (osPlatform() !== "win32") {
-      fixUnixExecBits(this.root);
-    }
+    const seed = force || !fpDirHasJson || local.fingerprints_etag !== remoteFp;
+    const version = await this.installCompleteRuntime(remote.archives, seed, {
+      ...local, installed_chromium_version: remote.chromiumVersion,
+      grease_brand: remote.greaseBrand, grease_version: remote.greaseVersion,
+    });
+    this._chromiumVersion = version;
+    this._greaseBrand = remote.greaseBrand;
+    this._greaseVersion = remote.greaseVersion;
     this._checkedInProcess = true;
   }
 
@@ -256,52 +237,39 @@ export class Runtime {
     } catch { return { archives: {} }; }
   }
 
-  private async installCompleteRuntime(): Promise<{ browserEtag: string; widevineEtag?: string }> {
+  private async installCompleteRuntime(archives: Record<string, string>, seed: boolean, manifest: Manifest): Promise<string> {
     const stage = join(this.root, ".runtime-stage");
     rmSync(stage, { recursive: true, force: true });
     mkdirSync(stage, { recursive: true });
     try {
-      const browserEtag = await this.downloadAndExtract(this.spec.browser, stage);
-      let widevineEtag: string | undefined;
+      manifest.browser_etag = await this.downloadAndExtract(this.spec.browser, stage, archives[this.spec.browser.key]);
+      manifest.installed_chromium_version = this.installedEngineVersion(stage) ?? manifest.installed_chromium_version!;
       if (this.spec.widevine) {
-        widevineEtag = await this.downloadAndExtract(this.spec.widevine, stage);
+        manifest.widevine_etag = await this.downloadAndExtract(this.spec.widevine, stage, archives[this.spec.widevine.key]);
         this.placeWidevine(stage);
       }
       this.validateRuntime(stage, !!this.spec.widevine);
       if (osPlatform() !== "win32") fixUnixExecBits(stage);
+      const stagedFingerprints = join(stage, "incoming-fingerprints");
+      if (seed) {
+        manifest.fingerprints_etag = await this.downloadAndExtract(FINGERPRINTS_ARCHIVE, stagedFingerprints, archives[FINGERPRINTS_ARCHIVE.key]);
+      }
       this.replaceDirectory(
         join(stage, this.spec.binarySubpath[0]),
         join(this.root, this.spec.binarySubpath[0]),
         join(this.root, `.${this.spec.binarySubpath[0]}.rollback`),
+        () => {
+          if (seed) this.seedFingerprints(stagedFingerprints);
+          this.saveManifest(manifest);
+        },
       );
-      return { browserEtag, widevineEtag };
+      return manifest.installed_chromium_version;
     } finally {
       rmSync(stage, { recursive: true, force: true });
     }
   }
 
-  private async installWidevine(): Promise<string> {
-    if (!this.spec.widevine) throw new Error("Widevine is unavailable on this host");
-    const stage = join(this.root, ".runtime-stage");
-    rmSync(stage, { recursive: true, force: true });
-    mkdirSync(stage, { recursive: true });
-    try {
-      const etag = await this.downloadAndExtract(this.spec.widevine, stage);
-      this.placeWidevine(stage);
-      const staged = join(stage, ...this.spec.widevineSubpath);
-      this.validateWidevine(staged);
-      this.replaceDirectory(
-        staged,
-        join(this.root, ...this.spec.widevineSubpath),
-        join(this.root, ".WidevineCdm.rollback"),
-      );
-      return etag;
-    } finally {
-      rmSync(stage, { recursive: true, force: true });
-    }
-  }
-
-  private replaceDirectory(staged: string, live: string, rollback: string): void {
+  private replaceDirectory(staged: string, live: string, rollback: string, commit: () => void): void {
     if (!existsSync(staged) || !statSync(staged).isDirectory()) {
       throw new Error(`staged Runtime directory is missing: ${staged}`);
     }
@@ -310,8 +278,10 @@ export class Runtime {
     if (hadLive) renameSync(live, rollback);
     try {
       renameSync(staged, live);
+      commit();
     } catch (error) {
-      if (hadLive && existsSync(rollback) && !existsSync(live)) renameSync(rollback, live);
+      if (existsSync(live) && !existsSync(staged)) renameSync(live, staged);
+      if (hadLive) renameSync(rollback, live);
       throw error;
     }
     try {
@@ -360,7 +330,8 @@ export class Runtime {
     }
   }
 
-  private async downloadAndExtract(arch: Archive, dest: string): Promise<string> {
+  private async downloadAndExtract(arch: Archive, dest: string, expectedEtag: string | undefined): Promise<string> {
+    if (!expectedEtag) throw new Error(`SDK runtime manifest has no ETag for ${arch.key}.`);
     const url = `${PUB_BASE}/${arch.key}`;
     mkdirSync(dest, { recursive: true });
     const tmp = join(dest, `.${arch.key}.tmp`);
@@ -373,9 +344,10 @@ export class Runtime {
     };
     resetInactivityTimeout();
     try {
-      const r = await fetch(url, { signal: controller.signal });
+      const r = await fetch(url, { signal: controller.signal, headers: { "If-Match": `"${expectedEtag}"` } });
       if (!r.ok || !r.body) throw new Error(`download ${arch.key}: HTTP ${r.status}`);
       const etag = r.headers.get("etag")?.replace(/^"|"$/g, "") ?? "";
+      if (etag !== expectedEtag) throw new Error(`${arch.key} differs from the selected SDK manifest.`);
       const total = Number(r.headers.get("content-length") ?? 0);
       if (Number.isFinite(total) && total > MAX_ARCHIVE_BYTES) {
         throw new Error(`${arch.key} exceeds the 16 GiB archive limit`);
@@ -423,20 +395,12 @@ export class Runtime {
     rmSync(join(root, wrapper), { recursive: true, force: true });
   }
 
-  private async installFingerprints(): Promise<void> {
-    const staging = join(this.fingerprintsDir, ".staging");
-    if (existsSync(staging)) rmSync(staging, { recursive: true, force: true });
-    mkdirSync(staging, { recursive: true });
-    try {
-      await this.downloadAndExtract(FINGERPRINTS_ARCHIVE, staging);
-      const srcDir = join(staging, FINGERPRINTS_TOP_DIR);
-      const walk = existsSync(srcDir) ? srcDir : staging;
-      for (const name of readdirSync(walk)) {
-        if (!name.endsWith(".json")) continue;
-        copyFileSync(join(walk, name), join(this.fingerprintsDir, name));
-      }
-    } finally {
-      rmSync(staging, { recursive: true, force: true });
+  private seedFingerprints(staging: string): void {
+    const srcDir = join(staging, FINGERPRINTS_TOP_DIR);
+    const walk = existsSync(srcDir) ? srcDir : staging;
+    for (const name of readdirSync(walk)) {
+      if (!name.endsWith(".json")) continue;
+      copyFileSync(join(walk, name), join(this.fingerprintsDir, name));
     }
   }
 }

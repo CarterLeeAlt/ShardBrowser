@@ -8,7 +8,7 @@
 //      (a stealth-patched Playwright) so the automation stays undetected.
 //
 // Config via env:
-//   SHARDX_API    base URL of the launcher API  (default http://127.0.0.1:40325)
+//   SHARDX_API    base URL of the launcher API  (default http://127.0.0.1:30325)
 //   SHARDX_TOKEN  Bearer token from Settings → Automation API  (required)
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -16,7 +16,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { chromium } from "patchright";
 
-const API = (process.env.SHARDX_API || "http://127.0.0.1:40325").replace(/\/+$/, "");
+const API = (process.env.SHARDX_API || "http://127.0.0.1:30325").replace(/\/+$/, "");
 const TOKEN = process.env.SHARDX_TOKEN || "";
 const API_TIMEOUT_MS = 30_000;
 const MAX_HTTP_BODY_BYTES = 4 * 1024 * 1024;

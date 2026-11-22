@@ -144,6 +144,8 @@ struct Manifest {
     /// the on-disk version marker can't be read (e.g. Linux).
     #[serde(default)]
     installed_chromium_version: Option<String>,
+    grease_brand: Option<String>,
+    grease_version: Option<String>,
 }
 
 pub struct Runtime {
@@ -225,11 +227,10 @@ impl Runtime {
     /// Chromium version of the engine actually on disk — read from the mac
     /// Framework `Versions/<ver>/` dir or the win `<ver>.manifest` file. `None`
     /// on Linux (no on-disk version marker) or when unreadable.
-    fn installed_engine_version(&self) -> Option<String> {
+    fn installed_engine_version(_root: &Path) -> Option<String> {
         #[cfg(target_os = "macos")]
         {
-            let versions = self
-                .root
+            let versions = _root
                 .join("ShardX-Mac-arm64")
                 .join("ShardX.app")
                 .join("Contents")
@@ -248,14 +249,13 @@ impl Runtime {
         {
             // Only accept a `<version>.manifest` whose stem parses as a version,
             // so a stray/leftover manifest can't pin a bogus version.
-            for ent in fs::read_dir(self.root.join("ShardX-Windows"))
-                .ok()?
-                .flatten()
-            {
+            for ent in fs::read_dir(_root.join("ShardX-Windows")).ok()?.flatten() {
                 let p = ent.path();
                 if p.extension().and_then(|s| s.to_str()) == Some("manifest") {
                     if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                        if stem.contains('.') && stem.starts_with(|c: char| c.is_ascii_digit()) {
+                        if stem.split('.').count() == 4
+                            && stem.split('.').all(|part| part.parse::<u16>().is_ok())
+                        {
                             return Some(stem.to_string());
                         }
                     }
@@ -269,15 +269,10 @@ impl Runtime {
         }
     }
 
-    /// Effective installed version. Trusts the version recorded at install time
-    /// (authoritative — written only after a successful extract) over re-reading
-    /// it off disk, which can carry stale files from a previous version. On-disk
-    /// detection is the fallback for legacy installs with no recorded version.
+    /// Prefer the installed engine's version marker where available.
     fn effective_installed_version(&self, local: &Manifest) -> Option<String> {
-        local
-            .installed_chromium_version
-            .clone()
-            .or_else(|| self.installed_engine_version())
+        Self::installed_engine_version(&self.root)
+            .or_else(|| local.installed_chromium_version.clone())
     }
 
     fn load_manifest(&self) -> Manifest {
@@ -296,8 +291,7 @@ impl Runtime {
         Ok(())
     }
 
-    /// Ensure the engine + Widevine + fingerprints are present and current.
-    /// Cheap no-op after the first successful call in-process unless `force`.
+    /// Use the installed engine; download archives only on first install or force.
     pub async fn install(&self, force: bool) -> Result<()> {
         let _install_guard = self.install_lock.lock().await;
         if self.checked.load(Ordering::Relaxed) && !force {
@@ -305,32 +299,17 @@ impl Runtime {
         }
         self.recover_interrupted_swaps()?;
         let mut local = self.load_manifest();
-        let remote = fetch_manifest().await;
-        // Remember the engine version + grease so launch can normalise profiles.
-        *self.engine_version.lock().unwrap() = remote
-            .chromium_version
-            .clone()
-            .unwrap_or_else(|| CHROMIUM_VERSION.to_string());
-        *self.grease.lock().unwrap() = (remote.grease_brand.clone(), remote.grease_version.clone());
-
-        // Re-download when the engine's on-disk version differs from the
-        // manifest's chromium version — VERSION-based, not etag, so it fires for
-        // users who updated the SDK but whose stored etag already matched. A None
-        // manifest (unreachable) must NOT force a re-download when installed.
-        let mut need_browser = force || !self.installed();
-        if !need_browser {
-            if let Some(rv) = remote.chromium_version.as_deref() {
-                need_browser = self.effective_installed_version(&local).as_deref() != Some(rv);
+        if self.installed() && !force {
+            let version = self.effective_installed_version(&local)
+                .context("Cannot identify the installed ShardX runtime. Explicitly reinstall it before launching.")?;
+            if local.installed_chromium_version.as_deref() == Some(&version) {
+                *self.grease.lock().unwrap() = (local.grease_brand, local.grease_version);
             }
+            *self.engine_version.lock().unwrap() = version;
+            self.checked.store(true, Ordering::Relaxed);
+            return Ok(());
         }
-        if need_browser {
-            let (browser_etag, widevine_etag) = self.install_complete_runtime().await?;
-            local.browser_etag = Some(browser_etag);
-            local.widevine_etag = widevine_etag;
-        } else if local.widevine_etag.is_none() && self.spec.widevine.is_some() {
-            local.widevine_etag = Some(self.install_widevine().await?);
-        }
-
+        let remote = fetch_manifest().await;
         let remote_fp = remote.archives.get(FINGERPRINTS_KEY);
         let fp_has_json = fs::read_dir(self.fingerprints_dir())
             .map(|it| {
@@ -338,49 +317,60 @@ impl Runtime {
                     .any(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
             })
             .unwrap_or(false);
-        let need_fp = force
-            || !fp_has_json
-            || remote_fp
-                .map(|rf| local.fingerprints_etag.as_deref() != Some(rf.as_str()))
-                .unwrap_or(false);
-        if need_fp {
-            self.install_fingerprints().await?;
-            if let Some(rf) = remote_fp {
-                local.fingerprints_etag = Some(rf.clone());
-            }
-        }
-
-        // Authoritative: we just extracted exactly this version (old tree wiped
-        // first). Recording the known value beats re-reading it off disk.
-        local.installed_chromium_version = Some(self.chromium_version());
-
-        self.save_manifest(&local)?;
-
-        #[cfg(unix)]
-        fix_unix_exec_bits(&self.root);
-
+        let seed = force || !fp_has_json || local.fingerprints_etag.as_ref() != remote_fp;
+        local.installed_chromium_version = Some(
+            remote
+                .chromium_version
+                .context("Cannot install the SDK runtime without version metadata")?,
+        );
+        local.grease_brand = remote.grease_brand;
+        local.grease_version = remote.grease_version;
+        self.install_complete_runtime(&remote.archives, seed, &mut local)
+            .await?;
+        *self.engine_version.lock().unwrap() = local.installed_chromium_version.unwrap();
+        *self.grease.lock().unwrap() = (local.grease_brand, local.grease_version);
         self.checked.store(true, Ordering::Relaxed);
         Ok(())
     }
 
-    async fn install_complete_runtime(&self) -> Result<(String, Option<String>)> {
+    async fn install_complete_runtime(
+        &self,
+        archives: &std::collections::HashMap<String, String>,
+        seed: bool,
+        manifest: &mut Manifest,
+    ) -> Result<()> {
         let stage = self.root.join(".runtime-stage");
         let _ = fs::remove_dir_all(&stage);
         fs::create_dir_all(&stage)?;
         let result = async {
-            let browser_etag = self
-                .download_and_extract(&self.spec.browser, &stage)
-                .await?;
-            let widevine_etag = if let Some(widevine) = &self.spec.widevine {
-                let etag = self.download_and_extract(widevine, &stage).await?;
+            manifest.browser_etag = Some(
+                self.download_and_extract(&self.spec.browser, &stage, archives)
+                    .await?,
+            );
+            if let Some(version) = Self::installed_engine_version(&stage) {
+                manifest.installed_chromium_version = Some(version);
+            }
+            if let Some(widevine) = &self.spec.widevine {
+                manifest.widevine_etag = Some(
+                    self.download_and_extract(widevine, &stage, archives)
+                        .await?,
+                );
                 self.place_widevine(&stage)?;
-                Some(etag)
-            } else {
-                None
-            };
+            }
             self.validate_runtime(&stage, self.spec.widevine.is_some())?;
             #[cfg(unix)]
             fix_unix_exec_bits(&stage);
+            let incoming = stage.join("incoming-fingerprints");
+            if seed {
+                let archive = Archive {
+                    key: FINGERPRINTS_KEY.into(),
+                    label: "Fingerprint library".into(),
+                };
+                manifest.fingerprints_etag = Some(
+                    self.download_and_extract(&archive, &incoming, archives)
+                        .await?,
+                );
+            }
             let engine_name = self
                 .spec
                 .binary_subpath
@@ -390,34 +380,13 @@ impl Runtime {
                 &stage.join(engine_name),
                 &self.root.join(engine_name),
                 &self.root.join(format!(".{engine_name}.rollback")),
-            )?;
-            Ok::<_, anyhow::Error>((browser_etag, widevine_etag))
-        }
-        .await;
-        let _ = fs::remove_dir_all(&stage);
-        result
-    }
-
-    async fn install_widevine(&self) -> Result<String> {
-        let widevine = self
-            .spec
-            .widevine
-            .as_ref()
-            .context("Widevine unavailable")?;
-        let stage = self.root.join(".runtime-stage");
-        let _ = fs::remove_dir_all(&stage);
-        fs::create_dir_all(&stage)?;
-        let result = async {
-            let etag = self.download_and_extract(widevine, &stage).await?;
-            self.place_widevine(&stage)?;
-            let staged = joined(&stage, &self.spec.widevine_subpath);
-            validate_widevine(&staged)?;
-            replace_directory(
-                &staged,
-                &joined(&self.root, &self.spec.widevine_subpath),
-                &self.root.join(".WidevineCdm.rollback"),
-            )?;
-            Ok::<_, anyhow::Error>(etag)
+                || {
+                    if seed {
+                        self.seed_fingerprints(&incoming)?;
+                    }
+                    self.save_manifest(manifest)
+                },
+            )
         }
         .await;
         let _ = fs::remove_dir_all(&stage);
@@ -485,7 +454,15 @@ impl Runtime {
         Ok(())
     }
 
-    async fn download_and_extract(&self, archive: &Archive, dest: &Path) -> Result<String> {
+    async fn download_and_extract(
+        &self,
+        archive: &Archive,
+        dest: &Path,
+        archives: &std::collections::HashMap<String, String>,
+    ) -> Result<String> {
+        let expected = archives
+            .get(&archive.key)
+            .with_context(|| format!("SDK runtime manifest has no ETag for {}", archive.key))?;
         let url = format!("{PUB_BASE}/{}", archive.key);
         fs::create_dir_all(dest)?;
         let tmp = dest.join(format!(".{}.tmp", archive.key));
@@ -496,6 +473,7 @@ impl Runtime {
             .build()?;
         let mut resp = client
             .get(&url)
+            .header(reqwest::header::IF_MATCH, format!("\"{expected}\""))
             .send()
             .await?
             .error_for_status()
@@ -510,6 +488,11 @@ impl Runtime {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.trim_matches('"').to_string())
             .unwrap_or_default();
+        anyhow::ensure!(
+            &etag == expected,
+            "{} differs from the selected SDK manifest",
+            archive.key
+        );
 
         let operation = async {
             let mut out = tokio::fs::File::create(&tmp).await?;
@@ -537,33 +520,18 @@ impl Runtime {
         operation
     }
 
-    async fn install_fingerprints(&self) -> Result<()> {
+    fn seed_fingerprints(&self, staging: &Path) -> Result<()> {
         let dir = self.fingerprints_dir();
-        let staging = dir.join(".staging");
-        let _ = fs::remove_dir_all(&staging);
-        fs::create_dir_all(&staging)?;
-        let archive = Archive {
-            key: FINGERPRINTS_KEY.into(),
-            label: "Fingerprint library".into(),
-        };
-        let result = async {
-            self.download_and_extract(&archive, &staging).await?;
-            let src = staging.join(FINGERPRINTS_TOP_DIR);
-            let walk = if src.exists() { src } else { staging.clone() };
-            for ent in fs::read_dir(&walk)? {
-                let ent = ent?;
-                let p = ent.path();
-                if p.extension().and_then(|s| s.to_str()) != Some("json") {
-                    continue;
-                }
-                let dst = dir.join(p.file_name().unwrap());
-                fs::copy(&p, &dst)?;
+        let src = staging.join(FINGERPRINTS_TOP_DIR);
+        let walk = if src.is_dir() { src.as_path() } else { staging };
+        for ent in fs::read_dir(walk)? {
+            let ent = ent?;
+            let path = ent.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                fs::copy(path, dir.join(ent.file_name()))?;
             }
-            Ok::<_, anyhow::Error>(())
         }
-        .await;
-        let _ = fs::remove_dir_all(&staging);
-        result
+        Ok(())
     }
 
     fn place_widevine(&self, root: &Path) -> Result<()> {
@@ -611,7 +579,12 @@ fn validate_widevine(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn replace_directory(staged: &Path, live: &Path, rollback: &Path) -> Result<()> {
+fn replace_directory(
+    staged: &Path,
+    live: &Path,
+    rollback: &Path,
+    commit: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     if !staged.is_dir() {
         anyhow::bail!("staged Runtime directory is missing: {}", staged.display());
     }
@@ -622,7 +595,17 @@ fn replace_directory(staged: &Path, live: &Path, rollback: &Path) -> Result<()> 
     if had_live {
         fs::rename(live, rollback)?;
     }
-    if let Err(error) = fs::rename(staged, live) {
+    let published = fs::rename(staged, live)
+        .with_context(|| format!("publish staged Runtime {}", live.display()));
+    let committed = match published {
+        Ok(()) => commit().or_else(|error| {
+            fs::rename(live, staged)
+                .with_context(|| format!("{error:#}; cannot move the staged Runtime back"))?;
+            Err(error)
+        }),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = committed {
         if had_live {
             if let Err(rollback_error) = fs::rename(rollback, live) {
                 anyhow::bail!(
@@ -630,7 +613,7 @@ fn replace_directory(staged: &Path, live: &Path, rollback: &Path) -> Result<()> 
                 );
             }
         }
-        return Err(error).context("publish staged Runtime");
+        return Err(error);
     }
     if rollback.exists() {
         if let Err(error) = fs::remove_dir_all(rollback) {
@@ -854,4 +837,33 @@ fn fix_unix_exec_bits(root: &Path) {
         }
     }
     walk(root);
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn installed_runtime_uses_disk_version_without_rewriting_metadata() -> Result<()> {
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+        let root = target.join(format!("runtime-test-{}", rand::random::<u64>()));
+        let runtime = Runtime::new(Some(root.clone()), None, None)?;
+        let binary = runtime.binary_path();
+        let engine = binary.parent().context("test engine path")?;
+        fs::create_dir_all(engine)?;
+        fs::write(&binary, b"fixture")?;
+        fs::write(engine.join("158.0.8127.36.manifest"), b"fixture")?;
+        let saved = br#"{"installed_chromium_version":"152.0.7977.65","browser_etag":"previous"}"#;
+        fs::write(runtime.manifest_path(), saved)?;
+
+        runtime.install(false).await?;
+        assert_eq!(runtime.chromium_version(), "158.0.8127.36");
+        assert_eq!(fs::read(runtime.manifest_path())?, saved);
+        assert_eq!(fs::read(binary)?, b"fixture");
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }

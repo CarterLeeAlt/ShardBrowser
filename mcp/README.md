@@ -33,7 +33,7 @@ PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PATCHRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci
       "command": "node",
       "args": ["/ABSOLUTE/PATH/TO/LAUNCHER-DATA/mcp/index.js"],
       "env": {
-        "SHARDX_API": "http://127.0.0.1:40325",
+        "SHARDX_API": "http://127.0.0.1:30325",
         "SHARDX_TOKEN": "<Bearer token from Settings → Automation API>"
       }
     }
@@ -47,14 +47,14 @@ PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PATCHRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci
 情况下运行——此时它会在 `http://127.0.0.1:<port>/mcp` 提供服务：
 
 ```bash
-MCP_HTTP_PORT=40326 SHARDX_API=http://127.0.0.1:40325 SHARDX_TOKEN=… node index.js
+MCP_HTTP_PORT=40326 SHARDX_API=http://127.0.0.1:30325 SHARDX_TOKEN=… node index.js
 ```
 
 ## 环境变量
 
 | 变量            | 默认值                   | 说明                                                |
 | --------------- | ------------------------ | --------------------------------------------------- |
-| `SHARDX_API`    | `http://127.0.0.1:40325` | 启动器 API 的 base URL。                            |
+| `SHARDX_API`    | `http://127.0.0.1:30325` | 启动器 API 的地址；若已在 Launcher 中保存其他端口，填写侧栏显示的地址。 |
 | `SHARDX_TOKEN`  | —                        | Bearer token（Settings 中获取）。必填。             |
 | `MCP_HTTP_PORT` | — (stdio)                | 设置后，在 `127.0.0.1:<port>/mcp` 上提供 HTTP 服务。 |
 

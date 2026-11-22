@@ -219,13 +219,14 @@ class Runtime:
         """GREASE version from the manifest (e.g. "24"); set on install()."""
         return self._grease_version
 
-    def _installed_engine_version(self) -> Optional[str]:
+    def _installed_engine_version(self, root: Optional[Path] = None) -> Optional[str]:
         """Chromium version of the engine actually on disk — read from the
         mac Framework `Versions/<ver>/` dir or the win `<ver>.manifest` file.
         Returns None on Linux (no on-disk version marker) or when unreadable."""
+        root = self.root if root is None else root
         try:
             if sys.platform == "darwin":
-                versions = self.root / "ShardX-Mac-arm64" / "ShardX.app" / "Contents" / \
+                versions = root / "ShardX-Mac-arm64" / "ShardX.app" / "Contents" / \
                     "Frameworks" / "ShardX Framework.framework" / "Versions"
                 for entry in versions.iterdir():
                     if entry.name != "Current" and entry.name[:1].isdigit():
@@ -234,8 +235,9 @@ class Runtime:
             if sys.platform == "win32":
                 # Only accept a `<version>.manifest` whose stem parses as a
                 # version, so a stray/leftover manifest can't pin a bogus version.
-                for entry in (self.root / "ShardX-Windows").iterdir():
-                    if entry.suffix == ".manifest" and entry.stem[:1].isdigit() and "." in entry.stem:
+                for entry in (root / "ShardX-Windows").iterdir():
+                    parts = entry.stem.split(".")
+                    if entry.suffix == ".manifest" and len(parts) == 4 and all(p.isascii() and p.isdigit() for p in parts):
                         return entry.stem
                 return None
             return None
@@ -243,11 +245,8 @@ class Runtime:
             return None
 
     def _effective_installed_version(self, local: dict) -> Optional[str]:
-        """Effective installed version. Trusts the version recorded at install
-        time (authoritative — written only after a successful extract) over
-        re-reading it off disk, which can carry stale files from a previous
-        version. On-disk detection is the fallback for legacy installs."""
-        return local.get("installed_chromium_version") or self._installed_engine_version()
+        """Prefer the installed engine's version marker where available."""
+        return self._installed_engine_version() or local.get("installed_chromium_version")
 
     # ---- manifest ----
 
@@ -262,9 +261,7 @@ class Runtime:
     # ---- install ----
 
     def install(self, force: bool = False) -> None:
-        """Idempotent — re-checks remote etag, skips when nothing changed.
-        Within a single process, subsequent calls are no-ops unless `force=True`.
-        """
+        """Use the local runtime; fetch archives on first install or force=True."""
         with self._install_lock:
             self._install_locked(force)
 
@@ -273,44 +270,31 @@ class Runtime:
             return
         self._recover_interrupted_swaps()
         local = self._load_manifest()
+        if self.installed and not force:
+            version = self._effective_installed_version(local)
+            if not version:
+                raise RuntimeError("Cannot identify the installed ShardX runtime. Explicitly reinstall it before launching.")
+            self._chromium_version = version
+            if version == local.get("installed_chromium_version"):
+                self._grease_brand = local.get("grease_brand")
+                self._grease_version = local.get("grease_version")
+            self._checked_in_process = True
+            return
         manifest = self._fetch_manifest()
         remote = manifest.get("archives") if isinstance(manifest.get("archives"), dict) else {}
-        # Remember the engine version so launch can normalise profiles to it.
-        self._chromium_version = manifest.get("chromium_version") or CHROMIUM_VERSION
-        self._grease_brand = manifest.get("grease_brand") or None
-        self._grease_version = manifest.get("grease_version") or None
-        # Browser. Re-download when the engine's on-disk version differs from
-        # the manifest's chromium version — VERSION-based, not etag, so it fires
-        # for users who updated the SDK but whose stored etag already matched.
-        # A None manifest (unreachable) must NOT force a re-download when installed.
-        need_browser = force or not self.installed
-        if not need_browser and manifest.get("chromium_version"):
-            need_browser = self._effective_installed_version(local) != manifest["chromium_version"]
-        if need_browser:
-            browser_etag, widevine_etag = self._install_complete_runtime()
-            local["browser_etag"] = browser_etag
-            local["widevine_etag"] = widevine_etag
-        elif self._spec.widevine and not local.get("widevine_etag"):
-            local["widevine_etag"] = self._install_widevine()
-        # Fingerprints — additive seed (etag changed → re-extract, never
-        # overwrites user-renamed files).
+        version = manifest.get("chromium_version")
+        if not isinstance(version, str) or not version:
+            raise RuntimeError("Cannot install the SDK runtime without version metadata.")
         fp_remote = remote.get(FINGERPRINTS_ARCHIVE.key)
         need_fp = force or not any(self.fingerprints_dir.glob("*.json")) or \
-            (fp_remote is not None and local.get("fingerprints_etag") != fp_remote)
-        if need_fp:
-            self._install_fingerprints()
-            if fp_remote is not None:
-                local["fingerprints_etag"] = fp_remote
-        # Authoritative: we just extracted exactly this version (old tree wiped
-        # first). Recording the known value beats re-reading it off disk.
-        local["installed_chromium_version"] = self._chromium_version
-        self._save_manifest(local)
-        # Linux/mac archives produced on Windows lose every Unix exec bit;
-        # restore +x on every ELF/Mach-O file under the engine tree (not
-        # just the main binary — chrome spawns chrome_crashpad_handler,
-        # chrome_sandbox, etc., and they need the exec bit too).
-        if sys.platform != "win32":
-            _fix_unix_exec_bits(self.root)
+            local.get("fingerprints_etag") != fp_remote
+        local["installed_chromium_version"] = version
+        local["grease_brand"] = manifest.get("grease_brand") or None
+        local["grease_version"] = manifest.get("grease_version") or None
+        self._install_complete_runtime(remote, need_fp, local)
+        self._chromium_version = local["installed_chromium_version"]
+        self._grease_brand = local["grease_brand"]
+        self._grease_version = local["grease_version"]
         self._checked_in_process = True
 
     def _fetch_manifest(self) -> dict:
@@ -328,50 +312,39 @@ class Runtime:
         except Exception:
             return {}
 
-    def _install_complete_runtime(self) -> tuple[str, Optional[str]]:
+    def _install_complete_runtime(self, archives: dict, seed: bool, manifest: dict) -> None:
         stage = self.root / ".runtime-stage"
         shutil.rmtree(stage, ignore_errors=True)
         stage.mkdir(parents=True)
         try:
-            browser_etag = self._download_and_extract(self._spec.browser, stage)
-            widevine_etag = None
+            manifest["browser_etag"] = self._download_and_extract(self._spec.browser, stage, archives.get(self._spec.browser.key))
+            manifest["installed_chromium_version"] = self._installed_engine_version(stage) or manifest["installed_chromium_version"]
             if self._spec.widevine:
-                widevine_etag = self._download_and_extract(self._spec.widevine, stage)
+                manifest["widevine_etag"] = self._download_and_extract(self._spec.widevine, stage, archives.get(self._spec.widevine.key))
                 self._place_widevine(stage)
             self._validate_runtime(stage, self._spec.widevine is not None)
             if sys.platform != "win32":
                 _fix_unix_exec_bits(stage)
+            incoming = stage / "incoming-fingerprints"
+            if seed:
+                manifest["fingerprints_etag"] = self._download_and_extract(FINGERPRINTS_ARCHIVE, incoming, archives.get(FINGERPRINTS_ARCHIVE.key))
+
+            def commit() -> None:
+                if seed:
+                    self._seed_fingerprints(incoming)
+                self._save_manifest(manifest)
+
             self._replace_directory(
                 stage / self._spec.binary_subpath[0],
                 self.root / self._spec.binary_subpath[0],
                 self.root / f".{self._spec.binary_subpath[0]}.rollback",
+                commit,
             )
-            return browser_etag, widevine_etag
-        finally:
-            shutil.rmtree(stage, ignore_errors=True)
-
-    def _install_widevine(self) -> str:
-        if not self._spec.widevine:
-            raise RuntimeError("Widevine is unavailable on this host")
-        stage = self.root / ".runtime-stage"
-        shutil.rmtree(stage, ignore_errors=True)
-        stage.mkdir(parents=True)
-        try:
-            etag = self._download_and_extract(self._spec.widevine, stage)
-            self._place_widevine(stage)
-            staged = stage.joinpath(*self._spec.widevine_subpath)
-            self._validate_widevine(staged)
-            self._replace_directory(
-                staged,
-                self.root.joinpath(*self._spec.widevine_subpath),
-                self.root / ".WidevineCdm.rollback",
-            )
-            return etag
         finally:
             shutil.rmtree(stage, ignore_errors=True)
 
     @staticmethod
-    def _replace_directory(staged: Path, live: Path, rollback: Path) -> None:
+    def _replace_directory(staged: Path, live: Path, rollback: Path, commit: Callable[[], None]) -> None:
         if not staged.is_dir():
             raise RuntimeError(f"staged Runtime directory is missing: {staged}")
         shutil.rmtree(rollback, ignore_errors=True)
@@ -380,8 +353,11 @@ class Runtime:
             live.rename(rollback)
         try:
             staged.rename(live)
+            commit()
         except Exception:
-            if had_live and rollback.exists() and not live.exists():
+            if live.exists() and not staged.exists():
+                live.rename(staged)
+            if had_live:
                 rollback.rename(live)
             raise
         try:
@@ -428,14 +404,19 @@ class Runtime:
         if not manifest.is_file() or manifest.stat().st_size == 0:
             raise RuntimeError(f"staged Widevine manifest is missing or empty: {manifest}")
 
-    def _download_and_extract(self, arch: Archive, dest: Path) -> str:
+    def _download_and_extract(self, arch: Archive, dest: Path, expected_etag: Optional[str]) -> str:
+        if not expected_etag:
+            raise RuntimeError(f"SDK runtime manifest has no ETag for {arch.key}.")
         url = f"{PUB_BASE}/{arch.key}"
         tmp = dest / f".{arch.key}.tmp"
         tmp.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with httpx.stream("GET", url, timeout=DOWNLOAD_TIMEOUT, follow_redirects=True) as r:
+            with httpx.stream("GET", url, timeout=DOWNLOAD_TIMEOUT, follow_redirects=True,
+                              headers={"If-Match": f'"{expected_etag}"'}) as r:
                 r.raise_for_status()
                 etag = r.headers.get("etag", "").strip('"')
+                if etag != expected_etag:
+                    raise RuntimeError(f"{arch.key} differs from the selected SDK manifest.")
                 total = int(r.headers.get("content-length", 0))
                 if total > MAX_ARCHIVE_BYTES:
                     raise RuntimeError(f"{arch.key} exceeds the 16 GiB archive limit")
@@ -476,20 +457,12 @@ class Runtime:
         shutil.move(str(src), str(dst))
         shutil.rmtree(root / wrapper_name, ignore_errors=True)
 
-    def _install_fingerprints(self) -> None:
-        staging = self.fingerprints_dir / ".staging"
-        if staging.exists():
-            shutil.rmtree(staging)
-        staging.mkdir(parents=True, exist_ok=True)
-        try:
-            self._download_and_extract(FINGERPRINTS_ARCHIVE, staging)
-            src_dir = staging / FINGERPRINTS_TOP_DIR
-            walk = src_dir if src_dir.exists() else staging
-            for p in walk.iterdir():
-                if p.suffix == ".json":
-                    shutil.copy(p, self.fingerprints_dir / p.name)
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
+    def _seed_fingerprints(self, staging: Path) -> None:
+        src_dir = staging / FINGERPRINTS_TOP_DIR
+        walk = src_dir if src_dir.exists() else staging
+        for p in walk.iterdir():
+            if p.suffix == ".json":
+                shutil.copy(p, self.fingerprints_dir / p.name)
 
 
 def _validate_archive(archive: Path, dest: Path) -> None:

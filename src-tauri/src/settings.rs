@@ -76,7 +76,7 @@ fn default_api_enabled() -> bool {
 }
 
 fn default_api_port() -> u16 {
-    40325
+    30325
 }
 
 impl Default for SettingsDisk {
@@ -235,6 +235,14 @@ pub fn rotate_secret() -> Result<LoadedSettings> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automation_api_defaults_to_30325_without_overwriting_a_saved_port() {
+        let defaults: SettingsDisk = serde_json::from_str("{}").unwrap();
+        assert_eq!(public(&defaults).api_port, 30325);
+        let saved: SettingsDisk = serde_json::from_str(r#"{"api_port":40325}"#).unwrap();
+        assert_eq!(public(&saved).api_port, 40325);
+    }
 
     #[test]
     fn unknown_geo_provider_is_normalized() {

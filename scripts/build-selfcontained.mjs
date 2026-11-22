@@ -12,9 +12,7 @@
 // Usage:
 //   node scripts/build-selfcontained.mjs --exe <launcher.exe> --zips <dir> --out <bundle.zip>
 //   --exe  the built portable launcher (staging/ShardX-Launcher-portable-win-x64.exe)
-//   --zips dir containing the runtime-archive release assets:
-//          ShardX-Windows.zip, ShardX-Widevine-Win.zip, ShardX-Fingerprints.zip,
-//          runtime-archive.json
+//   --zips dir containing the snapshot-prefixed assets from runtime.json
 //   --out  destination zip (staging/ShardX-Launcher-selfcontained-win-x64.zip)
 //
 // The bundle layout mirrors the launcher's portable data root (store.rs
@@ -105,8 +103,9 @@ async function unzip(zipPath, dest) {
     return;
   }
   log("7-Zip not found; falling back to Expand-Archive (slower)");
-  const ps = `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${dest}' -Force`;
-  await run("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps]);
+  await run("pwsh", ["-NoProfile", "-Command", "$ErrorActionPreference = 'Stop'; Expand-Archive -LiteralPath $env:SHARDX_ZIP -DestinationPath $env:SHARDX_DEST -Force"], {
+    env: { ...process.env, SHARDX_ZIP: zipPath, SHARDX_DEST: dest },
+  });
 }
 
 async function zipBundle(workDir, destination) {
@@ -121,49 +120,19 @@ async function zipBundle(workDir, destination) {
     return;
   }
   log("7-Zip not found; falling back to Compress-Archive (slower)");
-  const ps = `Compress-Archive -Path (Join-Path '${workDir}' '${BUNDLE_DIR_NAME}') -DestinationPath '${destination}' -CompressionLevel Optimal -Force`;
-  await run("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps]);
+  await run("pwsh", ["-NoProfile", "-Command", "$ErrorActionPreference = 'Stop'; Compress-Archive -LiteralPath $env:SHARDX_BUNDLE -DestinationPath $env:SHARDX_ZIP -CompressionLevel Optimal -Force"], {
+    env: { ...process.env, SHARDX_BUNDLE: join(workDir, BUNDLE_DIR_NAME), SHARDX_ZIP: destination },
+  });
 }
 
-function compareVersions(a, b) {
-  const parts = (value) => value.split(".").map((segment) => Number.parseInt(segment, 10) || 0);
-  const [pa, pb] = [parts(a), parts(b)];
-  const length = Math.max(pa.length, pb.length);
-  for (let index = 0; index < length; index += 1) {
-    const diff = (pa[index] ?? 0) - (pb[index] ?? 0);
-    if (diff !== 0) return diff;
-  }
-  return 0;
-}
-
-/// Mirror runtime.rs `installed_engine_version`: a dotted-numeric
-/// `<version>.manifest` sidecar beside chrome.exe is the on-disk truth.
-function detectInstalledEngineVersion(engineDir) {
-  let best = null;
-  for (const entry of fs.readdirSync(engineDir)) {
-    if (!entry.endsWith(".manifest")) continue;
-    const stem = entry.slice(0, -".manifest".length);
-    if (stem.split(".").length < 2 || !/^[0-9]/.test(stem)) continue;
-    if (best === null || compareVersions(stem, best) > 0) best = stem;
-  }
-  return best;
-}
-
-const metaPath = join(zipsDir, "runtime-archive.json");
-if (!fs.existsSync(metaPath)) {
-  throw new Error(
-    `runtime-archive.json is missing in ${zipsDir}; run the 'Sync runtime archive' workflow first.`,
-  );
-}
-const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
-for (const field of ["browser_etag", "widevine_etag", "fingerprints_etag", "chromium_version"]) {
-  if (typeof meta[field] !== "string" || !meta[field]) {
-    throw new Error(`runtime-archive.json is missing a valid '${field}'.`);
-  }
-}
+const meta = JSON.parse(fs.readFileSync(new URL("../runtime.json", import.meta.url), "utf8"));
+const snapshot = meta.windows_snapshot;
+const archivePath = key => join(zipsDir, `${snapshot.id}-${key}`);
 assertNonEmptyFile(exePath, "launcher executable");
 for (const key of ["ShardX-Windows.zip", "ShardX-Widevine-Win.zip", "ShardX-Fingerprints.zip"]) {
-  assertNonEmptyFile(join(zipsDir, key), `runtime archive ${key}`);
+  if (fs.statSync(archivePath(key)).size !== snapshot.sizes[key]) {
+    throw new Error(`Runtime archive size differs from the pinned snapshot: ${key}`);
+  }
 }
 
 const workDir = join(dirname(outZip), ".selfcontained-work");
@@ -174,11 +143,11 @@ const runtimeRoot = join(dataRoot, "runtime");
 const engineDir = join(runtimeRoot, ENGINE_DIR);
 
 log(`extracting browser runtime into ${engineDir}`);
-await unzip(join(zipsDir, "ShardX-Windows.zip"), runtimeRoot);
+await unzip(archivePath("ShardX-Windows.zip"), runtimeRoot);
 
 log("placing WidevineCdm beside chrome.exe");
 const widevineExtract = join(workDir, "widevine-extract");
-await unzip(join(zipsDir, "ShardX-Widevine-Win.zip"), widevineExtract);
+await unzip(archivePath("ShardX-Widevine-Win.zip"), widevineExtract);
 const stagedWidevine = join(widevineExtract, WIDEVINE_STAGE_DIR, "WidevineCdm");
 if (!fs.existsSync(stagedWidevine)) {
   throw new Error(`${WIDEVINE_STAGE_DIR}/WidevineCdm not found in the Widevine archive`);
@@ -189,9 +158,8 @@ fs.rmSync(widevineExtract, { recursive: true, force: true });
 
 log("seeding the fingerprint library");
 const fingerprintsExtract = join(workDir, "fingerprints-extract");
-await unzip(join(zipsDir, "ShardX-Fingerprints.zip"), fingerprintsExtract);
-// Mirror runtime.rs install_fingerprints: prefer the zip's wrapper directory,
-// fall back to the extraction root, copy only top-level *.json files.
+await unzip(archivePath("ShardX-Fingerprints.zip"), fingerprintsExtract);
+// Use top-level JSON templates, inside the archive wrapper when present.
 const wrapperDir = join(fingerprintsExtract, "shardx-fingerprints");
 const templatesDir = fs.existsSync(wrapperDir) ? wrapperDir : fingerprintsExtract;
 const fingerprintsDir = join(dataRoot, "fingerprints");
@@ -199,7 +167,12 @@ fs.mkdirSync(fingerprintsDir, { recursive: true });
 let fingerprintCount = 0;
 for (const entry of fs.readdirSync(templatesDir)) {
   if (!entry.endsWith(".json")) continue;
-  fs.copyFileSync(join(templatesDir, entry), join(fingerprintsDir, entry));
+  const bytes = fs.readFileSync(join(templatesDir, entry));
+  const template = JSON.parse(bytes);
+  if (!template || typeof template !== "object" || Array.isArray(template)) {
+    throw new Error(`Invalid fingerprint template: ${entry}`);
+  }
+  fs.writeFileSync(join(fingerprintsDir, entry), bytes);
   fingerprintCount += 1;
 }
 fs.rmSync(fingerprintsExtract, { recursive: true, force: true });
@@ -208,19 +181,32 @@ log("validating the assembled runtime tree");
 for (const required of ["chrome.exe", "chrome.dll", "resources.pak"]) {
   assertNonEmptyFile(join(engineDir, required), `engine file ${required}`);
 }
-assertNonEmptyFile(join(engineDir, "WidevineCdm", "manifest.json"), "Widevine manifest");
+const cdm = join(engineDir, "WidevineCdm");
+const widevine = JSON.parse(fs.readFileSync(join(cdm, "manifest.json"), "utf8"));
+if (typeof widevine.version !== "string" || widevine.version.length === 0) {
+  throw new Error("Widevine manifest has no version");
+}
+assertNonEmptyFile(join(cdm, "_platform_specific", "win_x64", "widevinecdm.dll"), "Widevine DLL");
 if (fingerprintCount === 0) {
   throw new Error("the fingerprint archive yielded no .json templates");
 }
 
-const installedVersion = detectInstalledEngineVersion(engineDir) ?? meta.chromium_version;
+const sidecars = fs.readdirSync(engineDir).filter(name => /^\d+(?:\.\d+){3}\.manifest$/.test(name));
+const { stdout } = await run("powershell", ["-NoProfile", "-Command", "$ErrorActionPreference = 'Stop'; (Get-Item -LiteralPath $env:SHARDX_ENGINE_EXE).VersionInfo.ProductVersion"], {
+  env: { ...process.env, SHARDX_ENGINE_EXE: join(engineDir, "chrome.exe") },
+});
+const installedVersion = stdout.trim();
+if (installedVersion !== meta.chromium_version || sidecars.length !== 1 || sidecars[0] !== `${installedVersion}.manifest`) {
+  throw new Error(`Pinned runtime ${meta.chromium_version}, executable ${installedVersion}, sidecars ${sidecars.join(", ")}`);
+}
 const manifest = {
-  browser_etag: meta.browser_etag,
-  widevine_etag: meta.widevine_etag,
-  fingerprints_etag: meta.fingerprints_etag,
+  browser_etag: meta.archives["ShardX-Windows.zip"],
+  widevine_etag: meta.archives["ShardX-Widevine-Win.zip"],
+  fingerprints_etag: meta.archives["ShardX-Fingerprints.zip"],
   applied_chromium_version: meta.chromium_version,
   applied_signature: `${meta.chromium_version}|${meta.grease_brand ?? ""}|${meta.grease_version ?? ""}`,
   installed_chromium_version: installedVersion,
+  installed_metadata: meta,
 };
 await fsp.writeFile(
   join(runtimeRoot, "manifest.json"),

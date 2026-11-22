@@ -36,13 +36,14 @@ jobs:
             gh release create runtime-archive --repo "$GITHUB_REPOSITORY" \
               --prerelease \
               --title "Runtime archive" \
-              --notes "Storage for the prebuilt runtime archives consumed by the self-contained release bundle. Managed by the 'Sync runtime archive' workflow; managed assets are replaced in place on every sync."
+              --notes "Versioned Windows runtime snapshots consumed by the launcher and the release workflow."
           fi
-          gh release upload runtime-archive --repo "$GITHUB_REPOSITORY" --clobber \
-            .runtime-archive/ShardX-Windows.zip \
-            .runtime-archive/ShardX-Widevine-Win.zip \
-            .runtime-archive/ShardX-Fingerprints.zip \
-            .runtime-archive/runtime-archive.json
+          for file in .runtime-archive/*.zip; do
+            name=$(basename "$file")
+            if ! gh release view runtime-archive --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
+              gh release upload runtime-archive --repo "$GITHUB_REPOSITORY" "$file"
+            fi
+          done
 
       # `gh release upload` is not atomic: a network failure mid-upload leaves
       # the release with a mix of old and new assets, which the next
@@ -54,9 +55,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          for f in ShardX-Windows.zip ShardX-Widevine-Win.zip ShardX-Fingerprints.zip runtime-archive.json; do
-            local_sum=$(sha256sum ".runtime-archive/$f" | cut -d' ' -f1)
-            remote_sum=$(gh release download runtime-archive --repo "$GITHUB_REPOSITORY" --pattern "$f" --output - 2>/dev/null | sha256sum | cut -d' ' -f1)
+          set -o pipefail
+          for file in .runtime-archive/*.zip; do
+            f=$(basename "$file")
+            local_sum=$(sha256sum "$file" | cut -d' ' -f1)
+            remote_sum=$(gh release download runtime-archive --repo "$GITHUB_REPOSITORY" --pattern "$f" --output - | sha256sum | cut -d' ' -f1)
             if [ "$local_sum" != "$remote_sum" ]; then
               echo "Asset $f does not match the local snapshot (local $local_sum, remote $remote_sum)." >&2
               echo "The runtime-archive release is torn — re-run this workflow before cutting a release." >&2

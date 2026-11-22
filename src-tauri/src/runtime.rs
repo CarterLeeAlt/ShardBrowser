@@ -1,7 +1,8 @@
-//! Self-bootstrapping runtime: download ShardX browser + Widevine from R2.
+//! Install and repair the runtime snapshot paired with this launcher.
 //! Emits `runtime:progress` and `runtime:done` events to the Tauri frontend.
 
 use anyhow::{Context, Result};
+#[cfg(test)]
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -9,23 +10,18 @@ use std::path::{Path, PathBuf};
 use tauri::{Emitter, Window};
 use tokio::io::AsyncWriteExt;
 
-const PUB_BASE: &str = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev";
-/// Version manifest source coordinates — every mirror below derives from
-/// these, so re-pointing the manifest channel is a one-constant edit.
-/// The runtime distribution channel is upstream's: the manifest and the R2
-/// bucket are republished together upstream, so following the upstream
-/// manifest keeps version/grease/etags coherent with the archives actually
-/// downloaded — zero fork-side maintenance per upstream roll. Update checks
-/// additionally compare etags against the bucket itself (`fetch_remote_etag`),
-/// so even a manifest that lags the bucket cannot loop updates.
+#[cfg(test)]
 const MANIFEST_REPO: &str = "ProxyShard/ShardBrowser";
+#[cfg(test)]
 const MANIFEST_BRANCH: &str = "main";
+#[cfg(test)]
 const MANIFEST_FILE: &str = "runtime.json";
 
 /// Manifest mirrors in priority order. raw.githubusercontent.com is
 /// DNS-unreachable on some networks; the GitHub contents API and the jsDelivr
 /// GitHub mirror serve the identical file and stay reachable there (jsDelivr
 /// caches branch refs for a few hours, so it is the last resort).
+#[cfg(test)]
 fn manifest_urls() -> [String; 3] {
     [
         format!("https://raw.githubusercontent.com/{MANIFEST_REPO}/{MANIFEST_BRANCH}/{MANIFEST_FILE}"),
@@ -34,10 +30,6 @@ fn manifest_urls() -> [String; 3] {
     ]
 }
 const BUNDLED_MANIFEST_JSON: &str = include_str!("../../runtime.json");
-/// Chromium version of the Windows runtime bundle this launcher defaults to,
-/// matching the bundled upstream manifest. Used only as the
-/// fallback when no manifest — remote or bundled — carries a version.
-const CHROMIUM_VERSION: &str = "157.0.8103.50";
 const MAX_RUNTIME_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_RUNTIME_EXTRACTED_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const MAX_RUNTIME_ARCHIVE_ENTRIES: usize = 250_000;
@@ -144,36 +136,96 @@ struct Manifest {
 /// Chromium version of the engine actually on disk, read from the Windows
 /// `<version>.manifest` sidecar beside chrome.exe.
 fn installed_engine_version() -> Option<String> {
-    let base = runtime_dir().ok()?;
-    let dir = base.join("ShardX-Windows");
-    // Require a dotted numeric version so a stray manifest cannot feed a bogus
-    // value into the update check.
-    let looks_like_version =
-        |s: &str| s.split('.').count() >= 2 && s.starts_with(|c: char| c.is_ascii_digit());
-    for ent in fs::read_dir(&dir).ok()?.flatten() {
-        let p = ent.path();
-        if p.extension().and_then(|s| s.to_str()) == Some("manifest") {
-            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                if looks_like_version(stem) {
-                    return Some(stem.to_string());
+    engine_version_in(&runtime_dir().ok()?.join(engine_root_dir())).ok()
+}
+
+fn engine_version_in(dir: &Path) -> Result<String> {
+    let mut versions = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("manifest") {
+            if let Some(version) = path.file_stem().and_then(|value| value.to_str()) {
+                if version.split('.').count() == 4
+                    && version.split('.').all(|part| part.parse::<u32>().is_ok())
+                {
+                    versions.push(version.to_owned());
                 }
             }
         }
     }
-    None
+    anyhow::ensure!(
+        versions.len() == 1,
+        "Expected exactly one Chromium version manifest in {}",
+        dir.display()
+    );
+    let sidecar = versions.remove(0);
+    let executable = executable_product_version(&dir.join("chrome.exe"))?;
+    anyhow::ensure!(
+        sidecar == executable,
+        "Runtime executable version {executable} does not match its {sidecar} sidecar"
+    );
+    Ok(executable)
 }
 
-/// Effective installed engine version. Trusts the version recorded at install
-/// time (authoritative — written only after a successful download+extract) over
-/// re-reading it from a possibly stale `<old>.manifest`. On-disk detection is
-/// the fallback for legacy installs that predate `installed_chromium_version`.
+fn executable_product_version(exe: &Path) -> Result<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO,
+    };
+    let path: Vec<u16> = exe.as_os_str().encode_wide().chain([0]).collect();
+    let resource_size = unsafe { GetFileVersionInfoSizeW(path.as_ptr(), std::ptr::null_mut()) };
+    anyhow::ensure!(
+        resource_size > 0,
+        "Cannot read runtime version resource: {}",
+        exe.display()
+    );
+    let mut resource = vec![0u8; resource_size as usize];
+    let mut value = std::ptr::null_mut();
+    let mut length = 0;
+    let root = [b'\\' as u16, 0];
+    unsafe {
+        anyhow::ensure!(
+            GetFileVersionInfoW(
+                path.as_ptr(),
+                0,
+                resource_size,
+                resource.as_mut_ptr().cast()
+            ) != 0,
+            "Cannot load runtime version resource"
+        );
+        anyhow::ensure!(
+            VerQueryValueW(
+                resource.as_ptr().cast(),
+                root.as_ptr(),
+                &mut value,
+                &mut length
+            ) != 0
+                && !value.is_null()
+                && length as usize >= std::mem::size_of::<VS_FIXEDFILEINFO>(),
+            "Invalid runtime version resource"
+        );
+        let version = value.cast::<VS_FIXEDFILEINFO>().read_unaligned();
+        anyhow::ensure!(
+            version.dwSignature == 0xFEEF04BD,
+            "Invalid runtime version signature"
+        );
+        Ok(format!(
+            "{}.{}.{}.{}",
+            version.dwProductVersionMS >> 16,
+            version.dwProductVersionMS & 0xffff,
+            version.dwProductVersionLS >> 16,
+            version.dwProductVersionLS & 0xffff
+        ))
+    }
+}
+
+/// Prefer the executable version. The recorded version also identifies the
+/// snapshot when its engine is missing and needs repair.
 fn effective_installed_version(local: &Manifest) -> Option<String> {
-    local
-        .installed_chromium_version
-        .clone()
-        .or_else(installed_engine_version)
+    installed_engine_version().or_else(|| local.installed_chromium_version.clone())
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ChromiumState {
     browser_etag: Option<String>,
@@ -183,6 +235,7 @@ struct ChromiumState {
     installed_metadata: Option<RemoteManifest>,
 }
 
+#[cfg(test)]
 fn chromium_state(local: &Manifest) -> ChromiumState {
     ChromiumState {
         browser_etag: local.browser_etag.clone(),
@@ -193,6 +246,7 @@ fn chromium_state(local: &Manifest) -> ChromiumState {
     }
 }
 
+#[cfg(test)]
 fn updated_chromium_state(
     migrated_version: String,
     migrated_signature: String,
@@ -209,6 +263,7 @@ fn updated_chromium_state(
     }
 }
 
+#[cfg(test)]
 fn manifest_with_chromium_state(
     chromium: ChromiumState,
     widevine_etag: Option<String>,
@@ -238,26 +293,6 @@ pub fn ensure_migration_complete() -> Result<()> {
         )
     );
     Ok(())
-}
-
-fn record_pending_migration(
-    metadata: &RemoteManifest,
-    browser_etag: &str,
-    widevine_etag: Option<String>,
-    fingerprints_etag: Option<String>,
-) -> Result<()> {
-    save_manifest(&manifest_with_chromium_state(
-        ChromiumState {
-            browser_etag: Some(browser_etag.into()),
-            applied_chromium_version: None,
-            applied_signature: None,
-            installed_chromium_version: installed_engine_version()
-                .or_else(|| metadata.chromium_version.clone()),
-            installed_metadata: Some(metadata.clone()),
-        },
-        widevine_etag,
-        fingerprints_etag,
-    ))
 }
 
 fn version_is_newer(candidate: &str, installed: Option<&str>) -> bool {
@@ -293,12 +328,6 @@ fn load_manifest() -> Manifest {
     }
 }
 
-fn save_manifest(m: &Manifest) -> Result<()> {
-    let p = manifest_path()?;
-    fs::create_dir_all(p.parent().unwrap())?;
-    crate::store::atomic_write(&p, serde_json::to_string_pretty(m)?.as_bytes())?;
-    Ok(())
-}
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default)]
 pub struct RuntimeUpdateCheckSnapshot {
@@ -346,6 +375,7 @@ pub struct RuntimeStatus {
     pub fingerprints_installed: bool,
     pub widevine_installed: bool,
     pub migration_pending: bool,
+    pub repair_requires_upgrade: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -384,7 +414,7 @@ fn fingerprints_are_installed(local: &Manifest) -> bool {
 fn widevine_is_installed(local: &Manifest) -> bool {
     local.widevine_etag.is_some()
         && widevine_dir()
-            .map(|directory| directory.join("manifest.json").is_file())
+            .map(|directory| validate_widevine_tree(&directory).is_ok())
             .unwrap_or(false)
 }
 
@@ -401,6 +431,10 @@ fn local_status(local: &Manifest) -> RuntimeStatus {
         fingerprints_installed: fingerprints_are_installed(local),
         widevine_installed: widevine_is_installed(local),
         migration_pending: local.installed_metadata.is_some() && local.applied_signature.is_none(),
+        repair_requires_upgrade: repair_manifest(local).is_err()
+            && !effective_installed_version(local).is_some_and(|installed| {
+                version_is_newer(&installed, bundled_manifest().chromium_version.as_deref())
+            }),
     }
 }
 
@@ -416,37 +450,23 @@ struct RemoteManifest {
     grease_version: Option<String>,
     android_chromium_version: Option<String>,
     tls: Option<serde_json::Map<String, serde_json::Value>>,
+    engine_build: Option<String>,
+    windows_snapshot: Option<WindowsSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct WindowsSnapshot {
+    id: String,
+    asset_base: String,
+    sizes: std::collections::HashMap<String, u64>,
 }
 
 fn bundled_manifest() -> RemoteManifest {
     serde_json::from_str(BUNDLED_MANIFEST_JSON).unwrap_or_default()
 }
 
-/// Current etag of an archive straight from the download bucket. The bucket
-/// can be republished without the manifest changing, so its own answer is the
-/// authoritative "is what I have current?" signal; manifest etags are only a
-/// fallback for when the bucket is unreachable.
-async fn fetch_remote_etag(key: &str) -> Option<String> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(4))
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .ok()?;
-    let resp = client.head(format!("{PUB_BASE}/{key}")).send().await.ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    resp.headers()
-        .get("etag")?
-        .to_str()
-        .ok()
-        .map(|s| s.trim_matches('"').to_string())
-}
-
-/// Fetch the remote manifest used for runtime update comparisons. Tries each
-/// source in `manifest_urls()` order and returns the first parseable manifest, so
-/// the check survives one source being unreachable. Startup integrity checks
-/// never call this function.
+/// Upstream metadata probe for diagnostics; launcher installation only uses pinned assets.
+#[cfg(test)]
 async fn fetch_remote_manifest() -> Option<RemoteManifest> {
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(4))
@@ -458,6 +478,7 @@ async fn fetch_remote_manifest() -> Option<RemoteManifest> {
     fetch_manifest_from(&client, manifest_urls()).await
 }
 
+#[cfg(test)]
 async fn fetch_manifest_from(
     client: &reqwest::Client,
     urls: impl IntoIterator<Item = String>,
@@ -476,6 +497,7 @@ async fn fetch_manifest_from(
 /// GET a manifest source and unwrap the response to the raw runtime.json
 /// text. The GitHub contents API wraps the file in a JSON envelope with the
 /// body base64-encoded; raw and jsDelivr return the manifest JSON directly.
+#[cfg(test)]
 async fn fetch_manifest_text(client: &reqwest::Client, url: &str) -> Option<String> {
     let resp = client.get(url).send().await.ok()?;
     if !resp.status().is_success() {
@@ -490,6 +512,7 @@ async fn fetch_manifest_text(client: &reqwest::Client, url: &str) -> Option<Stri
 
 /// Decode the GitHub contents API envelope's base64 `content` field (which
 /// wraps lines in newlines) into file text.
+#[cfg(test)]
 fn decode_base64_envelope(body: &serde_json::Value) -> Option<String> {
     let content = body.get("content")?.as_str()?;
     let cleaned: Vec<u8> = content
@@ -507,6 +530,7 @@ fn decode_base64_envelope(body: &serde_json::Value) -> Option<String> {
 /// Parse runtime.json text into a `RemoteManifest`. Requires
 /// `chromium_version` so an unrelated JSON body (API error, HTML error page)
 /// is rejected and the next source gets tried instead.
+#[cfg(test)]
 fn parse_remote_manifest(text: &str) -> Option<RemoteManifest> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let str_field = |k: &str| v.get(k).and_then(|s| s.as_str()).map(String::from);
@@ -527,33 +551,31 @@ fn parse_remote_manifest(text: &str) -> Option<RemoteManifest> {
         grease_version: str_field("grease_version"),
         android_chromium_version: str_field("android_chromium_version"),
         tls: v.get("tls").and_then(|v| v.as_object()).cloned(),
+        engine_build: str_field("engine_build"),
+        windows_snapshot: None,
     })
 }
 
-fn prefer_newest_manifest(remote: RemoteManifest) -> RemoteManifest {
+/// Repair keeps the installed snapshot. An installation without a matching
+/// snapshot must use the explicit Chromium update instead.
+fn repair_manifest(local: &Manifest) -> Result<RemoteManifest, String> {
     let bundled = bundled_manifest();
-    let bundled_is_newer = bundled
-        .chromium_version
-        .as_deref()
-        .is_some_and(|candidate| version_is_newer(candidate, remote.chromium_version.as_deref()));
-    if bundled_is_newer {
-        eprintln!("[runtime] remote manifest is older than bundled metadata; using bundled");
-        bundled
-    } else {
-        remote
-    }
-}
-
-/// First-time setup and explicit repair may need CDN metadata. They fall back
-/// to the manifest bundled with the launcher when GitHub is unreachable.
-async fn fetch_manifest() -> RemoteManifest {
-    match fetch_remote_manifest().await {
-        Some(remote) => prefer_newest_manifest(remote),
-        None => {
-            eprintln!("[runtime] remote manifest unavailable; using bundled metadata");
-            bundled_manifest()
+    if let Some(metadata) = &local.installed_metadata {
+        if metadata.windows_snapshot.is_some() {
+            return Ok(metadata.clone());
         }
     }
+    if let Some(etag) = local.browser_etag.as_deref() {
+        if bundled
+            .archives
+            .get(&host_spec().browser.key)
+            .map(String::as_str)
+            != Some(etag)
+        {
+            return Err("The installed runtime has no pinned repair snapshot. Install the runtime paired with this launcher explicitly instead.".into());
+        }
+    }
+    Ok(bundled)
 }
 
 /// New identities use metadata for the installed binary, never a newer remote
@@ -761,45 +783,63 @@ fn migrate_profile_dir_to(
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
-        let Some(profile_id) = path.file_stem().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        let mut profile = crate::profile::load_raw(profile_id)?;
+        let mut profile: crate::profile::StoredProfile =
+            crate::store::load_json_with_backup(&path)?;
+        let normalized = crate::profile::normalize_browser_settings(&mut profile)?;
         if migrate_descriptor_to(
             &mut profile.config,
             chromium_version,
             grease_brand,
             grease_version,
-        ) {
-            crate::profile::save_raw(&mut profile)?;
+        ) || normalized
+        {
+            crate::store::atomic_write_sensitive(&path, &serde_json::to_vec_pretty(&profile)?)?;
             migrated += 1;
         }
     }
     Ok(migrated)
 }
 
-/// Migrate saved profiles and user-added fingerprint templates to
-/// `chromium_version`. Profile migration deliberately goes through
-/// `StoredProfile` so inline proxy credentials stay DPAPI-protected.
-fn migrate_all_to(
-    chromium_version: &str,
-    grease_brand: Option<&str>,
-    grease_version: Option<&str>,
-) -> Result<usize> {
-    crate::process::ensure_lease_recovery_complete()?;
-    let profiles = migrate_profile_dir_to(
-        &crate::store::profiles_dir()?,
-        chromium_version,
-        grease_brand,
-        grease_version,
-    )?;
-    let fingerprints = migrate_fingerprint_dir_to(
-        &crate::store::fingerprints_dir()?,
-        chromium_version,
-        grease_brand,
-        grease_version,
-    )?;
-    Ok(profiles + fingerprints)
+fn copy_runtime_descriptors(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        if matches!(
+            entry.path().extension().and_then(|ext| ext.to_str()),
+            Some("json" | "bak")
+        ) {
+            anyhow::ensure!(
+                entry.file_type()?.is_file(),
+                "Invalid runtime descriptor {}",
+                entry.path().display()
+            );
+            fs::copy(entry.path(), destination.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_descriptor_replacements(
+    staged: &Path,
+    live: &Path,
+    replacements: &mut Vec<(PathBuf, PathBuf)>,
+) -> Result<()> {
+    for entry in fs::read_dir(staged)? {
+        let entry = entry?;
+        let destination = live.join(entry.file_name());
+        if destination.try_exists()? {
+            anyhow::ensure!(
+                fs::symlink_metadata(&destination)?.file_type().is_file(),
+                "Invalid runtime descriptor {}",
+                destination.display()
+            );
+            if fs::read(entry.path())? == fs::read(&destination)? {
+                continue;
+            }
+        }
+        replacements.push((entry.path(), destination));
+    }
+    Ok(())
 }
 
 /// Fast startup integrity check. It only reads local files and never contacts
@@ -826,18 +866,14 @@ struct RemoteUpdateMetadata {
 
 /// Fetch remote version metadata without reading or modifying local runtime
 /// state, so an install is never blocked on network timeouts.
-async fn fetch_remote_update_metadata() -> Result<RemoteUpdateMetadata, String> {
-    let remote = fetch_remote_manifest()
-        .await
-        .ok_or_else(|| "Unable to reach the runtime update manifest".to_string())?;
-    let manifest = prefer_newest_manifest(remote);
+fn pinned_update_metadata() -> Result<RemoteUpdateMetadata, String> {
+    let manifest = bundled_manifest();
     let spec = host_spec();
-    let fingerprints_latest = fetch_remote_etag(FINGERPRINTS_ARCHIVE_KEY)
-        .await
-        .or_else(|| manifest.archives.get(FINGERPRINTS_ARCHIVE_KEY).cloned());
-    let widevine_latest = fetch_remote_etag(&spec.widevine.key)
-        .await
-        .or_else(|| manifest.archives.get(&spec.widevine.key).cloned());
+    if manifest.windows_snapshot.is_none() {
+        return Err("Missing pinned Windows runtime".into());
+    }
+    let fingerprints_latest = manifest.archives.get(FINGERPRINTS_ARCHIVE_KEY).cloned();
+    let widevine_latest = manifest.archives.get(&spec.widevine.key).cloned();
 
     Ok(RemoteUpdateMetadata {
         manifest,
@@ -854,37 +890,52 @@ fn runtime_update_status_from_metadata(remote: RemoteUpdateMetadata) -> RuntimeU
     let status = local_status(&local);
     let installed_version = effective_installed_version(&local);
 
+    let pinned_version = remote.manifest.chromium_version.as_deref();
+    let version_matches = installed_version.as_deref() == pinned_version;
+    let replace_build = version_matches
+        && local.browser_etag.as_ref() != remote.manifest.archives.get(&spec.browser.key);
     let chromium_update_available = status.installed
-        && remote
-            .manifest
-            .chromium_version
-            .as_deref()
-            .is_some_and(|candidate| version_is_newer(candidate, installed_version.as_deref()));
-    let fingerprints_check_available = remote.fingerprints_latest.is_some();
-    let widevine_check_available = remote.widevine_latest.is_some();
-    let fingerprints_update_available = status.fingerprints_installed
+        && (replace_build
+            || pinned_version.is_some_and(|candidate| {
+                version_is_newer(candidate, installed_version.as_deref())
+            }));
+    let fingerprints_check_available = version_matches && remote.fingerprints_latest.is_some();
+    let widevine_check_available = version_matches && remote.widevine_latest.is_some();
+    let fingerprints_update_available = fingerprints_check_available
+        && status.fingerprints_installed
         && remote
             .fingerprints_latest
             .is_some_and(|latest| local.fingerprints_etag.as_deref() != Some(latest.as_str()));
-    let widevine_update_available = status.widevine_installed
+    let widevine_update_available = widevine_check_available
+        && status.widevine_installed
         && remote
             .widevine_latest
             .is_some_and(|latest| local.widevine_etag.as_deref() != Some(latest.as_str()));
 
+    let url = |key: &str| {
+        remote
+            .manifest
+            .windows_snapshot
+            .as_ref()
+            .map(|snapshot| format!("{}/{}-{key}", snapshot.asset_base, snapshot.id))
+    };
+    let chromium_download_url = url(&spec.browser.key);
+    let fingerprints_download_url = url(FINGERPRINTS_ARCHIVE_KEY);
+    let widevine_download_url = url(&spec.widevine.key);
     RuntimeUpdateStatus {
         chromium_installed: status.installed,
         chromium_installed_version: installed_version,
         chromium_latest_version: remote.manifest.chromium_version,
         chromium_update_available,
-        chromium_download_url: Some(format!("{PUB_BASE}/{}", spec.browser.key)),
+        chromium_download_url,
         fingerprints_installed: status.fingerprints_installed,
         fingerprints_check_available,
         fingerprints_update_available,
-        fingerprints_download_url: Some(format!("{PUB_BASE}/{FINGERPRINTS_ARCHIVE_KEY}")),
+        fingerprints_download_url,
         widevine_installed: status.widevine_installed,
         widevine_check_available,
         widevine_update_available,
-        widevine_download_url: Some(format!("{PUB_BASE}/{}", spec.widevine.key)),
+        widevine_download_url,
     }
 }
 
@@ -919,7 +970,7 @@ fn emit_update_check_complete(snapshot: &RuntimeUpdateCheckSnapshot) {
 async fn check_updates_and_persist() -> Result<RuntimeUpdateCheckSnapshot, String> {
     let _check_guard = runtime_update_check_lock().lock().await;
     let timestamp = update_check_timestamp();
-    let remote = fetch_remote_update_metadata().await;
+    let remote = pinned_update_metadata();
     let _state_guard = runtime_state_lock().lock().await;
     let snapshot = match remote {
         Ok(remote) => record_update_check_success(
@@ -971,14 +1022,12 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
         .try_lock()
         .map_err(|_| "Runtime operation is in progress")?;
     let _reservation = crate::operations::reserve_runtime().map_err(|e| e.to_string())?;
-    let spec = host_spec();
     let base = runtime_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
     recover_interrupted_runtime_swap(&base).map_err(|error| error.to_string())?;
 
     let local = load_manifest();
     let installed_now = local_status(&local).installed;
-    let manifest = fetch_manifest().await;
 
     // Setup installs a missing engine; repair explicitly forces a coherent
     // reinstall. A newer remote version alone never triggers installation.
@@ -997,98 +1046,24 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
             "Stop all running or starting browsers before repairing the portable Runtime".into(),
         );
     }
-    // Any successful full Chromium replacement, including repair, must keep
-    // the profile descriptor aligned with the binary that is now on disk.
-    let migrate_chromium_descriptor = need_browser;
-    let (browser_etag, widevine_etag) = if need_browser {
-        let (browser_etag, widevine_etag) =
-            install_complete_runtime_transactionally(&window, &spec, &base)
-                .await
-                .map_err(|error| error.to_string())?;
-        record_pending_migration(
-            &manifest,
-            &browser_etag,
-            Some(widevine_etag.clone()),
-            local.fingerprints_etag.clone(),
-        )
-        .map_err(|e| e.to_string())?;
-        (browser_etag, Some(widevine_etag))
-    } else {
-        let widevine_etag = if repair_widevine {
-            Some(
-                install_widevine_transactionally(&window, &spec.widevine, &base)
-                    .await
-                    .map_err(|error| error.to_string())?,
-            )
-        } else {
-            local.widevine_etag.clone()
-        };
-        (
-            local.browser_etag.clone().unwrap_or_default(),
-            widevine_etag,
-        )
-    };
-
-    // Fingerprint seed: overwrites bundled templates, leaves user-added files;
-    // skipped when the etag matches. User-added FP get version-migrated below.
-    let fp_remote = manifest
-        .archives
-        .get(FINGERPRINTS_ARCHIVE_KEY)
-        .map(|s| s.as_str());
     let repair_fingerprints = !fingerprints_are_installed(&local);
-    let fp_etag = install_fingerprints(
+    if !(need_browser || repair_widevine || repair_fingerprints) {
+        return Ok(local_status(&local));
+    }
+    let manifest = repair_manifest(&local)?;
+    install_snapshot(
         &window,
-        force || repair_fingerprints,
-        local.fingerprints_etag.as_deref(),
-        fp_remote,
+        &base,
+        &manifest,
+        local,
+        [
+            need_browser,
+            need_browser || repair_widevine,
+            need_browser || repair_fingerprints,
+        ],
     )
     .await
-    .map_err(|e| e.to_string())?
-    .or_else(|| local.fingerprints_etag.clone());
-
-    // A descriptor migration is justified only by a first complete Chromium
-    // installation. Component-only sync and repair preserve the current engine,
-    // so they must never rewrite user agent/client hints or Chromium metadata.
-    let target_ver = manifest
-        .chromium_version
-        .clone()
-        .unwrap_or_else(|| CHROMIUM_VERSION.to_string());
-    let sig = format!(
-        "{target_ver}|{}|{}",
-        manifest.grease_brand.as_deref().unwrap_or(""),
-        manifest.grease_version.as_deref().unwrap_or(""),
-    );
-    let chromium = if migrate_chromium_descriptor {
-        {
-            let n = migrate_all_to(
-                &target_ver,
-                manifest.grease_brand.as_deref(),
-                manifest.grease_version.as_deref(),
-            )
-            .map_err(|error| {
-                format!("Runtime installed, but profile migration failed; retry Repair: {error:#}")
-            })?;
-            if n > 0 {
-                eprintln!("[runtime] migrated {n} profile/fingerprint file(s) to {sig}");
-            }
-        }
-        updated_chromium_state(
-            target_ver.clone(),
-            sig,
-            installed_engine_version().or(Some(target_ver)),
-            browser_etag,
-            Some(manifest.clone()),
-        )
-    } else {
-        chromium_state(&local)
-    };
-
-    save_manifest(&manifest_with_chromium_state(
-        chromium,
-        widevine_etag,
-        fp_etag,
-    ))
-    .map_err(|e| e.to_string())?;
+    .map_err(|error| format!("{error:#}"))?;
 
     let _ = window.emit("runtime:done", ());
     schedule_update_check();
@@ -1096,8 +1071,8 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
 }
 
 /// User-triggered per-component runtime update from the update-check card.
-/// Downloads and installs only the requested component, reusing the same
-/// transactional install/rollback paths as setup and repair.
+/// Chromium replacement installs its whole snapshot. Component-only updates
+/// use the same snapshot and transaction as setup and repair.
 #[tauri::command]
 pub async fn runtime_apply_updates(
     window: Window,
@@ -1107,215 +1082,184 @@ pub async fn runtime_apply_updates(
         .try_lock()
         .map_err(|_| "Runtime operation is in progress")?;
     crate::process::ensure_lease_recovery_complete().map_err(|error| error.to_string())?;
-    let _activity = crate::operations::activity();
-    let _reservation = if component != "fingerprints" {
-        Some(crate::operations::reserve_runtime().map_err(|e| e.to_string())?)
-    } else {
-        None
-    };
-    let spec = host_spec();
+    let _reservation = crate::operations::reserve_runtime().map_err(|e| e.to_string())?;
     let base = runtime_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
-    if component != "fingerprints" {
-        recover_interrupted_runtime_swap(&base).map_err(|error| error.to_string())?;
-    }
-
-    // Engine and Widevine swaps replace directories a running browser holds
-    // open; fingerprint templates are plain JSON files, so they may sync live.
-    if component != "fingerprints"
-        && !crate::process::Tracker::shared()
-            .active_profile_ids()
-            .is_empty()
+    recover_interrupted_runtime_swap(&base).map_err(|error| error.to_string())?;
+    if !crate::process::Tracker::shared()
+        .active_profile_ids()
+        .is_empty()
     {
         return Err("Stop all running or starting browsers before updating the runtime".into());
     }
 
-    let manifest = fetch_manifest().await;
+    let manifest = bundled_manifest();
     let local = load_manifest();
-    let mut browser_etag = local.browser_etag.clone().unwrap_or_default();
-    let mut widevine_etag = local.widevine_etag.clone();
-    let mut fingerprints_etag = local.fingerprints_etag.clone();
-
-    let mut browser_replaced = false;
-    match component.as_str() {
-        "chromium" => {
-            let (b, w) = install_complete_runtime_transactionally(&window, &spec, &base)
-                .await
-                .map_err(|error| error.to_string())?;
-            browser_etag = b;
-            widevine_etag = Some(w);
-            record_pending_migration(
-                &manifest,
-                &browser_etag,
-                widevine_etag.clone(),
-                fingerprints_etag.clone(),
-            )
-            .map_err(|e| e.to_string())?;
-            browser_replaced = true;
-        }
-        "widevine" => {
-            let w = install_widevine_transactionally(&window, &spec.widevine, &base)
-                .await
-                .map_err(|error| error.to_string())?;
-            widevine_etag = Some(w);
-        }
-        "fingerprints" => {
-            let fp_remote = manifest
-                .archives
-                .get(FINGERPRINTS_ARCHIVE_KEY)
-                .map(|s| s.as_str());
-            let etag =
-                install_fingerprints(&window, true, local.fingerprints_etag.as_deref(), fp_remote)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            fingerprints_etag = etag.or(fingerprints_etag);
-        }
+    let selection = match component.as_str() {
+        "chromium" => [true, true, true],
+        "widevine" => [false, true, false],
+        "fingerprints" => [false, false, true],
         _ => return Err(format!("Unknown runtime component: {component}")),
-    }
-
-    // A descriptor migration is justified only by a successful Chromium
-    // component update. Local Widevine/fingerprint updates must preserve UA,
-    // client hints, and every Chromium-version field in the persisted manifest.
-    let target_ver = manifest
-        .chromium_version
-        .clone()
-        .unwrap_or_else(|| CHROMIUM_VERSION.to_string());
-    let sig = format!(
-        "{target_ver}|{}|{}",
-        manifest.grease_brand.as_deref().unwrap_or(""),
-        manifest.grease_version.as_deref().unwrap_or(""),
-    );
-    let chromium = if browser_replaced {
-        {
-            let n = migrate_all_to(
-                &target_ver,
-                manifest.grease_brand.as_deref(),
-                manifest.grease_version.as_deref(),
-            )
-            .map_err(|error| {
-                format!("Runtime installed, but profile migration failed; retry Repair: {error:#}")
-            })?;
-            if n > 0 {
-                eprintln!("[runtime] migrated {n} profile/fingerprint file(s) to {sig}");
-            }
-        }
-        updated_chromium_state(
-            target_ver.clone(),
-            sig,
-            installed_engine_version().or(Some(target_ver)),
-            browser_etag,
-            Some(manifest.clone()),
-        )
-    } else {
-        chromium_state(&local)
     };
 
-    save_manifest(&manifest_with_chromium_state(
-        chromium,
-        widevine_etag,
-        fingerprints_etag,
-    ))
-    .map_err(|e| e.to_string())?;
+    if let (Some(pinned), Some(installed)) = (
+        manifest.chromium_version.as_deref(),
+        effective_installed_version(&local),
+    ) {
+        if version_is_newer(&installed, Some(pinned)) {
+            return Err(
+                "The installed runtime is newer than this launcher's pinned snapshot".into(),
+            );
+        }
+        if !selection[0] && installed != pinned {
+            return Err(
+                "Update Chromium to the pinned runtime before updating individual components"
+                    .into(),
+            );
+        }
+    }
+    install_snapshot(&window, &base, &manifest, local, selection)
+        .await
+        .map_err(|error| format!("{error:#}"))?;
 
     let _ = window.emit("runtime:done", ());
     schedule_update_check();
     runtime_local_status()
 }
 
-async fn install_complete_runtime_transactionally(
+async fn install_snapshot(
     window: &Window,
-    spec: &PlatformSpec,
     base: &Path,
-) -> Result<(String, String)> {
+    metadata: &RemoteManifest,
+    mut next: Manifest,
+    [browser, widevine, fingerprints]: [bool; 3],
+) -> Result<()> {
+    if !(browser || widevine || fingerprints) {
+        return Ok(());
+    }
+    crate::profile::recover_interrupted_operations()?;
     let stage = base.join(RUNTIME_STAGE_DIR);
-    let _ = fs::remove_dir_all(&stage);
+    if stage.exists() {
+        fs::remove_dir_all(&stage)?;
+    }
     fs::create_dir_all(&stage)?;
+    let mut transaction_started = false;
     let prepared = async {
-        let browser_etag = download_and_extract(window, &spec.browser, &stage).await?;
-        let widevine_etag = download_and_extract(window, &spec.widevine, &stage).await?;
-        place_widevine(&stage)?;
-        validate_runtime_tree(&stage)?;
-        Ok::<_, anyhow::Error>((browser_etag, widevine_etag))
-    }
-    .await;
-    let (browser_etag, widevine_etag) = match prepared {
-        Ok(value) => value,
-        Err(error) => {
-            let _ = fs::remove_dir_all(&stage);
-            return Err(error);
+        let spec = host_spec();
+        let engine = stage.join(engine_root_dir());
+        let mut replacements = Vec::new();
+        let version = metadata
+            .chromium_version
+            .as_deref()
+            .context("Pinned runtime has no Chromium version")?;
+        if browser {
+            next.browser_etag =
+                Some(download_and_extract(window, &spec.browser, &stage, metadata).await?);
+            let actual = engine_version_in(&engine)?;
+            anyhow::ensure!(
+                actual == version,
+                "Runtime version {actual} does not match pinned version {version}"
+            );
+            next.installed_chromium_version = Some(actual);
+            next.applied_chromium_version = Some(version.to_owned());
+            next.applied_signature = Some(format!(
+                "{version}|{}|{}",
+                metadata.grease_brand.as_deref().unwrap_or_default(),
+                metadata.grease_version.as_deref().unwrap_or_default()
+            ));
+            next.installed_metadata = Some(metadata.clone());
+            replacements.push((engine.clone(), base.join(engine_root_dir())));
         }
-    };
-
-    replace_directory_transactionally(
-        &stage.join(engine_root_dir()),
-        &base.join(engine_root_dir()),
-        &base.join(ENGINE_ROLLBACK_DIR),
-    )?;
-    let _ = fs::remove_dir_all(&stage);
-    Ok((browser_etag, widevine_etag))
-}
-
-async fn install_widevine_transactionally(
-    window: &Window,
-    spec: &ArchiveSpec,
-    base: &Path,
-) -> Result<String> {
-    let stage = base.join(RUNTIME_STAGE_DIR);
-    let _ = fs::remove_dir_all(&stage);
-    fs::create_dir_all(&stage)?;
-    let result = async {
-        let etag = download_and_extract(window, spec, &stage).await?;
-        let staged = stage.join("ShardX-Widevine-Win").join("WidevineCdm");
-        validate_widevine_tree(&staged)?;
-        replace_directory_transactionally(
-            &staged,
-            &base.join(engine_root_dir()).join("WidevineCdm"),
-            &base.join(WIDEVINE_ROLLBACK_DIR),
-        )?;
-        Ok::<_, anyhow::Error>(etag)
-    }
-    .await;
-    let _ = fs::remove_dir_all(&stage);
-    result
-}
-
-fn replace_directory_transactionally(staged: &Path, live: &Path, rollback: &Path) -> Result<()> {
-    if !staged.is_dir() {
-        anyhow::bail!("staged Runtime directory is missing: {}", staged.display());
-    }
-    if rollback.exists() {
-        fs::remove_dir_all(rollback).with_context(|| {
-            format!(
-                "remove stale Runtime rollback directory {}",
-                rollback.display()
-            )
-        })?;
-    }
-    let had_live = live.exists();
-    if had_live {
-        fs::rename(live, rollback)
-            .with_context(|| format!("move current Runtime {} to rollback", live.display()))?;
-    }
-    if let Err(error) = fs::rename(staged, live) {
-        if had_live {
-            if let Err(rollback_error) = fs::rename(rollback, live) {
-                return Err(anyhow::anyhow!(
-                    "failed to publish staged Runtime {}: {error}; restoring the previous Runtime also failed: {rollback_error}",
-                    live.display()
-                ));
+        if widevine {
+            next.widevine_etag =
+                Some(download_and_extract(window, &spec.widevine, &stage, metadata).await?);
+            if browser {
+                place_widevine(&stage)?;
+                validate_complete_engine_tree(&engine)?;
+            } else {
+                let cdm = stage.join("ShardX-Widevine-Win/WidevineCdm");
+                validate_widevine_tree(&cdm)?;
+                replacements.push((cdm, base.join(engine_root_dir()).join("WidevineCdm")));
             }
         }
-        return Err(error).with_context(|| format!("publish staged Runtime {}", live.display()));
-    }
-    if rollback.exists() {
-        if let Err(error) = fs::remove_dir_all(rollback) {
-            eprintln!(
-                "[runtime] installed successfully but could not remove rollback {}: {error}",
-                rollback.display()
-            );
+        let incoming = stage.join("Incoming_Fingerprints");
+        if fingerprints {
+            fs::create_dir(&incoming)?;
+            let archive = ArchiveSpec {
+                key: FINGERPRINTS_ARCHIVE_KEY.into(),
+                label: "Fingerprint library".into(),
+            };
+            next.fingerprints_etag =
+                Some(download_and_extract(window, &archive, &incoming, metadata).await?);
         }
+        let _guard = crate::process::lock_profile_resources()?;
+        let staged_fp = stage.join("Fingerprints");
+        if fingerprints || browser {
+            let live = crate::store::fingerprints_dir()?;
+            copy_runtime_descriptors(&live, &staged_fp)?;
+            if fingerprints {
+                let wrapped = incoming.join(FINGERPRINTS_TOP_DIR);
+                let source = if wrapped.is_dir() { wrapped } else { incoming };
+                let mut count = 0;
+                for entry in fs::read_dir(source)? {
+                    let entry = entry?;
+                    if entry.path().extension().and_then(|value| value.to_str()) == Some("json") {
+                        let bytes = fs::read(entry.path())?;
+                        let _: serde_json::Map<String, serde_json::Value> =
+                            serde_json::from_slice(&bytes)?;
+                        fs::write(staged_fp.join(entry.file_name()), bytes)?;
+                        count += 1;
+                    }
+                }
+                anyhow::ensure!(count > 0, "Pinned fingerprint archive has no templates");
+            }
+            if browser {
+                migrate_fingerprint_dir_to(
+                    &staged_fp,
+                    version,
+                    metadata.grease_brand.as_deref(),
+                    metadata.grease_version.as_deref(),
+                )?;
+            }
+            collect_descriptor_replacements(&staged_fp, &live, &mut replacements)?;
+        }
+        if browser {
+            let live = crate::store::profiles_dir()?;
+            let staged = stage.join("Profiles");
+            copy_runtime_descriptors(&live, &staged)?;
+            migrate_profile_dir_to(
+                &staged,
+                version,
+                metadata.grease_brand.as_deref(),
+                metadata.grease_version.as_deref(),
+            )?;
+            collect_descriptor_replacements(&staged, &live, &mut replacements)?;
+        }
+        let state = stage.join("manifest.json");
+        let bytes = serde_json::to_vec_pretty(&next)?;
+        crate::store::publish_bytes(&state, &bytes)?;
+        let state_backup = stage.join("manifest.json.bak");
+        crate::store::publish_bytes(&state_backup, &bytes)?;
+        replacements.push((state, manifest_path()?));
+        replacements.push((state_backup, crate::store::backup_path(&manifest_path()?)?));
+        let mut moves = Vec::new();
+        for (index, (from, to)) in replacements.into_iter().enumerate() {
+            if to.try_exists()? {
+                moves.push(crate::profile::FileMove {
+                    from: to.clone(),
+                    to: stage.join("Rollback").join(index.to_string()),
+                });
+            }
+            moves.push(crate::profile::FileMove { from, to });
+        }
+        transaction_started = true;
+        crate::profile::transfer_files(moves, Vec::new(), vec![stage.clone()], vec![stage.clone()])
     }
-    Ok(())
+    .await;
+    if !transaction_started {
+        fs::remove_dir_all(&stage)?;
+    }
+    prepared
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1405,76 +1349,48 @@ fn validate_complete_engine_tree(root: &Path) -> Result<()> {
     validate_widevine_tree(&root.join("WidevineCdm"))
 }
 
-fn validate_runtime_tree(root: &Path) -> Result<()> {
-    validate_complete_engine_tree(&root.join(engine_root_dir()))
-}
-
 fn validate_widevine_tree(root: &Path) -> Result<()> {
     let manifest = root.join("manifest.json");
-    let metadata = fs::metadata(&manifest).context("staged Widevine manifest is missing")?;
-    if !metadata.is_file() || metadata.len() == 0 {
-        anyhow::bail!("staged Widevine manifest is empty");
-    }
+    let document: serde_json::Value = serde_json::from_slice(&fs::read(&manifest)?)
+        .with_context(|| format!("Read Widevine manifest {}", manifest.display()))?;
+    anyhow::ensure!(
+        document
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|version| !version.is_empty()),
+        "Widevine manifest has no version: {}",
+        manifest.display()
+    );
+    let cdm = root.join("_platform_specific/win_x64/widevinecdm.dll");
+    anyhow::ensure!(
+        fs::metadata(&cdm).is_ok_and(|file| file.is_file() && file.len() > 0),
+        "Widevine DLL is missing or empty: {}",
+        cdm.display()
+    );
     Ok(())
 }
 
-/// Download + seed fingerprint library. Bundled templates are always
-/// overwritten (so version bumps propagate); user-added files are left in place.
-async fn install_fingerprints(
-    window: &Window,
-    force: bool,
-    local_etag: Option<&str>,
-    remote_etag: Option<&str>,
-) -> Result<Option<String>> {
-    if !force {
-        if let (Some(local), Some(remote)) = (local_etag, remote_etag) {
-            if local == remote {
-                return Ok(None);
-            }
-        }
-    }
-
-    let dir = crate::store::fingerprints_dir()?;
-    let spec = ArchiveSpec {
-        key: FINGERPRINTS_ARCHIVE_KEY.into(),
-        label: "Fingerprint library".into(),
-    };
-    // Stage outside fingerprints_dir to keep the zip wrapper dir out of the library.
-    let staging = dir.join(".staging");
-    let _ = fs::remove_dir_all(&staging);
-    fs::create_dir_all(&staging)?;
-    let etag = download_and_extract(window, &spec, &staging).await?;
-
-    let src = staging.join(FINGERPRINTS_TOP_DIR);
-    let walk = if src.exists() { src } else { staging.clone() };
-    let mut added = 0;
-    let mut overwritten = 0;
-    for ent in fs::read_dir(&walk)? {
-        let ent = ent?;
-        let p = ent.path();
-        if p.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        // Always overwrite bundled templates so engine-version bumps reach
-        // existing libraries. User-added fingerprints (names not in the bundle)
-        // are never iterated here, so they stay untouched.
-        let dst = dir.join(p.file_name().unwrap());
-        let existed = dst.exists();
-        crate::store::atomic_write(&dst, &fs::read(&p)?)?;
-        if existed {
-            overwritten += 1;
-        } else {
-            added += 1;
-        }
-    }
-    let _ = fs::remove_dir_all(&staging);
-    eprintln!("[runtime] fingerprints sync: added={added} overwritten={overwritten}");
-    Ok(Some(etag))
-}
-
 /// Stream archive → temp file → extract; emits `runtime:progress` events.
-async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) -> Result<String> {
-    let url = format!("{PUB_BASE}/{}", spec.key);
+async fn download_and_extract(
+    window: &Window,
+    spec: &ArchiveSpec,
+    base: &Path,
+    manifest: &RemoteManifest,
+) -> Result<String> {
+    let snapshot = manifest
+        .windows_snapshot
+        .as_ref()
+        .context("Runtime snapshot is not pinned")?;
+    let url = format!("{}/{}-{}", snapshot.asset_base, snapshot.id, spec.key);
+    let expected_size = *snapshot
+        .sizes
+        .get(&spec.key)
+        .context("Missing pinned runtime asset size")?;
+    let etag = manifest
+        .archives
+        .get(&spec.key)
+        .context("Missing pinned runtime archive ETag")?
+        .clone();
     let _ = window.emit(
         "runtime:progress",
         serde_json::json!({
@@ -1498,12 +1414,6 @@ async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) 
             MAX_RUNTIME_ARCHIVE_BYTES / 1024 / 1024 / 1024
         );
     }
-    let etag = resp
-        .headers()
-        .get("etag")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim_matches('"').to_string())
-        .unwrap_or_default();
 
     let tmp = base.join(format!("{}.tmp", spec.key));
     let operation = async {
@@ -1540,6 +1450,7 @@ async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) 
         }
         out.flush().await?;
         drop(out);
+        anyhow::ensure!(received == expected_size, "Runtime asset {} has {received} bytes; expected {expected_size}", spec.key);
 
         let _ = window.emit(
             "runtime:progress",
@@ -1619,9 +1530,7 @@ async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) 
 /// Windows flat layout: WidevineCdm/ sits beside chrome.exe.
 fn place_widevine(base: &Path) -> Result<()> {
     let src = base.join("ShardX-Widevine-Win").join("WidevineCdm");
-    if !src.exists() {
-        return Ok(());
-    }
+    validate_widevine_tree(&src)?;
     let dst = base.join("ShardX-Windows").join("WidevineCdm");
     if dst.exists() {
         let _ = fs::remove_dir_all(&dst);
@@ -1709,19 +1618,26 @@ mod tests {
             serde_json::json!({ "cipher_suites": [1], "shuffle_extensions": false }),
         );
         let old_identity = new_identity.clone();
+        let previous_metadata = RemoteManifest {
+            chromium_version: Some("157.0.8103.50".into()),
+            grease_version: Some("99".into()),
+            tls: Some(serde_json::Map::from_iter([(
+                "cipher_suites".into(),
+                serde_json::json!([2]),
+            )])),
+            ..Default::default()
+        };
         prepare_identity_for_engine(
             &mut new_identity,
             &Manifest {
                 installed_chromium_version: Some("157.0.8103.50".into()),
+                installed_metadata: Some(previous_metadata),
                 ..Default::default()
             },
         );
         assert_eq!(new_identity["client_hints"]["brand_version"], "157");
         assert_eq!(new_identity["client_hints"]["grease_version"], "99");
-        assert_eq!(
-            new_identity["tls"]["cipher_suites"],
-            bundled_manifest().tls.unwrap()["cipher_suites"]
-        );
+        assert_eq!(new_identity["tls"]["cipher_suites"], serde_json::json!([2]));
         assert_eq!(new_identity["tls"]["shuffle_extensions"], false);
         assert_eq!(old_identity["tls"]["cipher_suites"], serde_json::json!([1]));
         let mut older_engine = old_identity.clone();
@@ -1814,6 +1730,28 @@ mod tests {
         assert!(is_chromium_replacement_needed(false, true));
         assert!(is_chromium_replacement_needed(true, false));
         assert!(!is_chromium_replacement_needed(false, false));
+    }
+
+    #[test]
+    fn repair_requires_explicit_upgrade_only_for_older_unpinned_installations() {
+        let _store = crate::store::TestStore::new();
+        let pinned = bundled_manifest();
+        let mut installed = Manifest {
+            browser_etag: Some("legacy-build".into()),
+            installed_chromium_version: Some("157.0.8103.50".into()),
+            ..Manifest::default()
+        };
+        assert!(repair_manifest(&installed).is_err());
+        assert!(local_status(&installed).repair_requires_upgrade);
+
+        installed.installed_chromium_version = Some("159.0.0.0".into());
+        assert!(repair_manifest(&installed).is_err());
+        assert!(!local_status(&installed).repair_requires_upgrade);
+
+        installed.installed_metadata = Some(pinned.clone());
+        assert_eq!(repair_manifest(&installed).unwrap(), pinned);
+        assert!(!local_status(&installed).repair_requires_upgrade);
+        assert_eq!(repair_manifest(&Manifest::default()).unwrap(), pinned);
     }
 
     #[test]

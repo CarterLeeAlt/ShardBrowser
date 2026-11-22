@@ -132,7 +132,7 @@
 默认使用独立的数据目录：
 
 * **桌面 UI** — 日常工作区（环境、代理、Cookie、指纹编辑器）。
-* **本地 HTTP API** — `127.0.0.1:40325` 上的 Bearer-JWT 认证接口；用任意
+* **本地 HTTP API** — 默认 `127.0.0.1:30325` 上的 Bearer-JWT 认证接口；用任意
   语言创建 / 启动 / 停止环境并获取 CDP 端点。
 * **MCP 服务器** — 接入 Claude Desktop / Cursor，用自然语言编排环境
   （HTTP API + 经 CDP 的浏览器控制）。
@@ -346,15 +346,16 @@ browserscan.net、fp.haru.gay、antcpt 的 reCAPTCHA 得分检测器 — 通常�
 提供两种产物，按需选择：
 
 * **`ShardX-Launcher-portable-win-x64.exe`（便携版）** — 单文件便携
-  EXE，首次启动时从 CDN 下载浏览器运行时（约 150 MB）、Widevine（约
-  16 MB）与指纹库（约 470 KB）。适合日常使用，升级体积最小。
+  EXE，首次启动时从 `runtime-archive` Release 下载本版本锁定的浏览器、
+  Widevine 和指纹库。适合日常使用，下载的启动器体积最小。
 * **`ShardX-Launcher-selfcontained-win-x64.zip`（自包含版）** — 内置
   启动器 + 浏览器运行时 + Widevine + 指纹库并预置版本快照，解压即用，
-  首次启动无任何 CDN 下载（之后仍走应用内更新检查）。适合离线分发或
+  首次启动无需下载运行时。适合离线分发或
   网络受限环境。
 
-自包含包由独立的 `runtime-archive` Release 供料（"Sync runtime archive"
-工作流播种）。
+两种产物都使用 `runtime.json` 锁定的 `runtime-archive` 快照。先用
+"Sync runtime archive" 工作流上传快照，发布门禁再分别验证自包含包启动和
+便携 EXE 首次安装。应用内的运行时更新只安装该 Launcher 配套的快照。
 
 发行版未做 Authenticode 签名。若 SmartScreen 提示 *"Windows 已保护你的
 电脑"*，点击**更多信息** → **仍要运行**。重复启动不会再次提示。
@@ -422,7 +423,7 @@ Widevine（约 16 MB）与指纹库（约 470 KB）；**自包含版**跳过全�
 
 ### 2. 本地自动化 API
 
-运行于 `127.0.0.1:40325` 的 axum HTTP 服务器（端口可在
+默认运行于 `127.0.0.1:30325` 的 axum HTTP 服务器（端口可在
 *Settings → Automation API* 配置）。适合在自己的代码中驱动启动器 —
 Python、Go、curl，任何能说 HTTP 的语言。除 `GET /health` 外的每个端点
 都要求 *Settings → Automation API* 中显示的 Bearer JWT（重新生成会即时
@@ -436,7 +437,7 @@ Python、Go、curl，任何能说 HTTP 的语言。除 `GET /health` 外的每�
 
 ```bash
 TOKEN="<来自 Settings → Automation API>"
-BASE="http://127.0.0.1:40325"
+BASE="http://127.0.0.1:30325"
 
 # 以 CDP 模式启动环境 — 返回浏览器监听的 websocket。
 # 可接入任何 CDP 客户端（puppeteer、原生 WS、patchright、自研等）。
@@ -478,7 +479,7 @@ server*，源码会安装到启动器便携数据目录的 `mcp` 下。在其中
       "command": "node",
       "args": ["/ABSOLUTE/PATH/TO/LAUNCHER-DATA/mcp/index.js"],
       "env": {
-        "SHARDX_API": "http://127.0.0.1:40325",
+        "SHARDX_API": "http://127.0.0.1:30325",
         "SHARDX_TOKEN": "<Bearer token>"
       }
     }

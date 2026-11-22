@@ -91,9 +91,7 @@ fn show_invalid_path_and_exit(directory: Option<&Path>, detail: Option<&str>) ->
     let message = format!(
         "启动器所在目录的路径不合法。\n\n\
          当前目录：{location}\n\n\
-         路径中的每一级目录名称只能包含英文字母（A-Z、a-z）、数字（0-9）、\
-         空格、连字符（-）和下划线（_），不能包含中文或其他符号。\n\n\
-         软件将彻底退出。请将启动器移动到合法路径（例如 C:\\ShardX 123\\Launcher_x64）后重新启动。\
+         各级目录名称只能包含英文字母、数字、空格、连字符（-）和下划线（_）。\
          {detail}"
     );
 
@@ -103,14 +101,12 @@ fn show_invalid_path_and_exit(directory: Option<&Path>, detail: Option<&str>) ->
 
 fn show_unwritable_path_and_exit(directory: &Path, detail: &str) -> ! {
     let message = format!(
-        "启动器所在目录没有写入权限。\n\n\
+        "无法在启动器旁使用便携数据目录。\n\n\
          当前目录：{}\n\n\
-         ShardX Launcher 是纯绿色软件，浏览器 Runtime、Profiles、Cookies、设置和 WebView2 数据都必须保存在启动器旁边，不会写入 AppData 或其他目录。\n\n\
-         软件将彻底退出。请把启动器移动到当前用户可读写的目录后重新启动，例如 D:\\ShardX Launcher。\n\n\
          错误详情：{detail}",
         directory.display()
     );
-    show_error_message(&message, "ShardX Launcher - 目录不可写");
+    show_error_message(&message, "ShardX Launcher - 无法使用数据目录");
     std::process::exit(INVALID_PATH_EXIT_CODE);
 }
 

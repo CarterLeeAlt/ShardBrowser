@@ -134,7 +134,7 @@ export function fromStored(stored: any): ProfileForm {
   f.timezone = stored?.timezone ?? AUTO_TZ;
   f.language = stored?.navigator?.language ?? AUTO_LANG;
   f.webrtc = (stored?.webrtc === "replace" ? "tcp_only" : stored?.webrtc) ?? "block";
-  f.do_not_track = stored?.navigator?.do_not_track === "1" || stored?.navigator?.do_not_track === true;
+  f.do_not_track = stored?.navigator?.do_not_track === true;
 
   const noise = stored?.noise ?? {};
   const noiseMode = (n: any): NoiseMode => (n?.enabled ? "auto" : "real");
@@ -145,8 +145,8 @@ export function fromStored(stored: any): ProfileForm {
   f.noise_sensors = noiseMode(noise.sensors);
   // Fonts default OFF (real); mirrors C++ default.
   f.noise_fonts = noiseMode(noise.fonts);
-  f.blocked_ports = Array.isArray(stored?.blocked_ports)
-    ? stored.blocked_ports.filter((n: any) => typeof n === "number")
+  f.blocked_ports = Array.isArray(stored?.network?.blocked_ports)
+    ? stored.network.blocked_ports.filter((n: any) => typeof n === "number")
     : DEFAULT_BLOCKED_PORTS.slice();
 
   const geo = stored?.geolocation ?? {};
@@ -200,7 +200,7 @@ export function toStored(f: ProfileForm, lib: { payload: any } | null, existing:
   for (const key of ["user_agent", "hardware_concurrency", "device_memory"] as const) {
     if (changed(key)) base.navigator[key] = f[key];
   }
-  if (changed("do_not_track")) base.navigator.do_not_track = f.do_not_track ? "1" : null;
+  if (changed("do_not_track")) base.navigator.do_not_track = f.do_not_track;
   if (changed("platform_version") && f.platform_version) {
     base.navigator.platform_version = f.platform_version;
     base.client_hints = {
@@ -245,7 +245,7 @@ export function toStored(f: ProfileForm, lib: { payload: any } | null, existing:
       base.noise = { ...base.noise, [slot]: { ...base.noise?.[slot], ...editedNoise[slot] } };
     }
   }
-  if (changed("blocked_ports")) base.blocked_ports = [...f.blocked_ports].sort((a, b) => a - b);
+  if (changed("blocked_ports")) base.network = { ...base.network, blocked_ports: [...f.blocked_ports].sort((a, b) => a - b) };
 
   return base;
 }

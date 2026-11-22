@@ -11,7 +11,7 @@ info:
 
     ## Binding & lifecycle
     The server runs inside the launcher app, bound to **127.0.0.1** only,
-    on the port configured in *Settings → Automation API* (default **40325**).
+    on the port configured in *Settings → Automation API* (default **30325**).
     It is **not** reachable from other hosts. Enabling/port changes take
     effect after the app restarts.
     Settings and the sidebar show the actual listener state, including bind
@@ -104,7 +104,7 @@ info:
     not run it.)
 
 servers:
-  - url: http://127.0.0.1:40325
+  - url: http://127.0.0.1:30325
     description: Local launcher (default port; change in Settings)
 
 security:

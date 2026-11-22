@@ -1584,7 +1584,9 @@ mod tests {
             assert!(inspect_process(pid).unwrap().is_none());
             assert!(!Tracker::shared().is_running_profile(id));
             let state = Tracker::shared().launcher_state().unwrap();
-            assert!(state.running.is_empty() && state.starting.is_empty() && state.stopping.is_empty());
+            assert!(
+                state.running.is_empty() && state.starting.is_empty() && state.stopping.is_empty()
+            );
             let saved: LeaseFile =
                 crate::store::load_json_with_backup(&crate::store::process_leases_path().unwrap())
                     .unwrap();
@@ -1713,7 +1715,10 @@ mod tests {
         for (name, matches) in [("profile one", true), ("anchor", false)] {
             let path = alias.join("..").join(name);
             let command = format!(r#"browser.exe "--user-data-dir={}""#, path.display());
-            assert_eq!(command_line_uses_user_data_dir(&command, &expected), matches);
+            assert_eq!(
+                command_line_uses_user_data_dir(&command, &expected),
+                matches
+            );
         }
     }
 

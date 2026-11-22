@@ -5,7 +5,8 @@ import { mergeProfileEdits } from "../src/profileEdit.ts";
 const original = {
   _meta: { id: "identity", gpu_preset_id: "preset", extensions: ["extension"], proxy_id: "proxy" }, _revision: "original",
   name: "Original", notes: "before", timezone: "Asia/Shanghai", icu_locale: "zh-Hans-CN",
-  navigator: { language: "zh-CN", languages: ["zh-CN", "en-US", "fr"], accept_language: "zh-CN,en-US;q=0.7,fr;q=0.4", do_not_track: "0", platform_version: "17.0.0" },
+  navigator: { language: "zh-CN", languages: ["zh-CN", "en-US", "fr"], accept_language: "zh-CN,en-US;q=0.7,fr;q=0.4", do_not_track: false, platform_version: "17.0.0" },
+  network: { blocked_ports: [8080], extra: "preserve" },
   screen: { width: 1200 }, window: { width: 1000 },
   noise: { canvas: { enabled: true, seed: 9183, extra: "preserve" } },
 };
@@ -25,7 +26,8 @@ assert.equal(merged.name, "Renamed"); assert.equal(merged.notes, "external");
 assert.deepEqual(merged._meta.extensions, latest._meta.extensions); assert.equal(merged._revision, "latest");
 assert.throws(() => mergeProfileEdits(original, edited, { ...latest, name: "Concurrent" }), /name/);
 const enabled = toStored({ ...form, do_not_track: true }, null, original, form);
-assert.equal(enabled.navigator.do_not_track, "1");
+assert.equal(enabled.navigator.do_not_track, true);
+assert.deepEqual(toStored({ ...form, blocked_ports: [32325] }, null, original, form).network, { blocked_ports: [32325], extra: "preserve" });
 assert.deepEqual(enabled.navigator.languages, original.navigator.languages);
 
 const manualLanguage = toStored({ ...form, language: "fr-FR" }, null, original, form);

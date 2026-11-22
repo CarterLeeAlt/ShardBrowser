@@ -160,6 +160,13 @@ pub async fn launch_profile(
 
     // Prepare files only after the bound proxy passes preflight.
     let udd = profile::user_data_dir(profile_id)?;
+    if let Some(enabled) = raw
+        .get("navigator")
+        .and_then(|nav| nav.get("do_not_track"))
+        .and_then(serde_json::Value::as_bool)
+    {
+        apply_do_not_track(&udd, enabled)?;
+    }
     let launch_bin = if headless {
         bin.clone()
     } else {
@@ -720,12 +727,82 @@ async fn resolve_auto_fields(
     Ok(())
 }
 
+fn apply_do_not_track(user_data: &Path, enabled: bool) -> Result<()> {
+    let state = user_data.join("Local State");
+    let mut profiles = std::collections::BTreeSet::from(["Default".to_owned()]);
+    match std::fs::read(&state) {
+        Ok(bytes) => {
+            let value: serde_json::Value =
+                serde_json::from_slice(&bytes).context("Read Chromium Local State for DNT")?;
+            if let Some(entries) = value
+                .pointer("/profile/info_cache")
+                .and_then(serde_json::Value::as_object)
+            {
+                profiles.extend(entries.keys().cloned());
+            }
+            if let Some(name) = value
+                .pointer("/profile/last_used")
+                .and_then(serde_json::Value::as_str)
+            {
+                profiles.insert(name.to_owned());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("Read Chromium Local State for DNT"),
+    }
+    let mut changes = Vec::new();
+    for name in profiles {
+        anyhow::ensure!(
+            name != "." && name != ".." && !name.contains(['/', '\\', ':']) && !name.is_empty(),
+            "Invalid Chromium profile directory for DNT"
+        );
+        let dir = user_data.join(&name);
+        for path in [dir.clone(), dir.join("Preferences")] {
+            if let Ok(meta) = std::fs::symlink_metadata(&path) {
+                use std::os::windows::fs::MetadataExt;
+                anyhow::ensure!(
+                    meta.file_attributes() & 0x400 == 0,
+                    "DNT preferences must not traverse a reparse point: {}",
+                    path.display()
+                );
+            }
+        }
+        let path = dir.join("Preferences");
+        let mut prefs: serde_json::Map<String, serde_json::Value> = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .with_context(|| format!("Read Chromium preferences {}", path.display()))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Read Chromium preferences {}", path.display()))
+            }
+        };
+        if prefs
+            .get("enable_do_not_track")
+            .and_then(serde_json::Value::as_bool)
+            != Some(enabled)
+        {
+            prefs.insert("enable_do_not_track".into(), enabled.into());
+            changes.push((path, serde_json::to_vec(&prefs)?));
+        }
+    }
+    for (path, content) in changes {
+        store::publish_bytes(&path, &content)
+            .with_context(|| format!("Apply DNT to {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// Copy the installed runtime CDM into Chromium's per-profile versioned layout.
 fn install_widevine(udd: &Path) -> Result<()> {
     let src = crate::runtime::widevine_dir()?;
     let manifest_path = src.join("manifest.json");
-    let manifest_text = std::fs::read_to_string(&manifest_path)
-        .with_context(|| format!("read installed Widevine manifest {}", manifest_path.display()))?;
+    let manifest_text = std::fs::read_to_string(&manifest_path).with_context(|| {
+        format!(
+            "read installed Widevine manifest {}",
+            manifest_path.display()
+        )
+    })?;
     let manifest: serde_json::Value =
         serde_json::from_str(&manifest_text).context("parse widevine manifest.json")?;
     let version = manifest
@@ -790,9 +867,74 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read host TZ from /etc/localtime symlink, fall back to $TZ.
+fn host_timezone() -> Option<String> {
+    if let Ok(target) = std::fs::read_link("/etc/localtime") {
+        let path = target.to_string_lossy().into_owned();
+        for prefix in ["/usr/share/zoneinfo/", "/var/db/timezone/zoneinfo/"] {
+            if let Some(tz) = path.strip_prefix(prefix) {
+                return Some(tz.to_string());
+            }
+        }
+    }
+    std::env::var("TZ").ok().filter(|s| !s.is_empty())
+}
+
+/// Extract BCP-47 locale from $LANG/$LC_ALL ("en_US.UTF-8" → "en-US").
+fn host_locale() -> Option<String> {
+    for var in ["LANG", "LC_ALL", "LC_MESSAGES"] {
+        if let Ok(v) = std::env::var(var) {
+            let stripped = v.split('.').next().unwrap_or("").replace('_', "-");
+            if stripped.contains('-') {
+                return Some(stripped);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn do_not_track_preserves_preferences_for_each_chromium_profile() {
+        let store = store::TestStore::new();
+        let prefs = r#"{"profile":{"name":"Keep"},"enable_do_not_track":false}"#;
+        for name in ["Default", "Profile 2", "Profile 3"] {
+            let dir = store.root.join(name);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("Preferences"), prefs).unwrap();
+        }
+        std::fs::write(
+            store.root.join("Local State"),
+            r#"{"profile":{"info_cache":{"Profile 2":{}},"last_used":"Profile 3"}}"#,
+        )
+        .unwrap();
+        for enabled in [true, false] {
+            apply_do_not_track(&store.root, enabled).unwrap();
+            for name in ["Default", "Profile 2", "Profile 3"] {
+                let actual: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(store.root.join(name).join("Preferences")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    actual,
+                    serde_json::json!({"profile":{"name":"Keep"},"enable_do_not_track":enabled})
+                );
+            }
+        }
+        std::fs::write(store.root.join("Profile 2/Preferences"), b"{").unwrap();
+        assert!(apply_do_not_track(&store.root, true).is_err());
+        assert_eq!(
+            std::fs::read(store.root.join("Profile 2/Preferences")).unwrap(),
+            b"{"
+        );
+        let untouched: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.root.join("Default/Preferences")).unwrap())
+                .unwrap();
+        assert_eq!(untouched["enable_do_not_track"], false);
+    }
 
     #[test]
     fn widevine_is_copied_from_the_installed_runtime() {
@@ -821,30 +963,4 @@ mod tests {
         );
         assert_eq!(std::fs::read(version.join(dll)).unwrap(), b"test CDM");
     }
-}
-
-/// Read host TZ from /etc/localtime symlink, fall back to $TZ.
-fn host_timezone() -> Option<String> {
-    if let Ok(target) = std::fs::read_link("/etc/localtime") {
-        let path = target.to_string_lossy().into_owned();
-        for prefix in ["/usr/share/zoneinfo/", "/var/db/timezone/zoneinfo/"] {
-            if let Some(tz) = path.strip_prefix(prefix) {
-                return Some(tz.to_string());
-            }
-        }
-    }
-    std::env::var("TZ").ok().filter(|s| !s.is_empty())
-}
-
-/// Extract BCP-47 locale from $LANG/$LC_ALL ("en_US.UTF-8" → "en-US").
-fn host_locale() -> Option<String> {
-    for var in ["LANG", "LC_ALL", "LC_MESSAGES"] {
-        if let Ok(v) = std::env::var(var) {
-            let stripped = v.split('.').next().unwrap_or("").replace('_', "-");
-            if stripped.contains('-') {
-                return Some(stripped);
-            }
-        }
-    }
-    None
 }
