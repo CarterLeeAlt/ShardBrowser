@@ -332,10 +332,17 @@ async fn new_fingerprint_impl(platform: Option<String>) -> ApiResult {
 
 // ---- create-profile ----
 
+fn optional_extensions<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<String>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Deserialize)]
 struct CreateReq {
-    #[serde(default)]
-    extensions: Vec<String>,
+    #[serde(default, deserialize_with = "optional_extensions")]
+    extensions: Option<Vec<String>>,
     name: Option<String>,
     notes: Option<String>,
     proxy_id: Option<String>,
@@ -365,7 +372,10 @@ async fn persist_created(folder_override: Option<String>, body: CreateReq) -> Ap
         .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let folder = folder_override.or(body.folder).unwrap_or_default();
-    let mut meta = json!({ "id": "", "folder": folder, "extensions": body.extensions });
+    let mut meta = json!({ "id": "", "folder": folder });
+    if let Some(extensions) = body.extensions {
+        meta["extensions"] = json!(extensions);
+    }
     if let Some(pid) = body.proxy_id.as_ref() {
         meta["proxy_id"] = json!(pid);
     } else if let Some(pstr) = body.proxy.as_ref() {
@@ -406,8 +416,8 @@ async fn create_profile_in_folder(
 
 #[derive(Deserialize)]
 struct TempReq {
-    #[serde(default)]
-    extensions: Vec<String>,
+    #[serde(default, deserialize_with = "optional_extensions")]
+    extensions: Option<Vec<String>>,
     fingerprint_id: Option<String>,
     platform: Option<String>,
     /// Inline proxy (not stored).
@@ -431,7 +441,10 @@ async fn create_temporary(Json(body): Json<TempReq>) -> ApiResult {
     let profile_name = cfg.get("name").and_then(|v| v.as_str()).unwrap_or("");
     crate::display_name::normalize(profile_name)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
-    let mut meta = json!({ "id": "", "folder": body.folder.unwrap_or_default(), "temporary": true, "extensions": body.extensions });
+    let mut meta = json!({ "id": "", "folder": body.folder.unwrap_or_default(), "temporary": true });
+    if let Some(extensions) = body.extensions {
+        meta["extensions"] = json!(extensions);
+    }
     if let Some(pstr) = body.proxy.as_ref() {
         let entry = crate::proxy::parse_single(pstr).ok_or_else(|| {
             err(
@@ -906,6 +919,44 @@ pub async fn serve(secret: String, port: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn extension_defaults_apply_only_when_creating_without_a_selection() {
+        let test = crate::store::TestStore::new();
+        let create = |name, extensions: Option<Value>| {
+            let mut body = json!({ "name": name, "fingerprint": {} });
+            if let Some(extensions) = extensions {
+                body["extensions"] = extensions;
+            }
+            Json(serde_json::from_value(body).unwrap())
+        };
+        let stored_ids = |result: ApiResult| {
+            let Json(value) = result.map_err(|error| (error.0, error.1)).unwrap();
+            crate::profile::load_raw(value["id"].as_str().unwrap())
+                .unwrap()
+                .meta
+                .extensions
+        };
+        assert!(stored_ids(create_profile(create("No defaults", None)).await).is_empty());
+
+        let extension = crate::extensions::tests::fixture(&test.root.join("extension-source"));
+        let defaults = test.root.join("default-extensions.json");
+        std::fs::write(&defaults, json!([extension.id]).to_string()).unwrap();
+        assert_eq!(
+            stored_ids(create_profile(create("Default selection", None)).await),
+            std::slice::from_ref(&extension.id)
+        );
+        assert!(stored_ids(create_profile(create("Opt out", Some(json!([])))).await).is_empty());
+        assert!(crate::extensions::delete(&extension.id).is_err());
+        assert!(serde_json::from_value::<CreateReq>(json!({
+            "name": "Invalid selection", "fingerprint": {}, "extensions": null
+        }))
+        .is_err());
+
+        std::fs::write(&defaults, b"{").unwrap();
+        assert!(create_profile(create("Malformed defaults", None)).await.is_err());
+        assert!(stored_ids(create_profile(create("Explicit opt out", Some(json!([])))).await).is_empty());
+    }
 
     #[tokio::test]
     async fn profile_and_proxy_display_names_share_the_manual_rules() {

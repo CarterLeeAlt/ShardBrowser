@@ -553,8 +553,12 @@ pub fn save_profile_core(
         }
     }
 
+    let use_default_extensions = is_new && payload.pointer("/_meta/extensions").is_none();
     let mut stored: profile::StoredProfile = serde_json::from_value(payload)
         .map_err(|e| errors::Failure::InvalidInput(e.to_string()))?;
+    if use_default_extensions {
+        stored.meta.extensions = extensions::default_selection()?;
+    }
     extensions::load_paths(&stored.meta.extensions).map_err(|e| {
         e.context(errors::Failure::InvalidInput(
             "Invalid extension selection".into(),
@@ -671,6 +675,11 @@ async fn trash_empty() -> Result<usize, String> {
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn extension_defaults() -> Result<Vec<String>, String> {
+    extensions::default_selection().map_err(|error| format!("{error:#}"))
 }
 
 #[tauri::command]
@@ -1479,6 +1488,7 @@ pub fn run() {
             trash_purge,
             trash_empty,
             extension_list,
+            extension_defaults,
             extension_import,
             extension_delete,
             profile_bind_proxy,

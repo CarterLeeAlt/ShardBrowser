@@ -357,6 +357,11 @@ browserscan.net、fp.haru.gay、antcpt 的 reCAPTCHA 得分检测器 — 通常�
 "Sync runtime archive" 工作流上传快照，发布门禁再分别验证自包含包启动和
 便携 EXE 首次安装。应用内的运行时更新只安装该 Launcher 配套的快照。
 
+自用便携工作区可在 `shardx-launcher/default-extensions.json` 中用 JSON 数组
+列出已导入扩展的 ID。新建时会预选这些扩展；HTTP API 和 MCP 创建时省略
+`extensions` 也会使用这份默认值，显式传 `[]` 则不启用任何扩展。已有环境、
+克隆和恢复仍使用各自保存的扩展列表。删除默认扩展前，先从这份默认列表移除它。
+
 发行版未做 Authenticode 签名。若 SmartScreen 提示 *"Windows 已保护你的
 电脑"*，点击**更多信息** → **仍要运行**。重复启动不会再次提示。
 

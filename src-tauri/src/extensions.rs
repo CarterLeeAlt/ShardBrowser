@@ -13,6 +13,17 @@ use std::path::{Path, PathBuf};
 
 const MAX_PACKAGE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_FILES: usize = 20_000;
+const DEFAULT_SELECTION_FILE: &str = "default-extensions.json";
+
+pub(crate) fn default_selection() -> Result<Vec<String>> {
+    let path = store::config_root()?.join(DEFAULT_SELECTION_FILE);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).with_context(|| format!("Read {}", path.display())),
+    };
+    serde_json::from_slice(&bytes).with_context(|| format!("Invalid {}", path.display()))
+}
 
 #[derive(Debug, Serialize)]
 pub struct ExtensionEntry {
@@ -494,6 +505,12 @@ pub fn delete(id: &str) -> Result<()> {
     let _activity = crate::operations::activity();
     let _guard = crate::process::lock_profile_resources()?;
     profile::recover_interrupted_operations_locked()?;
+    ensure!(
+        !default_selection()?.iter().any(|selected| selected == id),
+        crate::errors::conflict(format!(
+            "Remove this extension from {DEFAULT_SELECTION_FILE} before deleting it"
+        ))
+    );
     ensure!(
         references(id)?.is_empty()
             && !crate::trash::list_locked()?

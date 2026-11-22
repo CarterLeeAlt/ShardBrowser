@@ -1564,10 +1564,13 @@ function BrowsersView() {
   };
 
   const newProfile = async () => {
-    setRenaming(null);
-    setDraft(defaultForm());
-    setDraftBaseline(null);
-    setExpanded("__new__");
+    try {
+      const extensions = await invoke<string[]>("extension_defaults");
+      setRenaming(null);
+      setDraft({ ...defaultForm(), extensions });
+      setDraftBaseline(null);
+      setExpanded("__new__");
+    } catch (e) { toast.err(String(e)); }
   };
 
   const nameError = draft ? displayNameError(draft.name, draftBaseline?.name) : null;
