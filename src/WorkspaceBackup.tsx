@@ -88,7 +88,7 @@ export function WorkspaceBackup({ run, status, result }: ReturnType<typeof useWo
   return <section className="card settings-card" aria-labelledby="workspace-backup-title">
     <h3 id="workspace-backup-title">{tr("Backup and restore")}</h3>
     <div className="row-inline">
-      <button className="btn-primary" disabled={status !== null} onClick={() => void run("export")}><Download /> {tr("Export complete backup")}</button>
+      <button className="btn-ghost" disabled={status !== null} onClick={() => void run("export")}><Download /> {tr("Export complete backup")}</button>
       <button className="btn-ghost" disabled={status !== null} onClick={() => void run("restore")}><Upload /> {tr("Restore from backup")}</button>
     </div>
     {status && status !== "confirm" && <p role="status" className="muted">{tr(status === "export" ? "Exporting backup…" : status === "inspect" ? "Verifying backup…" : "Restoring backup…")}</p>}

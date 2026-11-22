@@ -473,7 +473,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 }
 .sort-head { color: var(--tx-4); }
 .sort-handle {
-  width: 22px;
+  width: var(--table-drag-column);
   height: 28px;
   padding: 0;
   display: inline-grid;
@@ -690,7 +690,7 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   min-width: var(--table-min-width);
   gap: var(--column-gap);
   min-height: 40px;
-  padding: 5px var(--table-padding-right) 5px var(--table-padding-left);
+  padding: 5px var(--table-inline-padding);
   align-items: center;
   /* Every growing track gets its floor plus the same share of spare space. */
   --column-extra: calc((max(100cqw, var(--table-min-width)) - var(--table-tracks-width)) / var(--growing-columns));
@@ -727,6 +727,10 @@ textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
   font-size: var(--text-small);
   line-height: var(--line-small);
   font-weight: var(--font-weight-regular);
+}
+
+.browser-data-row, .proxy-data-row {
+  --font-weight-emphasis: var(--font-weight-regular);
 }
 
 .table-detail {

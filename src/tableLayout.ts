@@ -2,12 +2,11 @@ import layout from "./table-layout.json";
 
 export function applyTableLayout() {
   const tables = [["browser", "t-cols"], ["proxy", "p-cols"]] as const;
+  const fixedWidth = layout.dragColumn + layout.actionsColumn + 2 * layout.tableInlinePadding;
   const styles = tables.map(([name, grid]) => {
-    const table = layout[name];
-    // The JSON lists the growing data columns in display order.
-    const columns = [layout.dragColumn, layout.selectColumn, ...Object.values(table.columns)];
-    const minimum = columns.reduce((sum, width) => sum + width + layout.columnGap, table.actions + table.paddingLeft + table.paddingRight);
-    return { name, grid, table, columns, minimum };
+    const columns = [layout.selectColumn, ...Object.values(layout[name].columns)];
+    const minimum = columns.reduce((sum, width) => sum + width, fixedWidth + (columns.length + 1) * layout.columnGap);
+    return { name, grid, columns, minimum };
   });
   const style = document.createElement("style");
   style.textContent = `:root {
@@ -16,16 +15,21 @@ export function applyTableLayout() {
     --scrollbar-width: ${layout.scrollbarWidth}px;
     --table-border: ${layout.tableBorder}px;
     --column-gap: ${layout.columnGap}px;
+    --table-drag-column: ${layout.dragColumn}px;
+    --table-actions-column: ${layout.actionsColumn}px;
+    --table-inline-padding: ${layout.tableInlinePadding}px;
     --table-min-width: ${Math.max(...styles.map(({ minimum }) => minimum))}px;
   }
-  ${styles.map(({ name, grid, table, columns, minimum }) => `.${name}-rows {
+  ${styles.map(({ name, grid, columns, minimum }) => {
+    // Leave rounding residue in the last growing track so the fixed actions track stays flush.
+    const tracks = columns.slice(0, -1).map(width => `calc(${width}px + var(--column-extra))`);
+    return `.${name}-rows {
     --growing-columns: ${columns.length};
     --table-tracks-width: ${minimum}px;
-    --table-padding-left: ${table.paddingLeft}px;
-    --table-padding-right: ${table.paddingRight}px;
   }
   .${grid} {
-    grid-template-columns: ${columns.map(width => `calc(${width}px + var(--column-extra))`).join(" ")} ${table.actions}px;
-  }`).join("\n")}`;
+    grid-template-columns: var(--table-drag-column) ${tracks.join(" ")} minmax(${columns[columns.length - 1]}px, 1fr) var(--table-actions-column);
+  }`;
+  }).join("\n")}`;
   document.head.appendChild(style);
 }

@@ -22,6 +22,8 @@ struct TableLayout {
     column_gap: u32,
     drag_column: u32,
     select_column: u32,
+    actions_column: u32,
+    table_inline_padding: u32,
     browser: Table,
     proxy: Table,
 }
@@ -30,9 +32,6 @@ struct TableLayout {
 #[serde(rename_all = "camelCase")]
 struct Table {
     columns: HashMap<String, u32>,
-    actions: u32,
-    padding_left: u32,
-    padding_right: u32,
 }
 
 impl TableLayout {
@@ -41,9 +40,8 @@ impl TableLayout {
             self.drag_column
                 + self.select_column
                 + table.columns.values().sum::<u32>()
-                + table.actions
-                + table.padding_left
-                + table.padding_right
+                + self.actions_column
+                + 2 * self.table_inline_padding
                 + (table.columns.len() as u32 + 2) * self.column_gap
         };
         table_width(&self.browser).max(table_width(&self.proxy))
@@ -194,14 +192,23 @@ mod tests {
         let mut layout: TableLayout = serde_json::from_value(serde_json::json!({
             "sidebarWidth": 200, "minimumSidePadding": 10, "scrollbarWidth": 10,
             "tableBorder": 1, "columnGap": 8, "dragColumn": 24, "selectColumn": 28,
-            "browser": {"columns": {"name": 100, "status": 40}, "actions": 60, "paddingLeft": 0, "paddingRight": 8},
-            "proxy": {"columns": {"name": 100, "type": 80}, "actions": 40, "paddingLeft": 8, "paddingRight": 8}
-        })).unwrap();
-        // The proxy table needs 320 pixels; window chrome adds 232.
-        assert_eq!(layout.minimum_window_width(), 552);
-        *layout.proxy.columns.get_mut("type").unwrap() += 20;
+            "actionsColumn": 60, "tableInlinePadding": 8,
+            "browser": {"columns": {"name": 100, "status": 40}},
+            "proxy": {"columns": {"name": 100, "type": 80}}
+        }))
+        .unwrap();
+        // The proxy table needs 340 pixels; window chrome adds 232.
         assert_eq!(layout.minimum_window_width(), 572);
-        *layout.browser.columns.get_mut("status").unwrap() += 60;
-        assert_eq!(layout.minimum_window_width(), 584);
+        *layout.proxy.columns.get_mut("type").unwrap() += 20;
+        assert_eq!(layout.minimum_window_width(), 592);
+        *layout.browser.columns.get_mut("status").unwrap() += 80;
+        assert_eq!(layout.minimum_window_width(), 612);
+    }
+
+    #[test]
+    fn production_layout_reserves_both_fixed_columns_and_symmetric_padding() {
+        let layout: TableLayout =
+            serde_json::from_str(include_str!("../../src/table-layout.json")).unwrap();
+        assert_eq!(layout.minimum_window_width(), 1286);
     }
 }

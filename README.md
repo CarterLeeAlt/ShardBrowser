@@ -383,8 +383,8 @@ EXE 与其旁侧的 `shardx-launcher` 数据目录一起移动。
 | 本地 HTTP 与 MCP | [`src-tauri/src/api.rs`](src-tauri/src/api.rs) 注册 HTTP 路由；[`openapi.yaml`](openapi.yaml) 描述 HTTP 契约；[`mcp/index.js`](mcp/index.js) 调用 HTTP 与 CDP | HTTP 随 Rust 测试验证；安装 `mcp/` 依赖后运行 `node scripts/check-mcp.mjs` |
 | 独立 SDK 与发布 | [`sdks/`](sdks/) 是三套独立发布的 SDK；[`.github/workflows/`](.github/workflows/) 定义持续集成、运行时归档和发行 | [`ci.yml`](.github/workflows/ci.yml)、`npm run check:versions` |
 
-调整表格列宽时只改 [`src/table-layout.json`](src/table-layout.json)；前端用它排列表格，
-Windows 窗口用同一份配置计算最小宽度。
+浏览器页和代理页共用固定的抓手列、操作列和等宽的左右留白；中间列分配剩余宽度。
+列宽和留白统一配置在 [`src/table-layout.json`](src/table-layout.json)，Windows 窗口也用它计算最小宽度。
 
 ### 首次启动
 
